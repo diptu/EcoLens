@@ -1,0 +1,8 @@
+fastapi
+Jinja2
+sqlalchemy
+# mysqlclient
+# PyMySQL
+mysql-connector-python
+python-dotenv
+uuid

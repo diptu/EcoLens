@@ -6,3 +6,6 @@ sqlalchemy
 mysql-connector-python
 python-dotenv
 uuid
+httpx
+pytest
+pytest-asyncio

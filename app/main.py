@@ -29,6 +29,11 @@ app = FastAPI()
 #     )
 
 
+@app.get("/")
+async def home():
+    return {"msg": "Hello World"}
+
+
 @app.get(
     "/emission/household_emission/vehicle_usage_metrics",
     response_model=List[schemas.VehicleUsagesView],

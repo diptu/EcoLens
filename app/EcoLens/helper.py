@@ -1,10 +1,15 @@
 import os
 from dotenv import load_dotenv
 
+# Specify the path to your environment file
+dotenv_path = os.path.join(
+    os.path.dirname(__file__), "environment", ".vehicle_usages_env"
+)
 
-def load_env_vars():
+
+def load_env_vars(path):
     """Loads environment variables from .env file into a dictionary."""
-    load_dotenv()
+    load_dotenv(path)
     env_vars = {
         "FLIGHT_EMISSIONS_PER_KM": float(
             os.getenv("FLIGHT_EMISSIONS_PER_KM"),
@@ -56,6 +61,6 @@ def load_env_vars():
 
 
 # Example usage:
-ENV = load_env_vars()
-# flight_emissions = ENV["FLIGHT_EMISSIONS_PER_KM"]
-# print(flight_emissions)
+ENV = load_env_vars(dotenv_path)
+flight_emissions = ENV["FLIGHT_EMISSIONS_PER_KM"]
+print(flight_emissions)

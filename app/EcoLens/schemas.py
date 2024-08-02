@@ -184,7 +184,7 @@ class VehicleUsages(BaseModel):
 
 
 class VehicleUsagesView(BaseModel):
-    """`TravelView` model is used for data validation and serialization/deserialization in Python."""
+    """`VehicleUsagesView` model is used for data validation and serialization/deserialization in Python."""
 
     # id: int = Field(description="unique identifier")
     flight_distance: float = Field(

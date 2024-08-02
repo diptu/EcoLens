@@ -51,19 +51,20 @@ class VehicleUsages(Base):
     """The `VehicleUsages` class defines a table structure for storing VehicleUsages-related data with columns for flight distance, public transit distance, number of gasoline cars, and custom validation using enums for units."""
 
     __tablename__ = "vehicle_usages"
-    # id = Column(
-    #     Integer,
-    #     primary_key=True,
-    #     comment="Unique identifier",
-    #     doc="Unique identifier for the VehicleUsages",
-    # )
     id = Column(
-        String(36),
+        Integer,
         primary_key=True,
-        default=str(uuid4()),
         comment="Unique identifier",
         doc="Unique identifier for the VehicleUsages",
     )
+
+    # id = Column(
+    #     String(36),
+    #     primary_key=True,
+    #     default=str(uuid4()),
+    #     comment="Unique identifier",
+    #     doc="Unique identifier for the VehicleUsages",
+    # )
 
     flight_distance = Column(
         FLOAT(precision=32, decimal_return_scale=None),

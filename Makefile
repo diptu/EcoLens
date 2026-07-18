@@ -84,3 +84,16 @@ deploy: ## Deploy with target validation.
 	@if [ -z "$(DEPLOY_TARGET)" ]; then echo "Usage: make deploy DEPLOY_TARGET=prod"; exit 1; fi
 	@echo "Deploying to $(DEPLOY_TARGET)..."
 	bash scripts/deploy.sh $(DEPLOY_TARGET)
+
+.PHONY: audit
+audit: ## Audit all services for undocumented TODOs
+	@bash scripts/audit_todos.sh
+
+.PHONY: list-todos
+list-todos: ## Print all TODOs from all services
+	@for f in TODO.md services/*/TODO.md; do \
+		[ -f "$$f" ] || continue; \
+		echo "── $$f ──"; \
+		grep -E '\[ECO-[A-Z0-9-]+\]' "$$f" || echo "  (no tagged TODOs)"; \
+		echo; \
+	done

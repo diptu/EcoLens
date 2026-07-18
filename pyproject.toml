@@ -1,0 +1,41 @@
+[project]
+name = "ecolens"
+version = "0.1.0"
+description = "ecoLens is a production-grade carbon-footprint platform for Australian energy consumers, analysts, and sustainability teams"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [
+    { name = "Nazmul Alam", email = "diptunazmulalam@gmail.com" }
+]
+dependencies = [
+    "fastapi[standard]>=0.139.2",
+    "gunicorn>=26.0.0",
+    "pre-commit>=4.6.0",
+    "pydantic>=2.13.4",
+    "uvicorn>=0.51.0",
+]
+
+
+[dependency-groups]
+dev = [
+    "mypy>=2.3.0",
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.15.22",
+]
+
+[tool.mypy]
+# Set the base for each service
+python_version = "3.12"
+namespace_packages = true
+explicit_package_bases = true
+# Mypy will now look for packages relative to these directories
+mypy_path = [
+    "services/forecast-api/src",
+    "services/data-pipeline/src"
+]
+
+# Tell Mypy to ignore the top-level directory and focus on src/
+[[tool.mypy.overrides]]
+module = "tests.*"
+ignore_missing_imports = true

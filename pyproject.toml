@@ -39,3 +39,8 @@ mypy_path = [
 [[tool.mypy.overrides]]
 module = "tests.*"
 ignore_missing_imports = true
+
+[tool.uv.workspace]
+members = [
+    "services/data-pipeline",
+]

@@ -14,6 +14,7 @@
 [![Type-checked: mypy](https://img.shields.io/badge/type%20checked-mypy-blue.svg)](http://mypy-lang.org/)
 [![FastAPI](https://img.shields.io/badge/API-FastAPI-009688.svg)](https://fastapi.tiangolo.com)
 [![Next.js 15](https://img.shields.io/badge/Frontend-Next.js%2015-black.svg)](https://nextjs.org)
+[![MongoDB 8.0+](https://img.shields.io/badge/mongodb-8.0%2B-green.svg)](https://www.mongodb.com/try/download/community)
 [![Prefect](https://img.shields.io/badge/Orchestration-Prefect-024dfd.svg)](https://prefect.io)
 [![PyTorch 2.x](https://img.shields.io/badge/ML-PyTorch%202.x-ee4c2c.svg)](https://pytorch.org)
 [![MLflow](https://img.shields.io/badge/Tracking-MLflow-0194E2.svg)](https://mlflow.org)

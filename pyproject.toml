@@ -39,3 +39,16 @@ mypy_path = [
 [[tool.mypy.overrides]]
 module = "tests.*"
 ignore_missing_imports = true
+
+# asyncpg ships no py.typed marker / stub package (used by both
+# data-pipeline's warehouse API and forecast-api's own db.py).
+[[tool.mypy.overrides]]
+module = "asyncpg.*"
+ignore_missing_imports = true
+
+# Not yet a `[tool.uv.workspace]`: services/data-pipeline/pyproject.toml
+# has no `[project]` table committed yet, and `uv` refuses to resolve a
+# workspace with a member missing one. Each service stays a fully
+# standalone `uv` project (its own `uv sync`/`uv run`, per the README)
+# until data-pipeline's pyproject.toml is filled in -- see forecast-api's
+# own README for how to run/test it standalone in the meantime.

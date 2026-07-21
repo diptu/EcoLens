@@ -71,8 +71,8 @@ test: check-env ## Run test suite with security checks.
 
 # ── Services ────────────────────────────────────────────────────────────────
 .PHONY: api
-api: ## Run API locally.
-	$(UV) run uvicorn ecolens.api.main:app --reload
+api: ## Run forecast-api locally.
+	cd services/forecast-api && $(UV) run uvicorn ecolens_forecast_api.main:app --reload --port 8003
 
 .PHONY: web
 web: ## Run Next.js (requires pnpm).

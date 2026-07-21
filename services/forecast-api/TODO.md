@@ -18,8 +18,19 @@
 ## ⚡ Performance & Scalability
 | Status | ID | Priority | Owner | Description |
 | :--- | :--- | :--- | :--- | :--- |
-| `[ ]` | **[ECO-P01]** | P1 | TBD | Implement Redis caching layer for `/forecast/latest`. |
 | `[ ]` | **[ECO-P02]** | P2 | TBD | Optimize SQLAlchemy async session scoped context. |
+
+## 🔮 Forecasting
+> `data-pipeline` owns model **training** + MLflow registration end-to-end
+> (root `TODO.md`'s forecasting section); `forecast-api` only ever
+> **loads and serves**. No model is registered yet, so `v1` ships a
+> seasonal-naive baseline (`forecasting/baseline.py`) computed directly
+> from `ml_features_demand_v1`'s precomputed lag columns -- a real,
+> working default, not a stub.
+| Status | ID | Priority | Owner | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `[ ]` | **[ECO-F04]** | P1 | TBD | Swap the baseline forecaster for a real model loader once data-pipeline's training pipeline (root `TODO.md` `ECO-108`..`ECO-119`) registers a Production model in MLflow -- same `ForecastResponse` contract, no route change. |
+| `[ ]` | **[ECO-F05]** | P2 | TBD | Once `ECO-114` (conformal calibration) lands upstream, replace the naive std-based P10/P90 band in `baseline.py`/the future model loader with real conformal intervals. |
 
 ## 🧪 Testing & Observability
 | Status | ID | Priority | Owner | Description |
@@ -44,3 +55,4 @@
 ## ✅ Recently Completed
 - [✓] **[ECO-F00]** Setup baseline FastAPI project structure.
 - [✓] **[ECO-F99]** Configure initial CI/CD pipeline.
+- [✓] **[ECO-P01]** Implement Redis caching layer for `/v1/forecast/{region}` (`cache.py`, wired into `routes.py`; no-ops safely when Redis is unconfigured/unreachable).

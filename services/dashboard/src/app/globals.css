@@ -1,0 +1,193 @@
+/**
+ * Global CSS for the dashboard app.
+ * Pulls in Tailwind + sets up the dark theme.
+ */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html, body {
+  background-color: #050a08;
+  color: #ffffff;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+}
+
+/* Selection */
+::selection {
+  background: rgba(132, 204, 22, 0.35);
+  color: #ffffff;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: #0a1410; }
+::-webkit-scrollbar-thumb { background: #1f2a26; border-radius: 8px; }
+::-webkit-scrollbar-thumb:hover { background: #2a3a33; }
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* CSS-only orbit (replaces GSAP tween for the hero).
+   60s rotation, linear, infinite. Composed with transform-origin
+   on the parent to rotate around the section center. */
+@keyframes hero-orbit-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+.hero-orbit {
+  animation: hero-orbit-spin 60s linear infinite;
+  transform-origin: 50% 50%;
+}
+
+/* CSS-only solutions-orbit (also replaces GSAP for /solutions) */
+@keyframes solutions-orbit-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+.solutions-orbit {
+  animation: solutions-orbit-spin 80s linear infinite;
+  transform-origin: 50% 50%;
+}
+.solutions-orbit-counter {
+  animation: solutions-orbit-spin 80s linear infinite reverse;
+}
+
+/* Subtle pulse for the Earth atmosphere (no blur) */
+@keyframes atmosphere-pulse {
+  0%, 100% { opacity: 0.55; }
+  50%      { opacity: 0.85; }
+}
+.atmosphere-pulse {
+  animation: atmosphere-pulse 6s ease-in-out infinite;
+}
+
+/* Slow Earth rotation */
+@keyframes earth-rotate {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+.earth-rotate {
+  animation: earth-rotate 120s linear infinite;
+}
+
+/* Reverse cloud layer */
+@keyframes cloud-drift {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(-360deg); }
+}
+.cloud-drift {
+  animation: cloud-drift 180s linear infinite;
+}
+
+/* Heart pulse */
+@keyframes heart-pulse {
+  0%, 100% { transform: scale(1);    opacity: 0.85; }
+  50%      { transform: scale(1.18); opacity: 1; }
+}
+.heart-pulse {
+  animation: heart-pulse 2.4s ease-in-out infinite;
+}
+
+/* Floating leaf gentle bob */
+@keyframes leaf-bob {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-12px); }
+}
+.leaf-bob { animation: leaf-bob 4s ease-in-out infinite; }
+
+/* Floating orbit (recycle/heart/drop) */
+@keyframes orbit-bob {
+  0%, 100% { transform: translateY(0)    scale(1); }
+  50%      { transform: translateY(-10px) scale(1.06); }
+}
+.orbit-bob { animation: orbit-bob 5s ease-in-out infinite; }
+
+/* Float for CTA sprouts, etc. */
+@keyframes float-slow {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-6px); }
+}
+.float-slow { animation: float-slow 4s ease-in-out infinite; }
+
+/* ──────── CSS-only above-the-fold entrance animations ────────
+   Used for the LCP text on the home page so the LCP text is
+   visible immediately (not blocked by Framer Motion hydration).
+   The animations are CSS-only and run on initial paint.
+   When JS hydrates, Framer Motion can take over for any
+   below-the-fold interactions. */
+
+@keyframes css-fade-up {
+  from { opacity: 0; transform: translateY(24px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.css-fade-up {
+  opacity: 0;
+  animation: css-fade-up 0.5s ease-out 0s forwards;
+}
+
+@keyframes css-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.css-fade-in {
+  opacity: 0;
+  animation: css-fade-in 0.5s ease-out forwards;
+}
+
+@keyframes css-fade-up-1 { from { opacity: 0; transform: translateY(24px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes css-fade-up-2 { from { opacity: 0; transform: translateY(24px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes css-fade-up-3 { from { opacity: 0; transform: translateY(24px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes css-fade-up-4 { from { opacity: 0; transform: translateY(24px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes css-fade-up-5 { from { opacity: 0; transform: translateY(24px); } to { opacity: 1; transform: translateY(0); } }
+.css-fade-up-1 { opacity: 0; animation: css-fade-up-1 0.5s ease-out 0.05s forwards; }
+.css-fade-up-2 { opacity: 0; animation: css-fade-up-2 0.5s ease-out 0.10s forwards; }
+.css-fade-up-3 { opacity: 0; animation: css-fade-up-3 0.5s ease-out 0.15s forwards; }
+.css-fade-up-4 { opacity: 0; animation: css-fade-up-4 0.5s ease-out 0.20s forwards; }
+.css-fade-up-5 { opacity: 0; animation: css-fade-up-5 0.5s ease-out 0.25s forwards; }
+
+/* Word reveal: blur in then settle. For the H1 words. */
+@keyframes css-word-reveal {
+  from { opacity: 0; filter: blur(8px); transform: translateY(16px); }
+  to   { opacity: 1; filter: blur(0); transform: translateY(0); }
+}
+.css-word-1 { opacity: 0; animation: css-word-reveal 0.5s ease-out 0.0s forwards; }
+.css-word-2 { opacity: 0; animation: css-word-reveal 0.5s ease-out 0.05s forwards; }
+.css-word-3 { opacity: 0; animation: css-word-reveal 0.5s ease-out 0.1s forwards; }
+
+@media (prefers-reduced-motion: reduce) {
+  .css-fade-up, .css-fade-in, .css-fade-up-1, .css-fade-up-2, .css-fade-up-3,
+  .css-fade-up-4, .css-fade-up-5, .css-word-1, .css-word-2, .css-word-3,
+  .nav-enter {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0.01ms !important;
+    opacity: 1 !important;
+    transform: none !important;
+  }
+}
+
+/* Navbar entrance — used by <Navbar> so the navbar is visible in
+   SSR'd HTML without depending on Framer Motion hydration. */
+@keyframes nav-enter {
+  from { opacity: 0; transform: translateY(-20px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.nav-enter {
+  animation: nav-enter 0.5s cubic-bezier(0.16, 1, 0.3, 1) 0s 1 both;
+}

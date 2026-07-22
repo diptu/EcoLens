@@ -75,6 +75,11 @@ docs/_build/
 .pybuilder/
 target/
 
+# dbt
+dbt_packages/
+.user.yml
+logs/
+
 # Jupyter Notebook
 .ipynb_checkpoints
 
@@ -120,6 +125,35 @@ celerybeat.pid
 
 # SageMath parsed files
 *.sage.py
+
+# Local ingestion cache (BomFetcher/HolidayFetcher tier-2 CSV fallback);
+# also holds the local MLflow SQLite tracking store + its default
+# mlruns/ artifact dir when no MLflow server is running (see
+# services/data-pipeline/.env's MLFLOW_TRACKING_URI).
+services/data-pipeline/data/
+
+# MLflow's default artifact root (<cwd>/mlruns) when no --default-artifact-root
+# is set -- lands wherever a given process's CWD happens to be (repo root for
+# `make api`, services/forecast-api for `make api-prod`, etc.), not just under
+# services/data-pipeline/data/ above.
+mlruns/
+# Ditto for mlflow's own default tracking store (<cwd>/mlflow.db) -- only
+# hit if mlflow.set_tracking_uri() is somehow skipped before a training/
+# tuning run (see cli.py's cmd_train/cmd_tune comments on this exact bug).
+mlflow.db
+
+# Node / Next.js (services/dashboard) -- no gitignore existed for this
+# service at all before, so node_modules/ (964MB, vendored JS) and the
+# static export output were about to get committed wholesale.
+node_modules/
+.next/
+out/
+.vercel/
+*.tsbuildinfo
+
+# macOS Finder metadata -- no pattern existed for this either; root
+# .DS_Store was already accidentally tracked (left as-is, not force-removed).
+.DS_Store
 
 # Environments
 .env

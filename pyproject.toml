@@ -19,10 +19,22 @@ dependencies = [
 [dependency-groups]
 dev = [
     "mypy>=2.3.0",
+    "pip-audit>=2.9.0",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
     "ruff>=0.15.22",
 ]
+
+[tool.pytest.ini_options]
+# `scripts/` holds standalone CLI utilities (e.g. test_mongo_connection.py is
+# run directly, not via pytest) — their test_*.py naming otherwise gets
+# swept up by pytest's default collection and fails on missing imports.
+# `.claude/` holds Claude Code tooling state, including git worktrees under
+# `.claude/worktrees/` that can contain their own full copies of a service's
+# tree (e.g. a not-yet-merged services/forecast-api/tests/) -- without this
+# exclusion, pytest collects both copies of same-named test modules (no
+# __init__.py disambiguates them) and errors with "import file mismatch".
+norecursedirs = ["scripts", ".venv", "node_modules", ".git", ".claude"]
 
 [tool.mypy]
 # Set the base for each service
@@ -40,7 +52,49 @@ mypy_path = [
 module = "tests.*"
 ignore_missing_imports = true
 
+# pandas' type-stub story is still immature project-wide (pandas-stubs
+# is a separate, partially-complete package) — standard practice for
+# pandas-heavy codebases is to treat it as untyped rather than either
+# blocking on "stubs not installed" or chasing full stub-driven
+# type-precision across every DataFrame call site.
+[[tool.mypy.overrides]]
+module = "pandas.*"
+ignore_missing_imports = true
+
+# asyncpg ships no py.typed marker / stub package as of the pinned version.
+[[tool.mypy.overrides]]
+module = "asyncpg.*"
+ignore_missing_imports = true
+
+# psycopg2-binary doesn't bundle a types-psycopg2 stub package either.
+[[tool.mypy.overrides]]
+module = "psycopg2.*"
+ignore_missing_imports = true
+
+# scipy's own stubs are split into a separate scipy-stubs package we don't
+# currently depend on; only mlops/drift.py's ks_2samp call needs scipy at all.
+[[tool.mypy.overrides]]
+module = "scipy.*"
+ignore_missing_imports = true
+
+# mlflow-skinny ships partial/best-effort type hints that don't fully agree
+# with its own runtime API surface (e.g. optional fields typed as required
+# in older stub revisions) -- treated the same as the other untyped-ish
+# infra clients above rather than fighting each mismatch as mlflow evolves.
+[[tool.mypy.overrides]]
+module = "mlflow.*"
+ignore_missing_imports = true
+
+# PyYAML's separate types-PyYAML stub package isn't a dependency here --
+# same "ignore rather than chase a separate stub package" treatment as
+# the untyped infra clients above; only search_space.py's safe_load call
+# needs it at all.
+[[tool.mypy.overrides]]
+module = "yaml.*"
+ignore_missing_imports = true
+
 [tool.uv.workspace]
 members = [
     "services/data-pipeline",
+    "services/forecast-api",
 ]

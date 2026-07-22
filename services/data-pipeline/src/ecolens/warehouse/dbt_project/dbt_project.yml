@@ -1,0 +1,47 @@
+name: "ecolens_warehouse"
+version: "1.0.0"
+config-version: 2
+
+profile: "ecolens_warehouse"
+require-dbt-version: [">=1.8.0", "<2.0.0"]
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+analysis-paths: ["analyses"]
+
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+# See werehouse.md for the design rationale behind these numbers.
+vars:
+  lookback_days: 5 # incremental re-processing window (late AEMO settlement data)
+  ml_feature_lags: 48 # 24h of 30-min lags -- matches Settings.model_lookback
+  ml_rolling_window_slots: 336 # 7 days * 48 slots/day, for the rolling avg/stddev features
+
+# Bootstraps `raw.*` tables (idempotent CREATE ... IF NOT EXISTS) so this
+# project is runnable before the MongoDB -> Postgres syncer described in
+# ingestion/INGESTION.md exists. Safe to run against an environment where
+# the real syncer already owns these tables.
+on-run-start:
+  - "{{ create_raw_schema() }}"
+
+models:
+  ecolens_warehouse:
+    staging:
+      +materialized: view
+      +tags: ["staging"]
+    intermediate:
+      +materialized: incremental
+      +on_schema_change: sync_all_columns
+      +tags: ["intermediate"]
+    marts:
+      +materialized: table
+      +tags: ["marts"]
+
+seeds:
+  ecolens_warehouse:
+    +tags: ["seed"]

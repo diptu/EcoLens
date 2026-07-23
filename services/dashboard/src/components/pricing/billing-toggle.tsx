@@ -83,6 +83,9 @@ export function useDefaultBillingPeriod(): [BillingPeriod, (next: BillingPeriod)
     if (typeof window === "undefined") return;
     const hash = window.location.hash.replace("#", "").toLowerCase();
     if (hash === "monthly" || hash === "annually") {
+      // One-time hydration from a browser-only API (URL hash) that doesn't
+      // exist during SSR -- there's no lazy-initializer alternative here.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setPeriod(hash as BillingPeriod);
       return;
     }

@@ -279,6 +279,7 @@ export function AuthButton({
   variant = "primary",
   className,
   fullWidth = true,
+  disabled = false,
   onClick,
 }: {
   children: React.ReactNode;
@@ -286,6 +287,7 @@ export function AuthButton({
   variant?: "primary" | "outline";
   className?: string;
   fullWidth?: boolean;
+  disabled?: boolean;
   onClick?: () => void;
 }) {
   const base =
@@ -296,8 +298,10 @@ export function AuthButton({
     <button
       type={type}
       onClick={onClick}
+      disabled={disabled}
       className={cn(
         "inline-flex items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm font-semibold transition-colors",
+        "disabled:cursor-not-allowed disabled:opacity-60",
         fullWidth && "w-full",
         base,
         className,

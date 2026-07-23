@@ -1,8 +1,10 @@
 name: CI
 
-# Lint + test the whole uv workspace (root + services/data-pipeline).
-# Mirrors `make lint` / `make test` exactly — if this fails, those
-# fail locally too, and vice versa.
+# Two independent jobs, one per stack -- neither triggers the other's
+# toolchain steps. lint-and-test mirrors `make lint`/`make test` for the
+# uv workspace (root + services/data-pipeline + services/forecast-api);
+# dashboard lints/tests/builds services/dashboard (Next.js, its own
+# pnpm-workspace.yaml, unrelated to the uv workspace above).
 
 on:
   push:
@@ -39,3 +41,36 @@ jobs:
 
       - name: Test (pytest + coverage + pip-audit)
         run: make test
+
+  dashboard:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/dashboard
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "pnpm"
+          cache-dependency-path: services/dashboard/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Unit tests
+        run: pnpm test
+
+      - name: Build (static export)
+        run: pnpm build

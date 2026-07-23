@@ -208,7 +208,16 @@ export function DonutChart({
   const R = size / 2 - thickness / 2;
   const C = 2 * Math.PI * R;
 
-  let offset = 0;
+  // Precompute each segment's cumulative offset before rendering -- mutating
+  // a variable inside .map() during render is unsafe under React's stricter
+  // render-purity rules (react-hooks/immutability).
+  const segments = data.reduce<{ len: number; offset: number }[]>((acc, d) => {
+    const len = (d.value / total) * C;
+    const offset = acc.length ? acc[acc.length - 1].offset + acc[acc.length - 1].len : 0;
+    acc.push({ len, offset });
+    return acc;
+  }, []);
+
   return (
     <div className={cn("relative inline-block", className)} style={{ width: size, height: size }}>
       <svg viewBox={`0 0 ${size} ${size}`} className="h-full w-full -rotate-90">
@@ -220,24 +229,19 @@ export function DonutChart({
           stroke="rgba(255,255,255,0.05)"
           strokeWidth={thickness}
         />
-        {data.map((d, i) => {
-          const len = (d.value / total) * C;
-          const seg = (
-            <circle
-              key={i}
-              cx={size / 2}
-              cy={size / 2}
-              r={R}
-              fill="none"
-              stroke={d.color ?? PALETTE.lime}
-              strokeWidth={thickness}
-              strokeDasharray={`${len} ${C - len}`}
-              strokeDashoffset={-offset}
-            />
-          );
-          offset += len;
-          return seg;
-        })}
+        {data.map((d, i) => (
+          <circle
+            key={i}
+            cx={size / 2}
+            cy={size / 2}
+            r={R}
+            fill="none"
+            stroke={d.color ?? PALETTE.lime}
+            strokeWidth={thickness}
+            strokeDasharray={`${segments[i].len} ${C - segments[i].len}`}
+            strokeDashoffset={-segments[i].offset}
+          />
+        ))}
       </svg>
       {(centerLabel || centerSub) && (
         <div className="absolute inset-0 flex flex-col items-center justify-center text-center">

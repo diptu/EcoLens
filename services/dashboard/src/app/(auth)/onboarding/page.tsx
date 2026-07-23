@@ -314,7 +314,7 @@ export default function OnboardingPage() {
       {step === 6 && (
         <div className="space-y-4">
           <p className="text-sm text-white/65">
-            Here's a quick summary of your setup. You can always update these later in settings.
+            Here&apos;s a quick summary of your setup. You can always update these later in settings.
           </p>
           {[
             { label: "Organization",   value: "EcoLens Technologies Ltd." },

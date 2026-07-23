@@ -2,6 +2,9 @@ import type { Metadata, Viewport } from "next";
 
 import "./globals.css";
 
+import { AuthProvider } from "@/lib/auth";
+import { QueryProvider } from "@/components/providers/query-provider";
+
 export const metadata: Metadata = {
   title: "EcoLens — Measure Today. Sustain Tomorrow.",
   description:
@@ -37,7 +40,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           }}
         />
       </head>
-      <body>{children}</body>
+      <body>
+        <QueryProvider>
+          <AuthProvider>{children}</AuthProvider>
+        </QueryProvider>
+      </body>
     </html>
   );
 }

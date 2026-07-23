@@ -24,7 +24,7 @@ import { CtaBanner } from "@/components/sections/cta-banner";
 import { IndustryGrid } from "@/components/sections/industry-grid";
 import { StatGrid } from "@/components/sections/stat-grid";
 import { StaggerContainer, MotionItem } from "@/components/motion/motion-section";
-import { fadeUp, cardHover, staggerContainer } from "@/lib/animations";
+import { fadeUp, staggerContainer } from "@/lib/animations";
 import { m } from "framer-motion";
 
 /* ─────────────────  Globe with industry icons (CSS-only)  ───────────────── */
@@ -219,7 +219,7 @@ export default function SolutionsPage() {
               <m.div
                 key={f.title}
                 variants={fadeUp}
-                whileHover={cardHover}
+                whileHover={{ y: -4, scale: 1.015 }}
                 className="group flex flex-col rounded-2xl border border-white/10 bg-white/[0.02] p-6 transition-colors hover:border-emerald-400/30"
               >
                 <div className="mb-4 grid h-12 w-12 place-items-center rounded-xl border border-emerald-400/20 bg-emerald-400/5 text-emerald-300">

@@ -20,6 +20,7 @@ import { Card } from "@/components/dashboard/card";
 import { KpiCard } from "@/components/dashboard/kpi-card";
 import { DataTable, Pill, NameCell, ActionsMenu } from "@/components/dashboard/data-table";
 import { LineChart, BarChart, DonutChart } from "@/components/dashboard/charts";
+import { LiveForecastCard } from "@/components/dashboard/live-forecast-card";
 import {
   ArrowUp,
   Calendar,
@@ -71,6 +72,9 @@ export default function DashboardHome() {
           />
         ))}
       </div>
+
+      {/* Live forecast (ECO-130: the one section here reading real data) */}
+      <LiveForecastCard />
 
       {/* Charts row */}
       <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">

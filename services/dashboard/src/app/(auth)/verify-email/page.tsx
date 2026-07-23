@@ -33,7 +33,7 @@ export default function VerifyEmailPage() {
           <MailCheck className="h-7 w-7" />
         </span>
         <p className="mt-4 text-sm text-white/70">
-          We've sent a verification link to
+          We&apos;ve sent a verification link to
         </p>
         <p className="mt-1 text-sm font-semibold text-white">
           diptu.alam@company.com
@@ -44,7 +44,7 @@ export default function VerifyEmailPage() {
       </div>
 
       <div className="rounded-lg border border-white/10 bg-white/[0.03] p-4">
-        <p className="text-sm font-semibold text-white">Haven't received the email?</p>
+        <p className="text-sm font-semibold text-white">Haven&apos;t received the email?</p>
         <p className="mt-1 text-xs text-white/55">
           Check your spam folder or resend the email.
         </p>

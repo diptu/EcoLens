@@ -151,6 +151,14 @@ out/
 .vercel/
 *.tsbuildinfo
 
+# The Python "Distribution / packaging" rule above (`lib/`) is the
+# standard gitignore.io Python template, meant for venv/build artifacts
+# -- but this is now a polyglot repo, and a bare `lib/` also silently
+# swallows services/dashboard/src/lib/, a real (and, discovered the hard
+# way, load-bearing -- every page imports from it) source directory.
+# Re-include it explicitly.
+!services/dashboard/src/lib/
+
 # macOS Finder metadata -- no pattern existed for this either; root
 # .DS_Store was already accidentally tracked (left as-is, not force-removed).
 .DS_Store

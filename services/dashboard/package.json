@@ -6,7 +6,7 @@
     "dev": "next dev -p 3000",
     "build": "next build",
     "start": "next start -p 3000",
-    "lint": "next lint",
+    "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -19,6 +19,7 @@
     "serve": "npx -y serve out -p 8000"
   },
   "dependencies": {
+    "@tanstack/react-query": "^5.101.4",
     "framer-motion": "^11.5.4",
     "gsap": "^3.12.5",
     "lucide-react": "^0.451.0",
@@ -36,6 +37,8 @@
     "@vitejs/plugin-react": "^6.0.3",
     "autoprefixer": "^10.4.20",
     "clsx": "^2.1.1",
+    "eslint": "^9",
+    "eslint-config-next": "^16.2.11",
     "jsdom": "^29.1.1",
     "postcss": "^8.4.45",
     "tailwind-merge": "^2.5.2",

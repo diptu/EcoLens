@@ -28,6 +28,7 @@ import { KpiCard } from "@/components/dashboard/kpi-card";
 import { Pill, ActionsMenu } from "@/components/dashboard/data-table";
 import { LineChart, BarChart, DonutChart } from "@/components/dashboard/charts";
 import { AnalyticsTabs } from "@/components/dashboard/analytics-tabs";
+import { LiveForecastCard } from "@/components/dashboard/live-forecast-card";
 
 export const metadata = { title: "Analytics — EcoLens" };
 
@@ -61,6 +62,9 @@ export default function AnalyticsPage() {
           <KpiCard key={k.id} label={k.label} value={k.value} unit={"unit" in k ? k.unit : undefined} sub={"sub" in k ? k.sub : undefined} trend={"trend" in k ? k.trend : undefined} />
         ))}
       </div>
+
+      {/* Live forecast (ECO-130: the one section here reading real data) */}
+      <LiveForecastCard />
 
       {/* Tabs */}
       <AnalyticsTabs />

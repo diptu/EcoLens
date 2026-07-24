@@ -28,6 +28,17 @@ poll the matching `GET .../{job_id}` (backed by
 `ecolens.shared.job_tracker`, shared with `forecasting.api`'s equivalent
 job-polling endpoint) to find out whether it's still running, finished,
 or failed.
+
+Every `_ingest_*_historical` function also mirrors its upserted batch
+into the local DuckDB historical store (`ingestion/storage/duckdb_store`,
+see TODO.md's ECO-158) right after the Mongo upsert -- best-effort, same
+as `scripts/backfill_bom_historical.py`: a DuckDB write failure logs a
+warning and doesn't fail the job, since the Mongo write already
+succeeded. This runs regardless of the `historical` flag (both the
+`MONGO_URI_HISTORICAL` and live-cluster paths land in the same DuckDB
+table), since the fetched rows are identical in shape either way and the
+whole point of the DuckDB copy is a durable, queryable record that
+survives `warehouse/runner/archive.py`'s Mongo TTL deletion.
 """
 
 from __future__ import annotations
@@ -48,6 +59,7 @@ from ecolens.ingestion.sources.bom import HistoricalFetcher
 from ecolens.ingestion.sources.bom.schema import HISTORICAL_TIMEOUT_SECONDS
 from ecolens.ingestion.sources.holidays import HolidayFetcher
 from ecolens.ingestion.sources.openelectricity import OpenElectricityFetcher
+from ecolens.ingestion.storage import duckdb_store
 from ecolens.ingestion.storage.mongo import bulk_upsert, get_db, get_historical_db
 from ecolens.ingestion.storage.settings import get_mongo_settings
 from ecolens.ingestion.validators.bom import validate as validate_bom
@@ -85,6 +97,33 @@ _TIME_FIELD: dict[Source, tuple[str, Literal["datetime", "string"]]] = {
 }
 
 _jobs = JobTracker()
+
+
+def _write_duckdb_best_effort(source: str, docs: list[dict], run_id: str) -> None:
+    """Mirror `docs` into the local DuckDB historical store, best-effort.
+
+    Called right after each `_ingest_*_historical` function's own Mongo
+    `bulk_upsert`, with the same `source` string passed to that call
+    (note: holidays upserts under Mongo collection key `"aemo_holidays"`,
+    not `"holidays"` -- callers must pass the same key here). A DuckDB
+    failure logs a warning rather than raising, since the Mongo write --
+    the job's actual success criterion -- already succeeded.
+    """
+    try:
+        written = duckdb_store.write_historical(source, docs)
+        log.info(
+            "ingestion.historical.duckdb_write_complete",
+            run_id=run_id,
+            source=source,
+            written=written,
+        )
+    except Exception as exc:  # noqa: BLE001 - best-effort, Mongo write already succeeded
+        log.warning(
+            "ingestion.historical.duckdb_write_failed",
+            run_id=run_id,
+            source=source,
+            error=str(exc),
+        )
 
 
 def _resolve_date_range(
@@ -165,6 +204,7 @@ async def _ingest_bom_historical(
         source="bom",
         upserted=upserted,
     )
+    _write_duckdb_best_effort("bom", docs, run_id)
     return upserted
 
 
@@ -209,6 +249,7 @@ async def _ingest_aemo_historical(
                     day=day.isoformat(),
                     upserted=upserted,
                 )
+                _write_duckdb_best_effort(source, docs, run_id)
             else:
                 log.warning(
                     "ingestion.historical.no_data",
@@ -284,6 +325,7 @@ async def _ingest_openelectricity_historical(
         source="openelectricity",
         upserted=upserted,
     )
+    _write_duckdb_best_effort("openelectricity", docs, run_id)
     return upserted
 
 
@@ -347,6 +389,7 @@ async def _ingest_holidays_historical(
             year=year,
             upserted=upserted,
         )
+        _write_duckdb_best_effort("aemo_holidays", docs, run_id)
 
     return upserted_total
 

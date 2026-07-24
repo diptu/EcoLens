@@ -276,6 +276,15 @@ class TestIngestBomHistorical:
         monkeypatch.setattr(api_module, "get_historical_db", lambda: object())
         bulk_upsert = AsyncMock(return_value=len(docs))
         monkeypatch.setattr(api_module, "bulk_upsert", bulk_upsert)
+        # Mocked in every _patch() across this file's TestIngest*Historical
+        # classes so a real DuckDB file never gets written as a side
+        # effect of running the test suite -- these classes call the
+        # _ingest_*_historical functions directly (not through the
+        # `client` fixture's tmp_path chdir), so without this the default
+        # historical_duckdb_path would resolve against pytest's real cwd.
+        monkeypatch.setattr(
+            api_module.duckdb_store, "write_historical", MagicMock(return_value=0)
+        )
 
         if validate_error:
             monkeypatch.setattr(
@@ -308,6 +317,33 @@ class TestIngestBomHistorical:
         await api_module._ingest_bom_historical(date(2026, 1, 1), date(2026, 1, 2))
         bulk_upsert.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_mirrors_upserted_docs_into_duckdb(self, monkeypatch):
+        docs = [{"station_id": "1", "ts": "t"}]
+        self._patch(monkeypatch, docs=docs)
+        await api_module._ingest_bom_historical(date(2026, 1, 1), date(2026, 1, 2))
+        api_module.duckdb_store.write_historical.assert_called_once()
+        call_args = api_module.duckdb_store.write_historical.call_args.args
+        assert call_args[0] == "bom"
+        assert call_args[1] == docs
+
+    @pytest.mark.asyncio
+    async def test_duckdb_failure_does_not_fail_the_job(self, monkeypatch):
+        bulk_upsert = self._patch(monkeypatch, docs=[{"station_id": "1", "ts": "t"}])
+        monkeypatch.setattr(
+            api_module.duckdb_store,
+            "write_historical",
+            MagicMock(side_effect=RuntimeError("disk full")),
+        )
+        upserted = await api_module._ingest_bom_historical(
+            date(2026, 1, 1), date(2026, 1, 2)
+        )
+        # The Mongo upsert (the job's actual success criterion) already
+        # succeeded -- a DuckDB write failure must not raise out of the
+        # ingest function or change its return value.
+        bulk_upsert.assert_called_once()
+        assert upserted == 1
+
 
 class TestIngestAemoHistorical:
     def _patch(self, monkeypatch, *, docs_by_day):
@@ -323,6 +359,9 @@ class TestIngestAemoHistorical:
         monkeypatch.setattr(api_module, "get_historical_db", lambda: object())
         bulk_upsert = AsyncMock(side_effect=lambda db, source, docs, run_id: len(docs))
         monkeypatch.setattr(api_module, "bulk_upsert", bulk_upsert)
+        monkeypatch.setattr(
+            api_module.duckdb_store, "write_historical", MagicMock(return_value=0)
+        )
         return bulk_upsert
 
     @pytest.mark.asyncio
@@ -341,6 +380,12 @@ class TestIngestAemoHistorical:
         await api_module._ingest_aemo_historical("aemo_nem", d1, d3)
         # d2 has no docs -> no upsert call for that day; d1 and d3 do.
         assert bulk_upsert.call_count == 2
+        # ... and DuckDB gets mirrored once per successful day too, same as Mongo.
+        assert api_module.duckdb_store.write_historical.call_count == 2
+        assert (
+            api_module.duckdb_store.write_historical.call_args_list[0].args[0]
+            == "aemo_nem"
+        )
 
     @pytest.mark.asyncio
     async def test_one_bad_day_does_not_abort_the_range(self, monkeypatch):
@@ -361,6 +406,9 @@ class TestIngestAemoHistorical:
         monkeypatch.setattr(api_module, "get_historical_db", lambda: object())
         bulk_upsert = AsyncMock(return_value=1)
         monkeypatch.setattr(api_module, "bulk_upsert", bulk_upsert)
+        monkeypatch.setattr(
+            api_module.duckdb_store, "write_historical", MagicMock(return_value=0)
+        )
 
         await api_module._ingest_aemo_historical("aemo_nem", d1, d2)
 
@@ -384,6 +432,9 @@ class TestIngestOpenelectricityHistorical:
         monkeypatch.setattr(api_module, "get_historical_db", lambda: object())
         bulk_upsert = AsyncMock(return_value=len(docs))
         monkeypatch.setattr(api_module, "bulk_upsert", bulk_upsert)
+        monkeypatch.setattr(
+            api_module.duckdb_store, "write_historical", MagicMock(return_value=0)
+        )
 
         if validate_error:
             monkeypatch.setattr(
@@ -439,6 +490,9 @@ class TestIngestHolidaysHistorical:
         monkeypatch.setattr(api_module, "get_historical_db", lambda: object())
         bulk_upsert = AsyncMock(side_effect=lambda db, source, docs, run_id: len(docs))
         monkeypatch.setattr(api_module, "bulk_upsert", bulk_upsert)
+        monkeypatch.setattr(
+            api_module.duckdb_store, "write_historical", MagicMock(return_value=0)
+        )
 
         if validate_error:
             monkeypatch.setattr(
@@ -481,6 +535,24 @@ class TestIngestHolidaysHistorical:
             date(2026, 1, 1), date(2026, 12, 31)
         )
         bulk_upsert.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_duckdb_write_uses_aemo_holidays_not_holidays(self, monkeypatch):
+        # Regression: bulk_upsert is called with source="aemo_holidays"
+        # (the Mongo collection key), not the API's "holidays" Source
+        # literal -- the DuckDB write must use the same key, or it would
+        # write/read against a table that MongoSettings.collection_for_source
+        # doesn't recognize.
+        self._patch(
+            monkeypatch, docs_by_year={2026: [{"region": "NSW", "date": "2026-01-01"}]}
+        )
+        await api_module._ingest_holidays_historical(
+            date(2026, 1, 1), date(2026, 12, 31)
+        )
+        api_module.duckdb_store.write_historical.assert_called_once()
+        assert api_module.duckdb_store.write_historical.call_args.args[0] == (
+            "aemo_holidays"
+        )
 
 
 class _FakeAsyncCursor:

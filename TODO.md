@@ -37,24 +37,39 @@ bucket the repo already provisions (`s3_bucket_raw` in `config.py`) via its
 `httpfs` extension — so ad-hoc historical queries (drift investigations,
 "what did AEMO report before a settlement correction") never have to touch
 live Mongo/Postgres.
-- [✓] [ECO-158] **Historical-backfill DuckDB store landed (ingestion layer,
-  BoM only).** `ingestion/storage/duckdb_store.py` — `write_historical()`/
+- [✓] [ECO-158] **Historical-backfill DuckDB store landed (both the CLI
+  script and the real `/ingestion/historical` API, all 5 sources).**
+  `ingestion/storage/duckdb_store.py` — `write_historical()`/
   `read_historical()`, one table per source (named after
   `MongoSettings.collection_for_source`), upserted on
   `MongoSettings.unique_key_for_source` so re-running a backfill is
   idempotent. `HistoricalFetcher.write_duckdb()` (bom/historical.py) owns
-  the call, mirroring the existing `write_cache()` method; wired into
-  `scripts/backfill_bom_historical.py` right after its Mongo `bulk_upsert`
-  (best-effort — a DuckDB failure logs a warning and doesn't fail the
-  run, since the Mongo write already succeeded).
+  the call for `scripts/backfill_bom_historical.py`, mirroring the
+  existing `write_cache()` method. Separately, `ingestion/api.py`'s real
+  `POST /ingestion/historical` endpoint (landed on `dev` via "feat
+  (ingestion): Ingestion v0.0.1", commit 8c994cd -- a whole 712-line
+  router with job-id-based background processing that this branch had
+  missed until it was merged in here) writes to a *separate*
+  `MONGO_URI_HISTORICAL` cluster and, until this fix, never touched
+  DuckDB at all -- confirmed live: a job triggered before this landed
+  (`job_id=f257467d50184a60a824992e3db9a72e`) has no DuckDB rows. Added
+  `_write_duckdb_best_effort()` in `ingestion/api.py`, called from all
+  four `_ingest_*_historical` functions (bom, aemo_nem/wem,
+  openelectricity, holidays) right after their `bulk_upsert`, using each
+  function's actual Mongo collection key (holidays upserts under
+  `"aemo_holidays"`, not `"holidays"` -- covered by a regression test).
+  Runs regardless of the `historical` flag, so `/ingestion/retry-missing`
+  (live-cluster repairs) also lands in DuckDB.
   `duckdb` added to `services/data-pipeline/pyproject.toml`; new
   `Settings.historical_duckdb_path` (default `data/historical/`, same
   local-disk convention as `bom_cache_dir`/`training_snapshot_dir`). Tests
-  in `tests/test_ingestion_storage_duckdb.py`. This is a **single-file
-  upsert store**, not the partitioned-Parquet cold store ECO-150 below
-  describes, and it's only wired into the BoM historical-backfill path —
-  not the live per-source fetchers, and not `ArchiveManager`. ECO-150
-  should extend/reuse this module rather than starting a new one.
+  in `tests/test_ingestion_storage_duckdb.py`,
+  `tests/test_bom_historical.py::TestWriteDuckdb`, and
+  `tests/test_ingestion_api.py`'s `TestIngest*Historical` classes. This
+  is a **single-file upsert store**, not the partitioned-Parquet cold
+  store ECO-150 below describes, and it's not wired into
+  `ArchiveManager`. ECO-150 should extend/reuse this module rather than
+  starting a new one.
 - [ ] [ECO-150] **Add a `DuckDBArchiveStore` writer for `ArchiveManager`.**
   Extend `ingestion/storage/duckdb_store.py` (see ECO-158 — reuse it,
   don't fork it) or add a sibling in `warehouse/runner/` that writes a

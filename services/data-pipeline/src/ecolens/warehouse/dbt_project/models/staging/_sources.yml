@@ -1,0 +1,98 @@
+version: 2
+
+sources:
+  - name: raw
+    description: >
+      Structured landing tables populated by the MongoDB -> PostgreSQL
+      syncer described in ingestion/INGESTION.md. That syncer isn't
+      implemented yet in this repo -- `create_raw_schema()` (an
+      on-run-start macro) bootstraps empty tables with this same
+      contract so the dbt project is runnable before it exists.
+    schema: raw
+    loader: ecolens-ingestion-syncer
+    loaded_at_field: fetched_at
+    tables:
+      - name: aemo_nem_dispatch
+        description: >
+          AEMO NEM 5-minute per-region dispatch data (NSW1, QLD1, VIC1,
+          SA1, TAS1) plus one network-level "NEM" aggregate row per ts
+          (see ingestion/sources/aemo_nem/engine.py) -- the per-region
+          staging model (stg_aemo_nem_dispatch) filters "NEM" back out.
+          Same 34-column v1.0 schema as openelectricity_responses.
+        freshness:
+          warn_after: { count: 45, period: minute }
+          error_after: { count: 120, period: minute }
+        columns:
+          - name: ts
+            description: Dispatch interval timestamp, UTC.
+            tests: [not_null]
+          - name: region
+            tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: ["NSW1", "QLD1", "VIC1", "SA1", "TAS1", "NEM"]
+
+      - name: aemo_wem_dispatch
+        description: >
+          AEMO WEM 30-minute dispatch data for the single WEM (South
+          West Interconnected System) zone.
+        freshness:
+          warn_after: { count: 45, period: minute }
+          error_after: { count: 120, period: minute }
+        columns:
+          - name: ts
+            description: 30-minute trading interval timestamp, UTC.
+            tests: [not_null]
+          - name: region
+            tests:
+              - accepted_values:
+                  arguments:
+                    values: ["WEM"]
+
+      - name: openelectricity_responses
+        description: >
+          OpenElectricity (OpenNEM) network-level power/market data for
+          NEM and WEM. Not per-region -- see werehouse.md's grain notes.
+        freshness:
+          warn_after: { count: 45, period: minute }
+          error_after: { count: 120, period: minute }
+        columns:
+          - name: ts
+            tests: [not_null]
+          - name: network_code
+            tests:
+              - accepted_values:
+                  arguments:
+                    values: ["NEM", "WEM"]
+
+      - name: bom_observations
+        description: >
+          BoM weather observations, one row per station per 30-minute
+          slot (or Open-Meteo ERA5 historical backfill rows using the
+          same schema).
+        freshness:
+          warn_after: { count: 120, period: minute }
+          error_after: { count: 360, period: minute }
+        columns:
+          - name: ts
+            tests: [not_null]
+          - name: station_id
+            tests: [not_null]
+          - name: region
+            tests:
+              - accepted_values:
+                  arguments:
+                    values: ["NSW1", "QLD1", "VIC1", "SA1", "TAS1", "WEM"]
+
+      - name: aemo_holidays
+        description: Public holiday calendar per NEM/WEM region.
+        loaded_at_field: fetched_at
+        freshness:
+          warn_after: { count: 10, period: day }
+          error_after: { count: 30, period: day }
+        columns:
+          - name: date
+            tests: [not_null]
+          - name: region
+            tests: [not_null]

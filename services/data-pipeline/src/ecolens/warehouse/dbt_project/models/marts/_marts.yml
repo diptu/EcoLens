@@ -1,0 +1,101 @@
+version: 2
+
+models:
+  - name: dim_region
+    description: The 6 NEM/WEM regions with state code, population, and IANA timezone.
+    columns:
+      - name: region
+        tests: [not_null, unique]
+
+  - name: dim_holiday
+    description: Public holiday calendar per NEM/WEM region.
+    columns:
+      - name: date
+        tests: [not_null]
+      - name: region
+        tests: [not_null]
+
+  - name: fact_demand_30min
+    description: >
+      The main mart: demand, generation mix, weather, and the holiday
+      flag on one wide 30-min-grain table per region. Read directly by
+      the warehouse API and the forecast-api.
+    columns:
+      - name: ts_30
+        tests: [not_null]
+      - name: region
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref("dim_region")
+                field: region
+      - name: is_holiday
+        tests: [not_null]
+
+  - name: fact_generation_30min
+    description: Generation-mix-focused subset of fact_demand_30min.
+    columns:
+      - name: ts_30
+        tests: [not_null]
+      - name: region
+        tests: [not_null]
+
+  - name: ml_features_demand_v1
+    description: >
+      Master feature table for the PyTorch LSTM demand model: 48 lagged
+      demand values, 7-day rolling mean/stddev, market + grid-mix
+      covariates (price, renewables, emissions, net imports), the full
+      10-column weather set, holiday/weekend flags, and cyclical
+      time-of-day/day-of-week/month encodings -- one row per (region,
+      ts_30) on a uniform, gap-free 30-min grid (see
+      int_energy_filled_30min). No NULLs except the lag columns' first
+      `ml_feature_lags` rows per region, which is a training-set
+      boundary condition, not missing data.
+    columns:
+      - name: ts_30
+        tests: [not_null]
+      - name: region
+        tests: [not_null]
+      - name: demand_mw
+        tests: [not_null]
+      - name: price_mwh
+        tests: [not_null]
+      - name: renewable_proportion
+        tests: [not_null]
+      - name: emissions_intensity_kgco2e_per_mwh
+        tests: [not_null]
+      - name: temp_c
+        tests: [not_null]
+      - name: is_holiday
+        tests: [not_null]
+      - name: is_weekend
+        tests: [not_null]
+      - name: hour_sin
+        tests: [not_null]
+      - name: is_gap_filled
+        tests: [not_null]
+
+  - name: mv_daily_national_demand
+    description: Materialized view, one row per day per region.
+    columns:
+      - name: date_local
+        tests: [not_null]
+      - name: region
+        tests: [not_null]
+
+  - name: mv_regional_generation_share
+    description: Materialized view, renewable proportion per day per region.
+    columns:
+      - name: date_local
+        tests: [not_null]
+      - name: region
+        tests: [not_null]
+
+  - name: mv_weekly_demand_summary
+    description: Materialized view, weekly demand summary per region.
+    columns:
+      - name: week_start
+        tests: [not_null]
+      - name: region
+        tests: [not_null]

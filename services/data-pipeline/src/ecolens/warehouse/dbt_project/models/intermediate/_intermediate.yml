@@ -1,0 +1,48 @@
+version: 2
+
+models:
+  - name: int_energy_unified_30min
+    description: >
+      AEMO NEM + AEMO WEM unified onto a single 30-min grain per
+      region. Incremental, 5-day lookback (late-arriving AEMO
+      settlement data).
+    columns:
+      - name: region
+        tests: [not_null]
+      - name: ts_30
+        tests: [not_null]
+
+  - name: int_energy_with_weather
+    description: >
+      int_energy_unified_30min joined to BoM weather (30-min averaged)
+      and the public-holiday calendar (resolved to each region's local
+      date). Incremental, 5-day lookback.
+    columns:
+      - name: region
+        tests: [not_null]
+      - name: ts_30
+        tests: [not_null]
+      - name: is_holiday
+        tests: [not_null]
+
+  - name: int_energy_filled_30min
+    description: >
+      int_energy_with_weather resampled onto a gap-free, uniform 30-min
+      grid per region, with every energy/weather metric LOCF-filled so
+      there are no NULLs and no missing timestamps. This is what
+      ml_features_demand_v1 is built from; see the model's own header
+      comment for the fill algorithm. Filled rows are flagged via
+      `is_gap_filled` and `data_quality_status = 'imputed'`.
+    columns:
+      - name: region
+        tests: [not_null]
+      - name: ts_30
+        tests: [not_null]
+      - name: is_holiday
+        tests: [not_null]
+      - name: is_gap_filled
+        tests: [not_null]
+      - name: demand_mw
+        tests: [not_null]
+      - name: temp_c
+        tests: [not_null]

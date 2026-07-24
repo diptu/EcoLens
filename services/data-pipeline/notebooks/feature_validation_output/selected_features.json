@@ -1,0 +1,827 @@
+{
+  "generated_from": {
+    "start_date": "2026-01-01",
+    "end_date": "2026-07-01",
+    "region": null,
+    "model_horizon": 48,
+    "rows_analyzed": 18836
+  },
+  "selected_features": [
+    "demand_mw",
+    "dow_cos",
+    "hour_cos",
+    "hour_sin",
+    "total_generation_mw",
+    "temp_c",
+    "pressure_hpa",
+    "dew_point_c",
+    "wind_direction_deg",
+    "dow_sin",
+    "price_mwh",
+    "apparent_temp_c",
+    "net_import_mw",
+    "wind_gust_kmh",
+    "wind_speed_kmh",
+    "humidity_pct",
+    "cloud_cover_pct",
+    "renewable_proportion",
+    "month_sin",
+    "month_cos",
+    "is_holiday",
+    "renewable_generation_mw"
+  ],
+  "dropped_features": [
+    {
+      "column": "is_business_day",
+      "reason": "near-zero variance in this window"
+    },
+    {
+      "column": "market_value",
+      "reason": "100% missing in this window -- never present"
+    },
+    {
+      "column": "coal_brown_mw",
+      "reason": "100% missing in this window -- never present"
+    },
+    {
+      "column": "gas_other_mw",
+      "reason": "100% missing in this window -- never present"
+    },
+    {
+      "column": "hydro_mw",
+      "reason": "100% missing in this window -- never present"
+    },
+    {
+      "column": "pumped_hydro_mw",
+      "reason": "100% missing in this window -- never present"
+    },
+    {
+      "column": "solar_rooftop_mw",
+      "reason": "100% missing in this window -- never present"
+    },
+    {
+      "column": "distillate_mw",
+      "reason": "100% missing in this window -- never present"
+    },
+    {
+      "column": "curtailment_solar_utility_mw",
+      "reason": "100% missing in this window -- never present"
+    },
+    {
+      "column": "curtailment_wind_mw",
+      "reason": "100% missing in this window -- never present"
+    },
+    {
+      "column": "emissions_intensity_kgco2e_per_mwh",
+      "reason": "100% missing in this window -- never present"
+    },
+    {
+      "column": "rain_last_hour_mm",
+      "reason": "100% missing in this window -- never present"
+    },
+    {
+      "column": "oe_demand_mw",
+      "reason": "100% missing in this window -- never present"
+    },
+    {
+      "column": "oe_price_mwh",
+      "reason": "100% missing in this window -- never present"
+    },
+    {
+      "column": "oe_market_value",
+      "reason": "100% missing in this window -- never present"
+    },
+    {
+      "column": "oe_coal_black_mw",
+      "reason": "100% missing in this window -- never present"
+    },
+    {
+      "column": "oe_coal_brown_mw",
+      "reason": "100% missing in this window -- never present"
+    },
+    {
+      "column": "oe_gas_ccgt_mw",
+      "reason": "100% missing in this window -- never present"
+    },
+    {
+      "column": "oe_gas_ocgt_mw",
+      "reason": "100% missing in this window -- never present"
+    },
+    {
+      "column": "oe_gas_other_mw",
+      "reason": "100% missing in this window -- never present"
+    },
+    {
+      "column": "oe_hydro_mw",
+      "reason": "100% missing in this window -- never present"
+    },
+    {
+      "column": "oe_pumped_hydro_mw",
+      "reason": "100% missing in this window -- never present"
+    },
+    {
+      "column": "oe_wind_mw",
+      "reason": "100% missing in this window -- never present"
+    },
+    {
+      "column": "oe_solar_utility_mw",
+      "reason": "100% missing in this window -- never present"
+    },
+    {
+      "column": "oe_solar_rooftop_mw",
+      "reason": "100% missing in this window -- never present"
+    },
+    {
+      "column": "oe_biomass_mw",
+      "reason": "100% missing in this window -- never present"
+    },
+    {
+      "column": "oe_distillate_mw",
+      "reason": "100% missing in this window -- never present"
+    },
+    {
+      "column": "oe_battery_discharge_mw",
+      "reason": "100% missing in this window -- never present"
+    },
+    {
+      "column": "oe_battery_charge_mw",
+      "reason": "100% missing in this window -- never present"
+    },
+    {
+      "column": "oe_curtailment_solar_utility_mw",
+      "reason": "100% missing in this window -- never present"
+    },
+    {
+      "column": "oe_curtailment_wind_mw",
+      "reason": "100% missing in this window -- never present"
+    },
+    {
+      "column": "oe_total_generation_mw",
+      "reason": "100% missing in this window -- never present"
+    },
+    {
+      "column": "oe_renewable_proportion",
+      "reason": "100% missing in this window -- never present"
+    },
+    {
+      "column": "oe_emissions_intensity_kgco2e_per_mwh",
+      "reason": "100% missing in this window -- never present"
+    },
+    {
+      "column": "oe_interconnector_imports_mw",
+      "reason": "100% missing in this window -- never present"
+    },
+    {
+      "column": "oe_interconnector_exports_mw",
+      "reason": "100% missing in this window -- never present"
+    },
+    {
+      "column": "oe_net_import_mw",
+      "reason": "100% missing in this window -- never present"
+    }
+  ],
+  "not_selected_candidates": [
+    {
+      "column": "coal_black_mw",
+      "reason": "insufficient signal to add"
+    },
+    {
+      "column": "interconnector_exports_mw",
+      "reason": "insufficient signal to add"
+    },
+    {
+      "column": "interconnector_imports_mw",
+      "reason": "insufficient signal to add"
+    },
+    {
+      "column": "solar_utility_mw",
+      "reason": "insufficient signal to add"
+    },
+    {
+      "column": "cloud_oktas",
+      "reason": "insufficient signal to add"
+    },
+    {
+      "column": "battery_charge_mw",
+      "reason": "insufficient signal to add"
+    },
+    {
+      "column": "rain_since_9am_mm",
+      "reason": "insufficient signal to add"
+    },
+    {
+      "column": "is_weekend",
+      "reason": "insufficient signal to add"
+    },
+    {
+      "column": "battery_discharge_mw",
+      "reason": "insufficient signal to add"
+    },
+    {
+      "column": "wind_mw",
+      "reason": "insufficient signal to add"
+    },
+    {
+      "column": "gas_ccgt_mw",
+      "reason": "insufficient signal to add"
+    },
+    {
+      "column": "gas_ocgt_mw",
+      "reason": "insufficient signal to add"
+    },
+    {
+      "column": "biomass_mw",
+      "reason": "insufficient signal to add"
+    },
+    {
+      "column": "is_observed",
+      "reason": "insufficient signal to add"
+    }
+  ],
+  "stats": {
+    "demand_mw": {
+      "missing_pct": 0.0,
+      "missing_pct_NEM": 0.0,
+      "missing_pct_WEM": 0.0,
+      "corr_vs_target_at_horizon": 0.9873003398012106,
+      "mutual_info": 1.6407560888546149,
+      "rf_importance": 0.9874108764068427
+    },
+    "dow_cos": {
+      "missing_pct": 0.0,
+      "missing_pct_NEM": 0.0,
+      "missing_pct_WEM": 0.0,
+      "corr_vs_target_at_horizon": 0.0293764884497591,
+      "mutual_info": 0.006753076521408996,
+      "rf_importance": 0.0018147357892000864
+    },
+    "hour_cos": {
+      "missing_pct": 0.0,
+      "missing_pct_NEM": 0.0,
+      "missing_pct_WEM": 0.0,
+      "corr_vs_target_at_horizon": 0.027056584773638183,
+      "mutual_info": 0.1855752039272196,
+      "rf_importance": 0.0013633956224858856
+    },
+    "hour_sin": {
+      "missing_pct": 0.0,
+      "missing_pct_NEM": 0.0,
+      "missing_pct_WEM": 0.0,
+      "corr_vs_target_at_horizon": -0.04465330790625937,
+      "mutual_info": 0.15687651864447894,
+      "rf_importance": 0.0009513276753326486
+    },
+    "total_generation_mw": {
+      "missing_pct": 53.62,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 0.0,
+      "corr_vs_target_at_horizon": 0.7676491344401479,
+      "mutual_info": 0.4998247853762017,
+      "rf_importance": 0.0009238320973744141
+    },
+    "temp_c": {
+      "missing_pct": 0.0,
+      "missing_pct_NEM": 0.0,
+      "missing_pct_WEM": 0.0,
+      "corr_vs_target_at_horizon": -0.11734278450901439,
+      "mutual_info": 0.38016404718001784,
+      "rf_importance": 0.0008997498540801685
+    },
+    "pressure_hpa": {
+      "missing_pct": 0.0,
+      "missing_pct_NEM": 0.0,
+      "missing_pct_WEM": 0.0,
+      "corr_vs_target_at_horizon": 0.283122983206155,
+      "mutual_info": 0.33027436296883206,
+      "rf_importance": 0.0007509888089239839
+    },
+    "dew_point_c": {
+      "missing_pct": 0.0,
+      "missing_pct_NEM": 0.0,
+      "missing_pct_WEM": 0.0,
+      "corr_vs_target_at_horizon": 0.09994313929388864,
+      "mutual_info": 0.18637230564829732,
+      "rf_importance": 0.0007146084357616592
+    },
+    "wind_direction_deg": {
+      "missing_pct": 0.0,
+      "missing_pct_NEM": 0.0,
+      "missing_pct_WEM": 0.0,
+      "corr_vs_target_at_horizon": 0.10927262205759221,
+      "mutual_info": 0.3064155976233005,
+      "rf_importance": 0.0006402027040931762
+    },
+    "dow_sin": {
+      "missing_pct": 0.0,
+      "missing_pct_NEM": 0.0,
+      "missing_pct_WEM": 0.0,
+      "corr_vs_target_at_horizon": 0.0324256177430608,
+      "mutual_info": 0.01849245809983735,
+      "rf_importance": 0.0005924201533805338
+    },
+    "price_mwh": {
+      "missing_pct": 0.01,
+      "missing_pct_NEM": 0.0,
+      "missing_pct_WEM": 0.01,
+      "corr_vs_target_at_horizon": -0.02285354787689624,
+      "mutual_info": 0.23611897361512657,
+      "rf_importance": 0.0004984170879367976
+    },
+    "apparent_temp_c": {
+      "missing_pct": 0.0,
+      "missing_pct_NEM": 0.0,
+      "missing_pct_WEM": 0.0,
+      "corr_vs_target_at_horizon": -0.0911213338511202,
+      "mutual_info": 0.34022605324894784,
+      "rf_importance": 0.0004878716338043917
+    },
+    "net_import_mw": {
+      "missing_pct": 0.0,
+      "missing_pct_NEM": 0.0,
+      "missing_pct_WEM": 0.0,
+      "corr_vs_target_at_horizon": -0.12184644632018879,
+      "mutual_info": 0.6731933400560566,
+      "rf_importance": 0.00030212036104431767
+    },
+    "wind_gust_kmh": {
+      "missing_pct": 0.0,
+      "missing_pct_NEM": 0.0,
+      "missing_pct_WEM": 0.0,
+      "corr_vs_target_at_horizon": -0.1369607434322855,
+      "mutual_info": 0.14661901117073928,
+      "rf_importance": 0.0002940834314704617
+    },
+    "wind_speed_kmh": {
+      "missing_pct": 0.0,
+      "missing_pct_NEM": 0.0,
+      "missing_pct_WEM": 0.0,
+      "corr_vs_target_at_horizon": -0.07612323136330906,
+      "mutual_info": 0.15712524560591756,
+      "rf_importance": 0.0002334398253829988
+    },
+    "humidity_pct": {
+      "missing_pct": 0.0,
+      "missing_pct_NEM": 0.0,
+      "missing_pct_WEM": 0.0,
+      "corr_vs_target_at_horizon": 0.2159061924573057,
+      "mutual_info": 0.20093857699904039,
+      "rf_importance": 0.0002231615531058038
+    },
+    "cloud_cover_pct": {
+      "missing_pct": 0.0,
+      "missing_pct_NEM": 0.0,
+      "missing_pct_WEM": 0.0,
+      "corr_vs_target_at_horizon": 0.0955628880638018,
+      "mutual_info": 0.15266328282784514,
+      "rf_importance": 0.0001332207211527067
+    },
+    "renewable_proportion": {
+      "missing_pct": 53.62,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 0.0,
+      "corr_vs_target_at_horizon": -0.43369616796226235,
+      "mutual_info": 0.1619165913134939,
+      "rf_importance": 8.961004512371473e-05
+    },
+    "month_sin": {
+      "missing_pct": 0.0,
+      "missing_pct_NEM": 0.0,
+      "missing_pct_WEM": 0.0,
+      "corr_vs_target_at_horizon": -0.3442894427562635,
+      "mutual_info": 0.2172712722563932,
+      "rf_importance": 3.0187860599148698e-05
+    },
+    "month_cos": {
+      "missing_pct": 0.0,
+      "missing_pct_NEM": 0.0,
+      "missing_pct_WEM": 0.0,
+      "corr_vs_target_at_horizon": -0.31429782756393065,
+      "mutual_info": 0.2732952936083417,
+      "rf_importance": 2.7250143035383317e-05
+    },
+    "is_holiday": {
+      "missing_pct": 0.0,
+      "missing_pct_NEM": 0.0,
+      "missing_pct_WEM": 0.0,
+      "corr_vs_target_at_horizon": -0.06510534325833085,
+      "mutual_info": 0.006438324520967154,
+      "rf_importance": 3.219840745875073e-06
+    },
+    "renewable_generation_mw": {
+      "missing_pct": null,
+      "missing_pct_NEM": null,
+      "missing_pct_WEM": null,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    },
+    "coal_black_mw": {
+      "missing_pct": 53.62,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 0.0,
+      "corr_vs_target_at_horizon": 0.5352305910135235,
+      "mutual_info": 0.24352354134258558,
+      "rf_importance": 0.00033268703634855337
+    },
+    "interconnector_exports_mw": {
+      "missing_pct": 0.0,
+      "missing_pct_NEM": 0.0,
+      "missing_pct_WEM": 0.0,
+      "corr_vs_target_at_horizon": 0.5205023599890009,
+      "mutual_info": 0.26946916056610926,
+      "rf_importance": 0.00026138287566187683
+    },
+    "interconnector_imports_mw": {
+      "missing_pct": 0.0,
+      "missing_pct_NEM": 0.0,
+      "missing_pct_WEM": 0.0,
+      "corr_vs_target_at_horizon": 0.34658560207457845,
+      "mutual_info": 0.3271329121450526,
+      "rf_importance": 0.00017190225103501491
+    },
+    "solar_utility_mw": {
+      "missing_pct": 53.62,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 0.0,
+      "corr_vs_target_at_horizon": -0.22551469846446448,
+      "mutual_info": 0.17147290776915902,
+      "rf_importance": 0.00015694571340973458
+    },
+    "cloud_oktas": {
+      "missing_pct": 0.0,
+      "missing_pct_NEM": 0.0,
+      "missing_pct_WEM": 0.0,
+      "corr_vs_target_at_horizon": 0.09556288806380175,
+      "mutual_info": 0.15266328282784514,
+      "rf_importance": 0.00014174231757425583
+    },
+    "battery_charge_mw": {
+      "missing_pct": 53.62,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 0.0,
+      "corr_vs_target_at_horizon": -0.3490576654370075,
+      "mutual_info": 0.11969085459433959,
+      "rf_importance": 0.00011467022817746732
+    },
+    "rain_since_9am_mm": {
+      "missing_pct": 0.0,
+      "missing_pct_NEM": 0.0,
+      "missing_pct_WEM": 0.0,
+      "corr_vs_target_at_horizon": 0.021403590073547443,
+      "mutual_info": 0.027891171918787316,
+      "rf_importance": 8.65801234488584e-05
+    },
+    "is_weekend": {
+      "missing_pct": 0.0,
+      "missing_pct_NEM": 0.0,
+      "missing_pct_WEM": 0.0,
+      "corr_vs_target_at_horizon": -0.01958333290392413,
+      "mutual_info": 0.007006378731624796,
+      "rf_importance": 7.222215465434715e-05
+    },
+    "battery_discharge_mw": {
+      "missing_pct": 53.62,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 0.0,
+      "corr_vs_target_at_horizon": 0.6040926921834595,
+      "mutual_info": 0.22894021161348554,
+      "rf_importance": 6.275168365022657e-05
+    },
+    "wind_mw": {
+      "missing_pct": 53.62,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 0.0,
+      "corr_vs_target_at_horizon": -0.019902353560811287,
+      "mutual_info": 0.05925627084574092,
+      "rf_importance": 5.881171905956936e-05
+    },
+    "gas_ccgt_mw": {
+      "missing_pct": 53.62,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 0.0,
+      "corr_vs_target_at_horizon": 0.33164270252949024,
+      "mutual_info": 0.1713265684818932,
+      "rf_importance": 5.542008413133443e-05
+    },
+    "gas_ocgt_mw": {
+      "missing_pct": 53.62,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 0.0,
+      "corr_vs_target_at_horizon": 0.5114906920009059,
+      "mutual_info": 0.19707051027216282,
+      "rf_importance": 5.463504591657026e-05
+    },
+    "biomass_mw": {
+      "missing_pct": 53.62,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 0.0,
+      "corr_vs_target_at_horizon": 0.23294696507146903,
+      "mutual_info": 0.10363003648876301,
+      "rf_importance": 4.5528716055436294e-05
+    },
+    "is_observed": {
+      "missing_pct": 0.0,
+      "missing_pct_NEM": 0.0,
+      "missing_pct_WEM": 0.0,
+      "corr_vs_target_at_horizon": -0.025335624156378956,
+      "mutual_info": 0.002154674791790767,
+      "rf_importance": 0.0
+    },
+    "is_business_day": {
+      "missing_pct": 0.0,
+      "missing_pct_NEM": 0.0,
+      "missing_pct_WEM": 0.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": 0.0
+    },
+    "market_value": {
+      "missing_pct": 100.0,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 100.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    },
+    "coal_brown_mw": {
+      "missing_pct": 100.0,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 100.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    },
+    "gas_other_mw": {
+      "missing_pct": 100.0,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 100.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    },
+    "hydro_mw": {
+      "missing_pct": 100.0,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 100.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    },
+    "pumped_hydro_mw": {
+      "missing_pct": 100.0,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 100.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    },
+    "solar_rooftop_mw": {
+      "missing_pct": 100.0,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 100.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    },
+    "distillate_mw": {
+      "missing_pct": 100.0,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 100.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    },
+    "curtailment_solar_utility_mw": {
+      "missing_pct": 100.0,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 100.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    },
+    "curtailment_wind_mw": {
+      "missing_pct": 100.0,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 100.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    },
+    "emissions_intensity_kgco2e_per_mwh": {
+      "missing_pct": 100.0,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 100.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    },
+    "rain_last_hour_mm": {
+      "missing_pct": 100.0,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 100.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    },
+    "oe_demand_mw": {
+      "missing_pct": 100.0,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 100.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    },
+    "oe_price_mwh": {
+      "missing_pct": 100.0,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 100.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    },
+    "oe_market_value": {
+      "missing_pct": 100.0,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 100.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    },
+    "oe_coal_black_mw": {
+      "missing_pct": 100.0,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 100.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    },
+    "oe_coal_brown_mw": {
+      "missing_pct": 100.0,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 100.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    },
+    "oe_gas_ccgt_mw": {
+      "missing_pct": 100.0,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 100.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    },
+    "oe_gas_ocgt_mw": {
+      "missing_pct": 100.0,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 100.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    },
+    "oe_gas_other_mw": {
+      "missing_pct": 100.0,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 100.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    },
+    "oe_hydro_mw": {
+      "missing_pct": 100.0,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 100.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    },
+    "oe_pumped_hydro_mw": {
+      "missing_pct": 100.0,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 100.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    },
+    "oe_wind_mw": {
+      "missing_pct": 100.0,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 100.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    },
+    "oe_solar_utility_mw": {
+      "missing_pct": 100.0,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 100.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    },
+    "oe_solar_rooftop_mw": {
+      "missing_pct": 100.0,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 100.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    },
+    "oe_biomass_mw": {
+      "missing_pct": 100.0,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 100.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    },
+    "oe_distillate_mw": {
+      "missing_pct": 100.0,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 100.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    },
+    "oe_battery_discharge_mw": {
+      "missing_pct": 100.0,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 100.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    },
+    "oe_battery_charge_mw": {
+      "missing_pct": 100.0,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 100.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    },
+    "oe_curtailment_solar_utility_mw": {
+      "missing_pct": 100.0,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 100.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    },
+    "oe_curtailment_wind_mw": {
+      "missing_pct": 100.0,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 100.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    },
+    "oe_total_generation_mw": {
+      "missing_pct": 100.0,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 100.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    },
+    "oe_renewable_proportion": {
+      "missing_pct": 100.0,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 100.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    },
+    "oe_emissions_intensity_kgco2e_per_mwh": {
+      "missing_pct": 100.0,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 100.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    },
+    "oe_interconnector_imports_mw": {
+      "missing_pct": 100.0,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 100.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    },
+    "oe_interconnector_exports_mw": {
+      "missing_pct": 100.0,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 100.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    },
+    "oe_net_import_mw": {
+      "missing_pct": 100.0,
+      "missing_pct_NEM": 100.0,
+      "missing_pct_WEM": 100.0,
+      "corr_vs_target_at_horizon": null,
+      "mutual_info": null,
+      "rf_importance": null
+    }
+  }
+}

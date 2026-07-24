@@ -8,7 +8,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from ecolens.ingestion.storage.mongo import bulk_upsert
+from ecolens.ingestion.storage.mongo import (
+    bulk_upsert,
+    get_historical_db,
+    get_historical_mongo_client,
+)
 from ecolens.ingestion.storage.settings import MongoSettings, get_mongo_settings
 
 
@@ -47,6 +51,32 @@ class TestMongoSettingsSourceHelpers:
         second = get_mongo_settings()
         assert first is second
         get_mongo_settings.cache_clear()
+
+
+class TestHistoricalMongo:
+    def test_raises_when_mongo_uri_historical_unset(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)  # avoid this repo's real .env
+        get_mongo_settings.cache_clear()
+        get_historical_mongo_client.cache_clear()
+        with pytest.raises(RuntimeError, match="MONGO_URI_HISTORICAL is not set"):
+            get_historical_mongo_client()
+        get_mongo_settings.cache_clear()
+        get_historical_mongo_client.cache_clear()
+
+    def test_connects_when_mongo_uri_historical_set(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("MONGO_URI_HISTORICAL", "mongodb://fake-historical:27017")
+        get_mongo_settings.cache_clear()
+        get_historical_mongo_client.cache_clear()
+
+        client = get_historical_mongo_client()
+        db = get_historical_db()
+        assert db.name == get_mongo_settings().mongo_db_name
+        assert client is get_historical_mongo_client()  # cached singleton
+
+        client.close()
+        get_mongo_settings.cache_clear()
+        get_historical_mongo_client.cache_clear()
 
 
 def _make_fake_db(upserted_count: int = 1, modified_count: int = 0):

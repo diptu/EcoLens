@@ -14,8 +14,11 @@ parallel multi-region training with cross-job dependencies).
 
 Usage
 =====
-    # Full train -> evaluate -> promote-if-better cycle (weekly cron)
-    python -m ecolens.forecasting.cli train
+    # Full train -> evaluate -> promote-if-better cycle (weekly cron).
+    # Trains on a live Colab T4 GPU bridge if NTFY_TOPIC is set and one is
+    # published (see training/colab_dispatch.py), else falls back to local
+    # CPU/CUDA. Pass --no-colab to always train locally.
+    python -m ecolens.forecasting.cli train [--no-colab]
 
     # Hyperparameter search (occasional, manual)
     python -m ecolens.forecasting.cli tune --n-trials 20
@@ -53,11 +56,12 @@ async def _fetch_and_window(settings: Settings) -> WindowedDataset:
     )
 
 
-async def cmd_train() -> int:
+async def cmd_train(no_colab: bool = False) -> int:
     from .evaluation.evaluate import evaluate_model, log_evaluation_to_mlflow
     from .mlops.promote import promote_if_better
     from .mlops.registry import ModelRegistry
-    from .training.train import train_model
+    from .training import colab_dispatch
+    from .training.train import DEVICE, train_model
 
     settings = get_settings()
     # Constructed before train_model()/evaluate_model() run -- ModelRegistry's
@@ -74,7 +78,22 @@ async def cmd_train() -> int:
     # this same reason.
     registry = ModelRegistry(settings=settings)
     dataset = await _fetch_and_window(settings)
-    result = train_model(dataset, settings=settings)
+
+    # Colab GPU bridge (see training/colab_dispatch.py): tries a live Colab
+    # kernel first if NTFY_TOPIC is set and --no-colab wasn't passed, falls
+    # back to local train_model() on any bridge-unavailable condition (or
+    # if the bridge simply isn't configured, which is the common case).
+    remote_result = (
+        None if no_colab else colab_dispatch.try_remote_train(dataset, settings)
+    )
+    if remote_result is not None:
+        print("Training on: Colab GPU (remote)")
+        result = colab_dispatch.log_remote_result_to_mlflow(
+            remote_result, dataset, settings
+        )
+    else:
+        print(f"Training on: {DEVICE} (local)")
+        result = train_model(dataset, settings=settings)
     evaluation = evaluate_model(result.model, dataset, alpha=settings.conformal_alpha)
     log_evaluation_to_mlflow(evaluation, run_id=result.run_id, settings=settings)
 
@@ -153,6 +172,10 @@ async def cmd_online_finetune() -> int:
     base_model = registry.load_by_alias(settings.model_registry_alias)
     dataset = await _fetch_and_window(settings)
 
+    # Not yet Colab-bridge-aware (see training/colab_dispatch.py, wired into
+    # cmd_train() first) -- online fine-tuning is a short, frequent job
+    # that doesn't benefit from GPU dispatch's fixed overhead as much as a
+    # full train_model() run does.
     result = fine_tune(base_model, dataset, settings=settings)
     evaluation = evaluate_model(result.model, dataset, alpha=settings.conformal_alpha)
     log_evaluation_to_mlflow(evaluation, run_id=result.run_id, settings=settings)
@@ -172,7 +195,14 @@ async def cmd_online_finetune() -> int:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="ecoLens forecasting pipeline CLI")
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("train", help="full train -> evaluate -> promote-if-better cycle")
+    train_parser = sub.add_parser(
+        "train", help="full train -> evaluate -> promote-if-better cycle"
+    )
+    train_parser.add_argument(
+        "--no-colab",
+        action="store_true",
+        help="skip the Colab GPU bridge even if NTFY_TOPIC is set, train locally",
+    )
     tune_parser = sub.add_parser("tune", help="Optuna hyperparameter search")
     tune_parser.add_argument("--n-trials", type=int, default=None)
     sub.add_parser(
@@ -188,7 +218,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     commands = {
-        "train": lambda: cmd_train(),
+        "train": lambda: cmd_train(no_colab=args.no_colab),
         "tune": lambda: cmd_tune(args.n_trials),
         "evaluate": lambda: cmd_evaluate(),
         "status": lambda: cmd_status(),

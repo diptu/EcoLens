@@ -9,6 +9,7 @@ import pytest
 from ecolens.forecasting.features import (
     FEATURE_COLUMNS,
     TARGET_INDEX,
+    FeatureScaler,
     build_windowed_dataset,
 )
 
@@ -106,3 +107,28 @@ class TestBuildWindowedDataset:
 
     def test_target_index_matches_demand_mw(self):
         assert FEATURE_COLUMNS[TARGET_INDEX] == "demand_mw"
+
+    def test_given_scaler_is_used_verbatim_not_refit(self):
+        # An intentionally-wrong scaler (way off from this df's actual
+        # mean/std) -- if build_windowed_dataset refit its own instead of
+        # using this one, the assertions below would fail.
+        df = _synthetic_snapshot(regions=("NSW1",), n=500)
+        wrong_scaler = FeatureScaler(
+            mean=np.full(len(FEATURE_COLUMNS), 1000.0),
+            std=np.full(len(FEATURE_COLUMNS), 50.0),
+            columns=FEATURE_COLUMNS,
+        )
+        ds = build_windowed_dataset(df, lookback=48, horizon=48, scaler=wrong_scaler)
+
+        assert ds.scaler is wrong_scaler
+        # Real data (~standard normal per _synthetic_snapshot) scaled by
+        # mean=1000/std=50 lands far from zero, not ~standard-normal like
+        # test_scaler_fit_only_on_train's freshly-fit-scaler case.
+        train_flat = ds.train.x.numpy().reshape(-1, len(FEATURE_COLUMNS))
+        assert not np.allclose(train_flat.mean(axis=0), 0, atol=0.5)
+
+    def test_omitted_scaler_still_fits_fresh(self):
+        # Default (no scaler passed) behavior is unchanged.
+        df = _synthetic_snapshot(regions=("NSW1",), n=500)
+        ds = build_windowed_dataset(df, lookback=48, horizon=48)
+        assert ds.scaler is not None

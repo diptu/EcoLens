@@ -30,11 +30,13 @@ search_space:
     type: categorical
     setting: model_hidden_size
     choices: [32, 64, 128, 256]
+    # choices: [32, 64]
+
   num_layers:
     type: int
     setting: model_num_layers
     low: 1
-    high: 3
+    high: 5
   dropout:
     type: float
     setting: model_dropout

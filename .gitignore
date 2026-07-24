@@ -172,6 +172,13 @@ ENV/
 env.bak/
 venv.bak/
 
+# Notebooks with a real credential baked in for local convenience (the
+# *.local.ipynb naming convention) -- e.g.
+# services/data-pipeline/notebooks/feature_validation_standalone.local.ipynb.
+# The checked-in *.ipynb template stays credential-free (reads NEON_DSN from
+# the environment); only the filled-in local copy is excluded.
+*.local.ipynb
+
 # Spyder project settings
 .spyderproject
 .spyproject

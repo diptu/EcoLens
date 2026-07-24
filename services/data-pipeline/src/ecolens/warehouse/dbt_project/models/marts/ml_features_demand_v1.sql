@@ -31,13 +31,28 @@
 --                                      always has real lookback.
 --   * demand_rolling_avg_7d / demand_rolling_std_7d
 --   * price_mwh, renewable_generation_mw, renewable_proportion,
---     emissions_intensity_kgco2e_per_mwh, net_import_mw
---                                   -- market + grid-mix covariates
+--     total_generation_mw, emissions_intensity_kgco2e_per_mwh,
+--     net_import_mw
+--                                   -- market + grid-mix covariates.
+--                                      total_generation_mw is only
+--                                      reported by AEMO WEM (AEMO NEM
+--                                      doesn't emit it), so ~53% of raw
+--                                      rows are null -- gap-filled the
+--                                      same way as every other column
+--                                      here, so it's always dense by
+--                                      the time it lands in this mart.
 --   * temp_c, apparent_temp_c, dew_point_c, humidity_pct,
 --     wind_speed_kmh, wind_direction_deg, wind_gust_kmh, pressure_hpa,
 --     rain_since_9am_mm, cloud_cover_pct
 --                                   -- the full 10-column BoM weather set
 --   * is_holiday, is_weekend       -- calendar covariates
+--
+-- Note: rain_since_9am_mm/is_weekend and total_generation_mw are
+-- carried here for completeness of the raw-ingested-column set this
+-- mart is built from, but FEATURE_COLUMNS in
+-- forecasting/features.py is the actual model-input contract -- see
+-- that file's exclusion comment for which of these columns the LSTM
+-- consumes (validation-driven: scripts/validate_feature_columns.py).
 --   * hour_sin, hour_cos, dow_sin, dow_cos, month_sin, month_cos
 --                                   -- cyclical encodings of
 --                                      region-local time (a neural net
@@ -96,6 +111,7 @@ featured as (
             + coalesce(biomass_mw, 0)
         ) as renewable_generation_mw,
         renewable_proportion,
+        total_generation_mw,
         emissions_intensity_kgco2e_per_mwh,
         net_import_mw,
         temp_c,

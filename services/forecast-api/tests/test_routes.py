@@ -11,6 +11,8 @@ so these never touch a real PostgreSQL or Redis server.
 
 from __future__ import annotations
 
+import tempfile
+import uuid
 from contextlib import contextmanager
 from datetime import datetime
 
@@ -70,6 +72,24 @@ def client_with_pool(
     loaded_model: LoadedModel | None = None,
     **settings_kwargs,
 ):
+    # Route tests fake the model/pool via `loaded_model`/`fake_pool` below
+    # and are documented (module docstring) to "never touch a real
+    # PostgreSQL or Redis server" -- but ForecastApiSettings picks up
+    # `.env`'s FORECAST_MLFLOW_TRACKING_URI/FORECAST_PG_DSN by default,
+    # which point at this repo's real local dev MLflow store and real
+    # Neon Postgres DB. Left unoverridden, a test that means to simulate
+    # "no model"/"no pool" (fake_pool=None, no loaded_model) instead
+    # silently gets a real registered model or a real working DB
+    # connection, which breaks the test's premise in confusing ways (a
+    # stale model's scaler shape mismatching current FEATURE_COLUMNS; a
+    # "no pool" test actually querying live data and getting 200 instead
+    # of 503). Point both at guaranteed-empty/unreachable targets per
+    # test instead, unless the test explicitly wants otherwise.
+    settings_kwargs.setdefault(
+        "mlflow_tracking_uri",
+        f"sqlite:///{tempfile.gettempdir()}/forecast_api_test_isolation_{uuid.uuid4().hex}.db",
+    )
+    settings_kwargs.setdefault("pg_dsn", "postgresql://test:test@127.0.0.1:1/test")
     app = create_app(settings=ForecastApiSettings(**settings_kwargs))
     with TestClient(app) as c:
         if fake_pool is not None:

@@ -41,6 +41,17 @@ class MongoSettings(BaseSettings):
         default="mongodb://mongo:27017",
         description="MongoDB connection string. Include credentials in the URI.",
     )
+    mongo_uri_historical: str | None = Field(
+        default=None,
+        description=(
+            "Connection string for the *historical* MongoDB cluster (env "
+            "var MONGO_URI_HISTORICAL) -- a separate cluster from `mongo_uri`'s "
+            "live one, written to only by ecolens.ingestion.api's "
+            "/ingestion/historical backfill endpoint, so ad-hoc historical "
+            "backfills never land in live collections. None disables that "
+            "endpoint (503)."
+        ),
+    )
     mongo_db_name: str = Field(
         default="ecolens",
         description="Default database. All collections live under this name.",

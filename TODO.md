@@ -42,9 +42,11 @@ live Mongo/Postgres.
   `read_historical()`, one table per source (named after
   `MongoSettings.collection_for_source`), upserted on
   `MongoSettings.unique_key_for_source` so re-running a backfill is
-  idempotent. Wired into `scripts/backfill_bom_historical.py` right after
-  its Mongo `bulk_upsert` (best-effort — a DuckDB failure logs a warning
-  and doesn't fail the run, since the Mongo write already succeeded).
+  idempotent. `HistoricalFetcher.write_duckdb()` (bom/historical.py) owns
+  the call, mirroring the existing `write_cache()` method; wired into
+  `scripts/backfill_bom_historical.py` right after its Mongo `bulk_upsert`
+  (best-effort — a DuckDB failure logs a warning and doesn't fail the
+  run, since the Mongo write already succeeded).
   `duckdb` added to `services/data-pipeline/pyproject.toml`; new
   `Settings.historical_duckdb_path` (default `data/historical/`, same
   local-disk convention as `bom_cache_dir`/`training_snapshot_dir`). Tests

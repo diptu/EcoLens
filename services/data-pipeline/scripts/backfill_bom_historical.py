@@ -39,7 +39,6 @@ from ecolens.ingestion.sources.bom.schema import (
     ERA5_LAG_DAYS,
     HISTORICAL_TIMEOUT_SECONDS,
 )
-from ecolens.ingestion.storage.duckdb_store import write_historical
 from ecolens.ingestion.storage.mongo import bulk_upsert, get_db, get_mongo_client
 from ecolens.ingestion.validators.bom import validate as validate_docs
 from ecolens.shared.observability.logging import get_logger
@@ -128,12 +127,11 @@ async def run(
     # docs already carry the ingest_run_id/fetched_at/source stamped by
     # bulk_upsert (mutated in place) -- mirror the same batch into the
     # local DuckDB historical store so this backfill survives
-    # warehouse/runner/archive.py's age-based Mongo deletion. Best-effort:
-    # the Mongo write above already succeeded, so a DuckDB failure here
-    # shouldn't fail the whole backfill run, same as the cache-write
-    # handling above.
+    # warehouse/runner/archive.py's age-based Mongo deletion. Best-effort,
+    # same as the cache-write handling above: the Mongo write already
+    # succeeded, so a DuckDB failure here shouldn't fail the whole run.
     try:
-        written = write_historical("bom", docs)
+        written = fetcher.write_duckdb(docs)
         log.info("duckdb.write_complete", run_id=run_id, written=written)
     except Exception as exc:  # noqa: BLE001
         log.warning("duckdb_write_failed", run_id=run_id, error=str(exc))

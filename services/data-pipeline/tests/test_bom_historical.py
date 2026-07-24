@@ -190,3 +190,50 @@ class TestWriteCache:
         docs = [{"region": "NSW1"}]
         fetcher.write_cache(docs)
         assert calls == [(tmp_path, docs)]
+
+
+class TestWriteDuckdb:
+    def test_delegates_to_duckdb_store_with_bom_source(self, tmp_path, monkeypatch):
+        fetcher = HistoricalFetcher(cache_dir=tmp_path)
+        calls = []
+
+        def fake_write_historical(source, docs):
+            calls.append((source, docs))
+            return len(docs)
+
+        import ecolens.ingestion.sources.bom.historical as historical_module
+
+        monkeypatch.setattr(
+            historical_module.duckdb_store, "write_historical", fake_write_historical
+        )
+        docs = [{"station_id": "066037", "ts": "2024-01-01"}]
+        result = fetcher.write_duckdb(docs)
+        assert calls == [("bom", docs)]
+        assert result == 1
+
+    def test_round_trips_through_real_duckdb_store(self, tmp_path, monkeypatch):
+        from ecolens.config import get_settings
+
+        get_settings.cache_clear()
+        monkeypatch.setenv("HISTORICAL_DUCKDB_PATH", str(tmp_path / "hist.duckdb"))
+        get_settings.cache_clear()
+
+        fetcher = HistoricalFetcher(cache_dir=tmp_path)
+        docs = [
+            {
+                "station_id": "066037",
+                "ts": datetime(2024, 1, 1, tzinfo=timezone.utc),
+                "region": "NSW1",
+                "temp_c": 18.0,
+                "source": "open_meteo_era5",
+            }
+        ]
+        written = fetcher.write_duckdb(docs)
+        assert written == 1
+
+        from ecolens.ingestion.storage.duckdb_store import read_historical
+
+        out = read_historical("bom")
+        assert len(out) == 1
+        assert out.iloc[0]["temp_c"] == 18.0
+        get_settings.cache_clear()

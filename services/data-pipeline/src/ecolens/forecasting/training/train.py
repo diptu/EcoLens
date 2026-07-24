@@ -2,21 +2,24 @@
 `WindowedDataset`, early-stopping on validation loss, logging params/
 metrics/the model itself to MLflow on every run.
 
-Training always runs on CPU, deliberately -- not a portability
-afterthought (see `strategy.md` §3 on `state_dict` + `map_location`),
-but because `nn.LSTM` on PyTorch's MPS backend (Apple Silicon) has a
-history of missing/incorrect fused-kernel support, and this repo has
-no CUDA host wired up yet. CPU training is slower but always correct;
-a GPU-training host can be pointed at the same code later without
-changing it, since nothing here hardcodes `cpu` except this one
-`torch.device(...)` call.
+Defaults to CPU, deliberately -- not a portability afterthought (see
+`strategy.md` §3 on `state_dict` + `map_location`), but because
+`nn.LSTM` on PyTorch's MPS backend (Apple Silicon) has a history of
+missing/incorrect fused-kernel support. Nothing here hardcodes `cpu`
+except this one `torch.device(...)` call: it auto-upgrades to `cuda`
+when a CUDA device is actually present (e.g. the Colab GPU bridge in
+`training/colab_dispatch.py` runs this same code unmodified on a T4),
+and `ECOLENS_TRAIN_DEVICE` overrides it explicitly either way.
 """
 
 from __future__ import annotations
 
+import copy
+import os
 import subprocess  # nosec B404 - only used for a fixed, argument-free `git rev-parse HEAD` in _git_sha()
 from contextlib import nullcontext
 from dataclasses import dataclass
+from typing import Any
 
 import mlflow
 import torch
@@ -32,7 +35,10 @@ from .losses import DemandForecastLoss
 
 log = get_logger(__name__)
 
-DEVICE = torch.device("cpu")
+DEVICE = torch.device(
+    os.environ.get("ECOLENS_TRAIN_DEVICE")
+    or ("cuda" if torch.cuda.is_available() else "cpu")
+)
 
 
 @dataclass
@@ -42,6 +48,13 @@ class TrainResult:
     dataset: WindowedDataset
     best_val_loss: float
     epochs_trained: int
+    # Adam's per-parameter momentum/variance buffers at the same epoch
+    # `model`'s weights were snapshotted from (see train_model()'s "new
+    # best" tracking) -- None only if training ran zero epochs. Restore
+    # via a fresh `torch.optim.Adam(...)` + `.load_state_dict(...)` to
+    # continue training on a later data chunk without Adam's momentum
+    # resetting to zero (training/incremental.py's whole reason to exist).
+    optimizer_state: dict[str, Any] | None = None
 
 
 def _git_sha() -> str | None:
@@ -95,12 +108,31 @@ def train_model(
     settings: Settings | None = None,
     *,
     log_to_mlflow: bool = True,
+    initial_model_state: dict[str, torch.Tensor] | None = None,
+    initial_optimizer_state: dict[str, Any] | None = None,
 ) -> TrainResult:
-    """Fits a fresh `DemandLSTM` on `dataset.train`, early-stopping on
+    """Fits a `DemandLSTM` on `dataset.train`, early-stopping on
     `dataset.val`, and returns the best-val-loss checkpoint (not
     necessarily the last epoch's).
+
+    `initial_model_state`/`initial_optimizer_state` (both optional,
+    independently) turn this from "train a fresh model from scratch"
+    into "continue training an existing checkpoint" --
+    `training/incremental.py`'s year-by-year chunked training uses both:
+    a fresh `DemandLSTM` still gets built (architecture is derived from
+    `settings`/`dataset.horizon` exactly as always -- the caller's
+    responsibility to keep hidden_size/num_layers/dropout/lookback/
+    horizon *identical* across chunks, since a state_dict only loads
+    into a matching-shaped model), then `initial_model_state` overwrites
+    its random initial weights and `initial_optimizer_state` restores
+    Adam's momentum/variance buffers into the freshly-constructed
+    optimizer -- otherwise every chunk's Adam would restart from zero
+    momentum, causing the erratic loss spikes at each chunk boundary
+    this whole mechanism exists to avoid.
     """
     settings = settings or get_settings()
+
+    log.info("training.device", device=str(DEVICE))
 
     model = DemandLSTM(
         n_features=len(FEATURE_COLUMNS),
@@ -108,16 +140,28 @@ def train_model(
         num_layers=settings.model_num_layers,
         horizon=dataset.horizon,
         dropout=settings.model_dropout,
-    ).to(DEVICE)
+    )
+    if initial_model_state is not None:
+        model.load_state_dict(initial_model_state)
+    model = model.to(DEVICE)
 
     loss_fn = DemandForecastLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=settings.model_train_lr)
+    if initial_optimizer_state is not None:
+        optimizer.load_state_dict(initial_optimizer_state)
 
     train_loader = _loader(dataset.train, settings.model_batch_size, shuffle=True)
     val_loader = _loader(dataset.val, settings.model_batch_size, shuffle=False)
 
     best_val_loss = float("inf")
     best_state: dict[str, torch.Tensor] | None = None
+    # Snapshotted alongside best_state (not just the final epoch's optimizer
+    # state) so the returned checkpoint's weights and Adam's momentum/
+    # variance buffers stay mutually consistent -- early stopping can pick
+    # an *earlier* epoch as "best," and Adam's state from a later epoch
+    # would reflect gradients computed against weights that checkpoint no
+    # longer has.
+    best_optimizer_state: dict[str, Any] | None = None
     epochs_since_improvement = 0
     epochs_trained = 0
 
@@ -167,6 +211,7 @@ def train_model(
             if val_loss < best_val_loss - 1e-6:
                 best_val_loss = val_loss
                 best_state = {k: v.clone() for k, v in model.state_dict().items()}
+                best_optimizer_state = copy.deepcopy(optimizer.state_dict())
                 epochs_since_improvement = 0
             else:
                 epochs_since_improvement += 1
@@ -185,7 +230,7 @@ def train_model(
         if log_to_mlflow:
             mlflow.log_metric("best_val_loss", best_val_loss)
             mlflow.log_dict(dataset.scaler.to_dict(), "scaler.json")
-            log_model_artifacts(model)
+            log_model_artifacts(model, optimizer_state=best_optimizer_state)
 
     log.info(
         "training.complete",
@@ -199,6 +244,7 @@ def train_model(
         dataset=dataset,
         best_val_loss=best_val_loss,
         epochs_trained=epochs_trained,
+        optimizer_state=best_optimizer_state,
     )
 
 

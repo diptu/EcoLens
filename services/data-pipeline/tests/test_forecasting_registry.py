@@ -215,3 +215,95 @@ class TestEvaluateModelIntegration:
 
         loaded = registry.load_by_alias(registry.settings.model_registry_alias)
         assert isinstance(loaded, DemandLSTM)
+
+
+class TestLoadCheckpoint:
+    """`ModelRegistry.load_checkpoint` -- the read side of
+    `training/incremental.py`'s year-by-year chunked training, which
+    needs a prior chunk's model weights + optimizer state + scaler back
+    out of MLflow by run_id (not by alias -- intermediate chunks are
+    never registered/promoted).
+    """
+
+    def _train_a_real_run(self, registry: ModelRegistry, *, seed: int = 0):
+        from ecolens.forecasting.training.train import train_model
+
+        rng = np.random.default_rng(seed)
+        n = 300
+        ts = pd.date_range("2026-01-01", periods=n, freq="30min", tz="UTC")
+        df = pd.DataFrame({"ts_30": ts, "region": "NSW1"})
+        t = np.arange(n)
+        df["demand_mw"] = 5000 + 300 * np.sin(2 * np.pi * t / 48) + rng.normal(0, 20, n)
+        for col in FEATURE_COLUMNS:
+            if col == "demand_mw":
+                continue
+            df[col] = (
+                rng.integers(0, 2, size=n)
+                if col in ("is_holiday", "is_weekend")
+                else rng.normal(size=n)
+            )
+        dataset = build_windowed_dataset(df, lookback=48, horizon=48)
+        result = train_model(
+            dataset,
+            settings=Settings(  # type: ignore[call-arg]
+                model_train_epochs=2,
+                model_hidden_size=8,
+                model_num_layers=1,
+                model_batch_size=16,
+                mlflow_tracking_uri=registry.settings.mlflow_tracking_uri,
+            ),
+        )
+        return result, dataset
+
+    def test_round_trips_model_weights(self, registry: ModelRegistry):
+        result, _ = self._train_a_real_run(registry)
+        checkpoint = registry.load_checkpoint(result.run_id)
+
+        rebuilt = DemandLSTM(**checkpoint.architecture)
+        rebuilt.load_state_dict(checkpoint.model_state)
+
+        x = torch.randn(2, 48, len(FEATURE_COLUMNS))
+        with torch.no_grad():
+            expected, _ = result.model(x)
+            actual, _ = rebuilt(x)
+        assert torch.equal(expected["p50"], actual["p50"])
+
+    def test_round_trips_optimizer_state(self, registry: ModelRegistry):
+        result, _ = self._train_a_real_run(registry)
+        checkpoint = registry.load_checkpoint(result.run_id)
+
+        assert checkpoint.optimizer_state is not None
+        # Proves it's a genuinely usable Adam state_dict, not just an
+        # opaque blob that happens to deserialize.
+        rebuilt = DemandLSTM(**checkpoint.architecture)
+        optimizer = torch.optim.Adam(rebuilt.parameters())
+        optimizer.load_state_dict(checkpoint.optimizer_state)
+
+    def test_round_trips_scaler(self, registry: ModelRegistry):
+        result, dataset = self._train_a_real_run(registry)
+        checkpoint = registry.load_checkpoint(result.run_id)
+
+        assert np.array_equal(checkpoint.scaler.mean, dataset.scaler.mean)
+        assert np.array_equal(checkpoint.scaler.std, dataset.scaler.std)
+
+    def test_missing_optimizer_state_degrades_to_none(self, registry: ModelRegistry):
+        from ecolens.forecasting.mlops.registry import log_model_artifacts
+
+        model = DemandLSTM(
+            n_features=len(FEATURE_COLUMNS), hidden_size=8, num_layers=1, horizon=48
+        )
+        with mlflow.start_run() as run:
+            log_model_artifacts(model)  # no optimizer_state passed
+            mlflow.log_dict(
+                {
+                    "mean": [0.0] * len(FEATURE_COLUMNS),
+                    "std": [1.0] * len(FEATURE_COLUMNS),
+                    "columns": list(FEATURE_COLUMNS),
+                },
+                "scaler.json",
+            )
+            run_id = run.info.run_id
+
+        checkpoint = registry.load_checkpoint(run_id)
+        assert checkpoint.optimizer_state is None
+        assert checkpoint.model_state is not None

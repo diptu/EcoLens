@@ -8,9 +8,10 @@ dependencies = [
     "asyncpg>=0.30.0",
     "dbt-core>=1.8.0",
     "dbt-postgres>=1.8.0",
-    "duckdb>=1.0.0",
+    "duckdb>=1.5.5",
     "fastapi[standard]>=0.139.2",
     "httpx>=0.28.1",
+    "matplotlib>=3.9.0",
     "mlflow-skinny>=2.18.0",
     "motor>=3.7.1",
     "numpy>=2.5.1",
@@ -23,9 +24,13 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "pyyaml>=6.0.3",
     "redis>=5.0.0",
+    "requests>=2.32.0",
     "respx>=0.23.1",
+    "scikit-learn>=1.5.0",
     "scipy>=1.14.0",
     "torch>=2.5.0",
+    "websocket-client>=1.8.0",
+    "duckdb>=1.5.5",
 ]
 
 [dependency-groups]

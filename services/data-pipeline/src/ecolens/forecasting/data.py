@@ -18,7 +18,7 @@ not a different database.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import asyncpg
@@ -57,8 +57,19 @@ class TrainingSetLoader:
         self.warehouse_settings = warehouse_settings or get_warehouse_api_settings()
         self.settings = settings or get_settings()
 
-    async def fetch(self, regions: tuple[str, ...] | None = None) -> pd.DataFrame:
-        """One-shot read of the full (or region-filtered) feature table."""
+    async def fetch(
+        self,
+        regions: tuple[str, ...] | None = None,
+        *,
+        since: date | datetime | None = None,
+        until: date | datetime | None = None,
+    ) -> pd.DataFrame:
+        """Reads the feature table, optionally scoped to `[since, until)`
+        (both ends optional, `until` exclusive) -- the one piece needed
+        to pull just *one chunk* (e.g. one calendar year) for
+        `training/incremental.py`'s chunked training loop, rather than
+        always reading the whole table.
+        """
         ws = self.warehouse_settings
         if ws.pg_dsn:
             conn = await asyncpg.connect(
@@ -74,17 +85,30 @@ class TrainingSetLoader:
                 timeout=ws.pg_command_timeout_seconds,
             )
         try:
-            where = "where region = any($1::text[])" if regions else ""
+            clauses = []
+            params: list[object] = []
+            if regions:
+                params.append(list(regions))
+                clauses.append(f"region = any(${len(params)}::text[])")
+            if since is not None:
+                params.append(since)
+                clauses.append(f"ts_30 >= ${len(params)}")
+            if until is not None:
+                params.append(until)
+                clauses.append(f"ts_30 < ${len(params)}")
+            where = f"where {' and '.join(clauses)}" if clauses else ""
             query = _QUERY.format(where=where)
-            rows = (
-                await conn.fetch(query, list(regions))
-                if regions
-                else await conn.fetch(query)
-            )
+            rows = await conn.fetch(query, *params)
         finally:
             await conn.close()
 
-        log.info("training.fetched", rows=len(rows), regions=regions)
+        log.info(
+            "training.fetched",
+            rows=len(rows),
+            regions=regions,
+            since=since.isoformat() if since else None,
+            until=until.isoformat() if until else None,
+        )
         return pd.DataFrame(dict(r) for r in rows)
 
     async def snapshot(

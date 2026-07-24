@@ -91,3 +91,111 @@ class TestTrainModel:
             outputs, _ = result.model(ds.val.x)
             actual_loss, _ = loss_fn(outputs, ds.val.y)
         assert actual_loss.item() == pytest.approx(result.best_val_loss, rel=1e-3)
+
+
+class TestCheckpointContinuation:
+    """`initial_model_state`/`initial_optimizer_state` -- the mechanism
+    `training/incremental.py`'s year-by-year chunked training relies on
+    to avoid retraining from scratch (or resetting Adam's momentum) on
+    every chunk.
+    """
+
+    def test_optimizer_state_is_populated_after_training(self):
+        ds = build_windowed_dataset(_learnable_snapshot(), lookback=48, horizon=48)
+        settings = Settings(  # type: ignore[call-arg]
+            model_train_epochs=2, model_hidden_size=8, model_batch_size=32
+        )
+        result = train_model(ds, settings=settings, log_to_mlflow=False)
+
+        assert result.optimizer_state is not None
+        assert "state" in result.optimizer_state
+        assert "param_groups" in result.optimizer_state
+        # Adam tracks exp_avg/exp_avg_sq per parameter -- confirms this is
+        # a real, populated optimizer checkpoint, not an empty shell.
+        assert len(result.optimizer_state["state"]) > 0
+
+    def test_zero_epochs_returns_exactly_the_initial_model_state(self):
+        # With model_train_epochs=0 the training loop never runs, so the
+        # returned model's weights are determined *only* by whether
+        # initial_model_state got loaded at construction time -- the
+        # cleanest possible proof that it actually did.
+        ds = build_windowed_dataset(_learnable_snapshot(), lookback=48, horizon=48)
+        settings = Settings(  # type: ignore[call-arg]
+            model_train_epochs=3, model_hidden_size=8, model_batch_size=32
+        )
+        first = train_model(ds, settings=settings, log_to_mlflow=False)
+
+        zero_epoch_settings = Settings(  # type: ignore[call-arg]
+            model_train_epochs=0, model_hidden_size=8, model_batch_size=32
+        )
+        continued = train_model(
+            ds,
+            settings=zero_epoch_settings,
+            log_to_mlflow=False,
+            initial_model_state=first.model.state_dict(),
+        )
+
+        for key, value in first.model.state_dict().items():
+            assert torch.equal(value, continued.model.state_dict()[key])
+
+    def test_prior_optimizer_state_changes_the_training_trajectory(self):
+        # Same starting weights, same one epoch of data (seeded shuffle),
+        # but one continuation restores Adam's momentum and the other
+        # starts it fresh at zero -- Adam's update rule depends on those
+        # running estimates, so the two must diverge if the restored
+        # state is actually being used rather than silently ignored.
+        ds = build_windowed_dataset(_learnable_snapshot(), lookback=48, horizon=48)
+        base_settings = Settings(  # type: ignore[call-arg]
+            model_train_epochs=5,
+            model_hidden_size=8,
+            model_batch_size=32,
+            model_train_lr=0.01,
+        )
+        base = train_model(ds, settings=base_settings, log_to_mlflow=False)
+
+        one_epoch_settings = Settings(  # type: ignore[call-arg]
+            model_train_epochs=1,
+            model_hidden_size=8,
+            model_batch_size=32,
+            model_train_lr=0.01,
+        )
+
+        torch.manual_seed(0)
+        with_prior_optimizer = train_model(
+            ds,
+            settings=one_epoch_settings,
+            log_to_mlflow=False,
+            initial_model_state=base.model.state_dict(),
+            initial_optimizer_state=base.optimizer_state,
+        )
+
+        torch.manual_seed(0)
+        fresh_optimizer = train_model(
+            ds,
+            settings=one_epoch_settings,
+            log_to_mlflow=False,
+            initial_model_state=base.model.state_dict(),
+        )
+
+        differs = any(
+            not torch.equal(v, fresh_optimizer.model.state_dict()[k])
+            for k, v in with_prior_optimizer.model.state_dict().items()
+        )
+        assert differs
+
+    def test_mismatched_initial_state_shape_raises(self):
+        # A state_dict from a *different* architecture (different
+        # hidden_size) can't load into this one -- PyTorch itself
+        # enforces this; confirms train_model doesn't silently swallow it.
+        ds = build_windowed_dataset(_learnable_snapshot(), lookback=48, horizon=48)
+        small = Settings(model_train_epochs=1, model_hidden_size=8)  # type: ignore[call-arg]
+        small_result = train_model(ds, settings=small, log_to_mlflow=False)
+
+        big = Settings(model_train_epochs=1, model_hidden_size=16)  # type: ignore[call-arg]
+        with pytest.raises(RuntimeError):
+            train_model(
+                ds,
+                settings=big,
+                log_to_mlflow=False,
+                initial_model_state=small_result.model.state_dict(),
+            )

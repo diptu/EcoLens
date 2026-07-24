@@ -10,6 +10,8 @@ test_forecasting_registry.py.
 
 from __future__ import annotations
 
+from datetime import date
+
 import mlflow
 import pytest
 from fastapi import FastAPI
@@ -26,12 +28,14 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("MLFLOW_REGISTERED_MODEL_NAME", "api_test_model")
     get_settings.cache_clear()
     mlflow.set_tracking_uri(f"sqlite:///{tmp_path}/mlflow.db")
+    api_module._jobs.clear()
 
     app = FastAPI()
     app.include_router(api_module.router)
     with TestClient(app) as c:
         yield c
     get_settings.cache_clear()
+    api_module._jobs.clear()
 
 
 class TestTriggerTrain:
@@ -62,6 +66,96 @@ class TestTriggerEvaluate:
         assert response.status_code == 200
         assert response.json() == {"status": "started"}
         assert called["ran"] is True
+
+
+class TestTriggerTrainIncrementalChunk:
+    def test_returns_started_and_runs_the_job(self, client, monkeypatch):
+        calls = []
+
+        async def fake_job(chunk_start, chunk_end, prior_run_id, evaluate_and_promote):
+            calls.append((chunk_start, chunk_end, prior_run_id, evaluate_and_promote))
+            return {"run_id": "abc123", "best_val_loss": 0.1}
+
+        monkeypatch.setattr(api_module, "_run_incremental_chunk_job", fake_job)
+        response = client.post(
+            "/forecasting/train-incremental-chunk",
+            params={"start_date": "2023-01-01", "end_date": "2023-12-31"},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert isinstance(body.pop("job_id"), str)
+        assert body == {
+            "status": "started",
+            "start_date": "2023-01-01",
+            "end_date": "2023-12-31",
+        }
+        assert calls == [(date(2023, 1, 1), date(2023, 12, 31), None, False)]
+
+    def test_passes_through_prior_run_id_and_evaluate_flag(self, client, monkeypatch):
+        calls = []
+
+        async def fake_job(chunk_start, chunk_end, prior_run_id, evaluate_and_promote):
+            calls.append((chunk_start, chunk_end, prior_run_id, evaluate_and_promote))
+            return {"run_id": "def456"}
+
+        monkeypatch.setattr(api_module, "_run_incremental_chunk_job", fake_job)
+        client.post(
+            "/forecasting/train-incremental-chunk",
+            params={
+                "start_date": "2024-01-01",
+                "end_date": "2024-12-31",
+                "prior_run_id": "abc123",
+                "evaluate_and_promote": "true",
+            },
+        )
+
+        assert calls == [(date(2024, 1, 1), date(2024, 12, 31), "abc123", True)]
+
+    def test_end_before_start_422s(self, client):
+        response = client.post(
+            "/forecasting/train-incremental-chunk",
+            params={"start_date": "2023-12-31", "end_date": "2023-01-01"},
+        )
+        assert response.status_code == 422
+
+    def test_poll_reports_completed_result(self, client, monkeypatch):
+        async def fake_job(chunk_start, chunk_end, prior_run_id, evaluate_and_promote):
+            return {"run_id": "abc123", "best_val_loss": 0.1}
+
+        monkeypatch.setattr(api_module, "_run_incremental_chunk_job", fake_job)
+        trigger = client.post(
+            "/forecasting/train-incremental-chunk",
+            params={"start_date": "2023-01-01", "end_date": "2023-12-31"},
+        )
+        job_id = trigger.json()["job_id"]
+
+        status = client.get(f"/forecasting/train-incremental-chunk/{job_id}")
+        assert status.status_code == 200
+        body = status.json()
+        assert body["status"] == "completed"
+        assert body["result"] == {"run_id": "abc123", "best_val_loss": 0.1}
+        assert body["error"] is None
+
+    def test_poll_reports_failure(self, client, monkeypatch):
+        async def fake_job(chunk_start, chunk_end, prior_run_id, evaluate_and_promote):
+            raise RuntimeError("no warehouse data for this range")
+
+        monkeypatch.setattr(api_module, "_run_incremental_chunk_job", fake_job)
+        trigger = client.post(
+            "/forecasting/train-incremental-chunk",
+            params={"start_date": "2023-01-01", "end_date": "2023-12-31"},
+        )
+        job_id = trigger.json()["job_id"]
+
+        status = client.get(f"/forecasting/train-incremental-chunk/{job_id}")
+        body = status.json()
+        assert body["status"] == "failed"
+        assert body["error"] == "no warehouse data for this range"
+
+    def test_poll_unknown_job_id_404s(self, client):
+        response = client.get("/forecasting/train-incremental-chunk/no-such-job")
+        assert response.status_code == 404
 
 
 class TestModelStatus:

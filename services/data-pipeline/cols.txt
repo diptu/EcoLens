@@ -1,0 +1,89 @@
+Neon Postgres table + columns used to train the PyTorch (DemandLSTM) model
+============================================================================
+
+Connection: WAREHOUSE_PG_DSN (services/data-pipeline/.env, = ${NEON_DSN})
+Reader:     ecolens.forecasting.data.TrainingSetLoader.fetch()
+            -> "select * from ml_features_demand_v1 [where ts_30 ...] order by region, ts_30"
+Windower:   ecolens.forecasting.features.build_windowed_dataset()
+Table def:  services/data-pipeline/src/ecolens/warehouse/dbt_project/models/marts/ml_features_demand_v1.sql
+
+Table: ml_features_demand_v1
+-----------------------------
+
+1) Identifier columns -- read, but not fed into the LSTM as features
+   (used for chronological ordering, per-region windowing/splitting,
+   and reporting -- see features.py's WindowedDataset.as_of/.region):
+
+   ts_30    -- 30-min timestamp, the row's time slot (also aliased as
+              "ts" in the table; training only reads ts_30)
+   region   -- NEM/WEM region code (e.g. NSW1, VIC1, QLD1, SA1, TAS1, WEM)
+
+2) Feature columns -- fed into the LSTM at every lookback timestep, in
+   this exact order (ecolens.forecasting.features.FEATURE_COLUMNS).
+   demand_mw is both a feature (past values, via the lookback window)
+   and the training target (future values, via the horizon window).
+
+   This list is validation-driven, not just a priori domain reasoning:
+   scripts/validate_feature_columns.py queries every column reaching
+   the warehouse from raw ingestion (not just the current mart) and
+   scores each on missingness, variance, correlation-at-horizon,
+   mutual information, and RandomForest importance. See that script's
+   docstring and `make validate-features` for how to re-run it.
+
+    1. demand_mw                          -- ALSO the training target
+    2. price_mwh
+    3. renewable_generation_mw
+    4. renewable_proportion
+    5. total_generation_mw                -- added 2026-07-24: the one
+                                              raw-ingested column not
+                                              previously selected that
+                                              scored as high as top-
+                                              quartile included features
+                                              (corr ~0.77 at horizon).
+                                              Only reported by AEMO WEM
+                                              (~46% of raw rows); dbt's
+                                              int_energy_filled_30min
+                                              gap-fills it the same way
+                                              it already does for
+                                              renewable_proportion, so
+                                              it's dense by the time it
+                                              reaches this table.
+    6. emissions_intensity_kgco2e_per_mwh
+    7. net_import_mw
+    8. temp_c
+    9. apparent_temp_c
+   10. dew_point_c
+   11. humidity_pct
+   12. wind_speed_kmh
+   13. wind_direction_deg
+   14. wind_gust_kmh
+   15. pressure_hpa
+   16. cloud_cover_pct
+   17. is_holiday
+   18. hour_sin
+   19. hour_cos
+   20. dow_sin
+   21. dow_cos
+   22. month_sin
+   23. month_cos
+
+3) Columns present in the table but NOT used to train the LSTM:
+
+   demand_lag_01 .. demand_lag_48   -- autoregressive lag columns; used by
+                                        forecast-api's seasonal-naive
+                                        baseline (forecasting/baseline.py),
+                                        not the LSTM -- the LSTM sees the
+                                        same history directly as a
+                                        sequence via the lookback window
+                                        instead of these flattened columns
+   demand_rolling_avg_7d            -- same reason: baseline-model input,
+   demand_rolling_std_7d               not an LSTM feature
+   ts                                -- duplicate of ts_30 (identical value,
+                                        different column name)
+   is_gap_filled                    -- audit/data-quality metadata only
+   data_quality_status              -- audit/data-quality metadata only
+   rain_since_9am_mm                -- removed 2026-07-24: weak on all
+                                        three validation signals (near-
+                                        zero correlation, mutual info,
+                                        RF importance at horizon)
+   is_weekend                       -- removed 2026-07-24: same reason

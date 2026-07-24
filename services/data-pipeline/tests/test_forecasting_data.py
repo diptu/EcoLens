@@ -8,6 +8,7 @@ itself rather than reusing the repo's pool-shaped `FakeAsyncpgPool`.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 import pandas as pd
@@ -89,6 +90,34 @@ class TestFetch:
         query, args = conn.fetch_calls[0]
         assert "where" not in query
         assert args == ()
+
+    @pytest.mark.asyncio
+    async def test_fetch_with_since_until_filters_via_query_param(self, monkeypatch):
+        conn = _install_fake_connect(monkeypatch, SAMPLE_ROWS)
+        loader = TrainingSetLoader(
+            warehouse_settings=WarehouseApiSettings(), settings=Settings()
+        )  # type: ignore[call-arg]
+        since = datetime(2023, 1, 1, tzinfo=timezone.utc)
+        until = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        await loader.fetch(since=since, until=until)
+        query, args = conn.fetch_calls[0]
+        assert "ts_30 >= $1" in query
+        assert "ts_30 < $2" in query
+        assert args == (since, until)
+
+    @pytest.mark.asyncio
+    async def test_fetch_combines_regions_and_date_range(self, monkeypatch):
+        conn = _install_fake_connect(monkeypatch, SAMPLE_ROWS)
+        loader = TrainingSetLoader(
+            warehouse_settings=WarehouseApiSettings(), settings=Settings()
+        )  # type: ignore[call-arg]
+        since = datetime(2023, 1, 1, tzinfo=timezone.utc)
+        await loader.fetch(regions=("NSW1",), since=since)
+        query, args = conn.fetch_calls[0]
+        assert "region = any($1::text[])" in query
+        assert "ts_30 >= $2" in query
+        assert " and " in query
+        assert args == (["NSW1"], since)
 
     @pytest.mark.asyncio
     async def test_connection_closed_even_on_error(self, monkeypatch):

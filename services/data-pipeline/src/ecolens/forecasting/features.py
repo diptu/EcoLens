@@ -36,11 +36,22 @@ import torch
 #   * is_gap_filled, data_quality_status -- audit metadata, not model
 #     inputs (see ml_features_demand_v1.sql's header comment)
 #   * ts_30, ts, region -- identifiers, not features
+#   * rain_since_9am_mm, is_weekend -- removed by the raw-ingested-column
+#     validation pass (scripts/validate_feature_columns.py): weak on all
+#     three signals (missingness/variance fine, but near-zero correlation,
+#     mutual info, and RF importance against the horizon target)
+#   * total_generation_mw -- added by that same validation pass: the one
+#     column, of everything ingested but not previously selected, that
+#     scores as high as top-quartile included features (corr ~0.77 at
+#     horizon). Only ~46% populated (AEMO WEM reports it; AEMO NEM
+#     doesn't), but int_energy_filled_30min gap-fills it the same way it
+#     already does for renewable_proportion, so it reaches the mart dense.
 FEATURE_COLUMNS: tuple[str, ...] = (
     "demand_mw",
     "price_mwh",
     "renewable_generation_mw",
     "renewable_proportion",
+    "total_generation_mw",
     "emissions_intensity_kgco2e_per_mwh",
     "net_import_mw",
     "temp_c",
@@ -51,10 +62,8 @@ FEATURE_COLUMNS: tuple[str, ...] = (
     "wind_direction_deg",
     "wind_gust_kmh",
     "pressure_hpa",
-    "rain_since_9am_mm",
     "cloud_cover_pct",
     "is_holiday",
-    "is_weekend",
     "hour_sin",
     "hour_cos",
     "dow_sin",
@@ -174,6 +183,7 @@ def build_windowed_dataset(
     *,
     lookback: int,
     horizon: int,
+    scaler: FeatureScaler | None = None,
     split_fractions: tuple[float, float, float, float] = (0.7, 0.1, 0.1, 0.1),
 ) -> WindowedDataset:
     """The main entry point: raw snapshot -> ready-to-train tensors.
@@ -182,6 +192,15 @@ def build_windowed_dataset(
     has data from every region), then concatenates -- never splits by
     shuffling rows, which would leak future information into "past"
     training windows.
+
+    `scaler`, if given, is used as-is (no fitting) instead of fitting a
+    fresh one from this call's own train split -- required for
+    `training/incremental.py`'s chunked training loop: fitting a new
+    scaler per chunk (2023's mean/std, then 2024's, then 2025's, ...)
+    would shift the LSTM's input distribution at every chunk boundary,
+    confusing a model whose weights were trained against a *different*
+    normalization. Fit once (omit `scaler` on the first chunk) and reuse
+    it for every later chunk in the same sequence.
     """
     missing = [c for c in FEATURE_COLUMNS if c not in df.columns]
     if missing:
@@ -215,14 +234,15 @@ def build_windowed_dataset(
             "multiples of that so every split gets samples"
         )
 
-    train_x = np.concatenate(per_split_x[0], axis=0)
-    flat = train_x.reshape(-1, train_x.shape[-1])
-    std = flat.std(axis=0)
-    scaler = FeatureScaler(
-        mean=flat.mean(axis=0),
-        std=np.where(std > 1e-8, std, 1.0),
-        columns=FEATURE_COLUMNS,
-    )
+    if scaler is None:
+        train_x = np.concatenate(per_split_x[0], axis=0)
+        flat = train_x.reshape(-1, train_x.shape[-1])
+        std = flat.std(axis=0)
+        scaler = FeatureScaler(
+            mean=flat.mean(axis=0),
+            std=np.where(std > 1e-8, std, 1.0),
+            columns=FEATURE_COLUMNS,
+        )
 
     splits = []
     for i in range(4):

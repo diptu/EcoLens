@@ -173,8 +173,8 @@ backfill-aemo-wem: ## Backfill AEMO WEM over a date range, day by day. Usage: ma
 # ── "production" in the MLflow Registry -- see services/forecast-api/ ─────
 # ── strategy.md §2 and root TODO.md ECO-108..119.) ─────────────────────────
 .PHONY: model-train
-model-train: ## Full train -> evaluate -> promote-if-better cycle (weekly cron). Registers a new version and promotes it iff it beats the current "production" alias.
-	cd services/data-pipeline && $(UV) run --active python -m ecolens.forecasting.cli train
+model-train: ## Full train -> evaluate -> promote-if-better cycle (weekly cron). Registers a new version and promotes it iff it beats the current "production" alias. Trains on a live Colab T4 GPU bridge if NTFY_TOPIC is set (see scripts/colab_server.py) and a kernel is published, else local CPU/CUDA. Usage: make model-train [NO_COLAB=1].
+	cd services/data-pipeline && $(UV) run --active python -m ecolens.forecasting.cli train $(if $(NO_COLAB),--no-colab,)
 
 .PHONY: model-tune
 model-tune: ## Optuna hyperparameter search (occasional, manual). Usage: make model-tune [N_TRIALS=20].
@@ -195,6 +195,19 @@ model-online-finetune: ## Lightweight fine-tune of the current production model 
 .PHONY: model-benchmark
 model-benchmark: ## Benchmark forecast-api's CPU inference optimization (ECO-P03: quantized vs fp32 latency/RSS). Usage: make model-benchmark [ITERATIONS=200] [HIDDEN_SIZE=128] [NUM_LAYERS=2].
 	cd services/forecast-api && $(UV) run --active python scripts/benchmark_inference.py $(if $(ITERATIONS),--iterations $(ITERATIONS),) $(if $(HIDDEN_SIZE),--hidden-size $(HIDDEN_SIZE),) $(if $(NUM_LAYERS),--num-layers $(NUM_LAYERS),)
+
+.PHONY: plot-data-frequency
+plot-data-frequency: ## Bar chart of ml_features_demand_v1 row count per day over a date range. Usage: make plot-data-frequency START_DATE=2026-01-01 END_DATE=2026-07-01 [REGION=NSW1] [OUTPUT=path.png].
+	@if [ -z "$(START_DATE)" ] || [ -z "$(END_DATE)" ]; then echo "Usage: make plot-data-frequency START_DATE=2026-01-01 END_DATE=2026-07-01 [REGION=NSW1] [OUTPUT=path.png]"; exit 1; fi
+	cd services/data-pipeline && $(UV) run --active python scripts/plot_data_frequency.py --start-date $(START_DATE) --end-date $(END_DATE) $(if $(REGION),--region $(REGION),) $(if $(OUTPUT),--output $(OUTPUT),)
+
+.PHONY: validate-features
+validate-features: ## Empirically validates candidate model features against every raw/staging ingested column (not just ml_features_demand_v1) -- missingness, variance, correlation/mutual-info/RandomForest importance vs. the horizon-ahead target -- over a date range. Defaults to the last 6 months if START_DATE/END_DATE aren't given. Usage: make validate-features [START_DATE=2026-01-01] [END_DATE=2026-07-01] [REGION=NSW1].
+	@end="$(END_DATE)"; start="$(START_DATE)"; \
+	if [ -z "$$end" ]; then end=$$(date +%Y-%m-%d); fi; \
+	if [ -z "$$start" ]; then start=$$(date -v-6m +%Y-%m-%d 2>/dev/null || date -d "6 months ago" +%Y-%m-%d); fi; \
+	echo "Validating features from $$start to $$end"; \
+	cd services/data-pipeline && $(UV) run --active python scripts/validate_feature_columns.py --start-date $$start --end-date $$end $(if $(REGION),--region $(REGION),)
 
 .PHONY: mlflow-ui
 mlflow-ui: ## Browse MLflow experiment tracking (runs/params/metrics/registered models) for the local SQLite store. Usage: make mlflow-ui [PORT=5001].

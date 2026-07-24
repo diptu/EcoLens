@@ -35,6 +35,35 @@ def get_db() -> AsyncIOMotorDatabase:
     return get_mongo_client()[get_mongo_settings().mongo_db_name]
 
 
+@lru_cache(maxsize=1)
+def get_historical_mongo_client() -> AsyncIOMotorClient:
+    """Same pool-sizing/timeout/retry tuning as `get_mongo_client()`, just
+    pointed at `mongo_uri_historical` -- a distinct cluster, not just a
+    different database on the same one, so `MONGO_URI_HISTORICAL` unset
+    means historical ingestion has nowhere to write, hence the raise
+    rather than silently falling back to the live `mongo_uri`.
+    """
+    settings = get_mongo_settings()
+    if not settings.mongo_uri_historical:
+        raise RuntimeError(
+            "MONGO_URI_HISTORICAL is not set -- historical ingestion is disabled."
+        )
+    return AsyncIOMotorClient(
+        settings.mongo_uri_historical,
+        maxPoolSize=settings.mongo_max_pool_size,
+        minPoolSize=settings.mongo_min_pool_size,
+        serverSelectionTimeoutMS=settings.mongo_server_selection_timeout_ms,
+        connectTimeoutMS=settings.mongo_connect_timeout_ms,
+        socketTimeoutMS=settings.mongo_socket_timeout_ms,
+        retryReads=settings.mongo_retry_reads,
+        retryWrites=settings.mongo_retry_writes,
+    )
+
+
+def get_historical_db() -> AsyncIOMotorDatabase:
+    return get_historical_mongo_client()[get_mongo_settings().mongo_db_name]
+
+
 async def bulk_upsert(
     db: AsyncIOMotorDatabase,
     source: str,
@@ -77,4 +106,10 @@ async def bulk_upsert(
     return upserted_total
 
 
-__all__ = ["get_mongo_client", "get_db", "bulk_upsert"]
+__all__ = [
+    "get_mongo_client",
+    "get_db",
+    "get_historical_mongo_client",
+    "get_historical_db",
+    "bulk_upsert",
+]

@@ -69,6 +69,7 @@ def fine_tune(
     for a short, reduced-learning-rate run.
     """
     settings = settings or get_settings()
+    log.info("training.device", device=str(DEVICE))
     model = copy.deepcopy(base_model).to(DEVICE)
     loss_fn = DemandForecastLoss()
     optimizer = torch.optim.Adam(

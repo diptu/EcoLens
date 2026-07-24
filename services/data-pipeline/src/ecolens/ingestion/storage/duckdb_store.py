@@ -40,7 +40,16 @@ def _quote(name: str) -> str:
 
 
 def _resolve_path(db_path: Path | None) -> Path:
-    return db_path if db_path is not None else get_settings().historical_duckdb_path
+    """Resolve to an absolute path immediately -- a bare relative
+    `historical_duckdb_path` would otherwise land wherever the calling
+    process's cwd happens to be at write time (e.g. wherever `uvicorn`
+    was launched from), which is easy to lose track of and doesn't match
+    wherever a `duckdb` CLI session opened later happens to be launched
+    from -- the exact bug already hit once in
+    notebooks/feature_validation_standalone.ipynb's OUTPUT_DIR.
+    """
+    path = db_path if db_path is not None else get_settings().historical_duckdb_path
+    return path.resolve()
 
 
 def write_historical(

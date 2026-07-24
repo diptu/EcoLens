@@ -119,3 +119,38 @@ class TestUnknownSource:
         db_path = tmp_path / "historical.duckdb"
         with pytest.raises(KeyError, match="Unknown source"):
             write_historical("not_a_real_source", [{"a": 1}], db_path=db_path)
+
+
+class TestPathResolution:
+    def test_relative_default_path_is_resolved_to_absolute(
+        self, tmp_path: Path, monkeypatch
+    ):
+        # Regression: historical_duckdb_path defaults to a relative Path,
+        # which used to resolve wherever the *caller's* cwd happened to
+        # be at write time (e.g. wherever uvicorn was launched from) --
+        # not necessarily where a `duckdb` CLI session opened later. Same
+        # class of bug already hit once in the feature-validation
+        # notebook's OUTPUT_DIR.
+        from ecolens.config import get_settings
+
+        monkeypatch.chdir(tmp_path)
+        get_settings.cache_clear()
+        monkeypatch.setenv("HISTORICAL_DUCKDB_PATH", "relative/historical.duckdb")
+        get_settings.cache_clear()
+
+        written = write_historical(
+            "bom", [_doc("066037", datetime(2024, 1, 1, tzinfo=timezone.utc), 20.0)]
+        )
+        assert written == 1
+
+        expected = tmp_path / "relative" / "historical.duckdb"
+        assert expected.exists()
+
+        # Reading it back works from any cwd, using the resolved absolute
+        # path -- not dependent on the reader's own cwd matching the
+        # writer's.
+        monkeypatch.chdir(tmp_path.parent)
+        out = read_historical("bom", db_path=expected)
+        assert len(out) == 1
+
+        get_settings.cache_clear()

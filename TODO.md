@@ -37,12 +37,29 @@ bucket the repo already provisions (`s3_bucket_raw` in `config.py`) via its
 `httpfs` extension — so ad-hoc historical queries (drift investigations,
 "what did AEMO report before a settlement correction") never have to touch
 live Mongo/Postgres.
-- [ ] [ECO-150] **Add a `DuckDBArchiveStore` writer.** New module (e.g.
-  `warehouse/runner/duckdb_archive.py`) that writes a batch of raw Mongo
-  docs to partitioned Parquet (`collection=<name>/year=<yyyy>/month=<mm>/`),
-  partitioned by each source's own event timestamp, not `fetched_at`. Add
-  `duckdb` to `services/data-pipeline/pyproject.toml` (`pyarrow` is already
-  a dependency).
+- [✓] [ECO-158] **Historical-backfill DuckDB store landed (ingestion layer,
+  BoM only).** `ingestion/storage/duckdb_store.py` — `write_historical()`/
+  `read_historical()`, one table per source (named after
+  `MongoSettings.collection_for_source`), upserted on
+  `MongoSettings.unique_key_for_source` so re-running a backfill is
+  idempotent. Wired into `scripts/backfill_bom_historical.py` right after
+  its Mongo `bulk_upsert` (best-effort — a DuckDB failure logs a warning
+  and doesn't fail the run, since the Mongo write already succeeded).
+  `duckdb` added to `services/data-pipeline/pyproject.toml`; new
+  `Settings.historical_duckdb_path` (default `data/historical/`, same
+  local-disk convention as `bom_cache_dir`/`training_snapshot_dir`). Tests
+  in `tests/test_ingestion_storage_duckdb.py`. This is a **single-file
+  upsert store**, not the partitioned-Parquet cold store ECO-150 below
+  describes, and it's only wired into the BoM historical-backfill path —
+  not the live per-source fetchers, and not `ArchiveManager`. ECO-150
+  should extend/reuse this module rather than starting a new one.
+- [ ] [ECO-150] **Add a `DuckDBArchiveStore` writer for `ArchiveManager`.**
+  Extend `ingestion/storage/duckdb_store.py` (see ECO-158 — reuse it,
+  don't fork it) or add a sibling in `warehouse/runner/` that writes a
+  batch of raw Mongo docs to partitioned Parquet
+  (`collection=<name>/year=<yyyy>/month=<mm>/`), partitioned by each
+  source's own event timestamp, not `fetched_at`. `duckdb` dependency is
+  already added.
 - [ ] [ECO-151] **Rewire `ArchiveManager.archive()` to back up before
   deleting.** `find()` the docs older than cutoff, write them via
   `DuckDBArchiveStore`, verify the write (row count matches), only then

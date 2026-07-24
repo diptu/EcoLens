@@ -116,6 +116,17 @@ class Settings(BaseSettings):
             "to the CWD by default — override via HOLIDAYS_CACHE_DIR."
         ),
     )
+    historical_duckdb_path: Path = Field(
+        default=Path("data/historical/ecolens_historical.duckdb"),
+        description=(
+            "Local DuckDB file the ingestion layer's historical backfills "
+            "(e.g. HistoricalFetcher's ERA5 backfill, see "
+            "ingestion/storage/duckdb_store.py) write into, in addition to "
+            "MongoDB -- a durable, queryable record that survives "
+            "warehouse/runner/archive.py's age-based Mongo deletion. Relative "
+            "to CWD by default, like bom_cache_dir/training_snapshot_dir above."
+        ),
+    )
 
     # ── ML tunables ───────────────────────────────────────────────────────
     model_lookback: int = 48  # input window in 30-min intervals

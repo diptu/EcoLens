@@ -1,0 +1,42 @@
+version: 2
+
+models:
+  - name: stg_aemo_nem_dispatch
+    description: Renamed/cast view over raw.aemo_nem_dispatch. 5-min grain, per NEM region.
+    columns:
+      - name: ts
+        tests: [not_null]
+      - name: region
+        tests: [not_null]
+
+  - name: stg_aemo_wem_dispatch
+    description: Renamed/cast view over raw.aemo_wem_dispatch. 30-min grain, WEM zone only.
+    columns:
+      - name: ts
+        tests: [not_null]
+      - name: region
+        tests: [not_null]
+
+  - name: stg_openelectricity_network
+    description: Renamed/cast view over raw.openelectricity_responses. Network-level (not per-region).
+    columns:
+      - name: ts
+        tests: [not_null]
+
+  - name: stg_bom_observations
+    description: Renamed/cast view over raw.bom_observations.
+    columns:
+      - name: ts
+        tests: [not_null]
+      - name: region
+        tests: [not_null]
+      - name: station_id
+        tests: [not_null]
+
+  - name: stg_public_holidays
+    description: Renamed/cast view over raw.aemo_holidays.
+    columns:
+      - name: date
+        tests: [not_null]
+      - name: region
+        tests: [not_null]

@@ -1,0 +1,42 @@
+# Lives inside the dbt project dir on purpose: WarehouseRunnerSettings
+# (ecolens.warehouse.runner.settings) sets dbt_profiles_dir to this same
+# directory, so there's exactly one place to point at for a working
+# `dbt` invocation, from the CLI or from the runner subprocess.
+#
+# Connection fields reuse the WAREHOUSE_RUNNER_PG_* env vars that
+# WarehouseRunnerSettings already reads (env_prefix "warehouse_runner_"),
+# so there's one source of truth for warehouse Postgres connection info
+# instead of a second, dbt-only copy.
+ecolens_warehouse:
+  target: "{{ env_var('WAREHOUSE_RUNNER_DBT_TARGET', 'dev') }}"
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var('WAREHOUSE_RUNNER_PG_HOST', 'localhost') }}"
+      port: "{{ env_var('WAREHOUSE_RUNNER_PG_PORT', '5432') | as_number }}"
+      user: "{{ env_var('WAREHOUSE_RUNNER_PG_USER', 'ecolens') }}"
+      password: "{{ env_var('WAREHOUSE_RUNNER_PG_PASSWORD', 'changeme') }}"
+      dbname: "{{ env_var('WAREHOUSE_RUNNER_PG_DATABASE', 'ecolens_warehouse') }}"
+      schema: "{{ env_var('WAREHOUSE_RUNNER_DBT_SCHEMA', 'public') }}"
+      threads: "{{ env_var('WAREHOUSE_RUNNER_DBT_THREADS', '4') | as_number }}"
+      connect_timeout: 10
+    staging:
+      type: postgres
+      host: "{{ env_var('WAREHOUSE_RUNNER_PG_HOST', 'localhost') }}"
+      port: "{{ env_var('WAREHOUSE_RUNNER_PG_PORT', '5432') | as_number }}"
+      user: "{{ env_var('WAREHOUSE_RUNNER_PG_USER', 'ecolens') }}"
+      password: "{{ env_var('WAREHOUSE_RUNNER_PG_PASSWORD', 'changeme') }}"
+      dbname: "{{ env_var('WAREHOUSE_RUNNER_PG_DATABASE', 'ecolens_warehouse') }}"
+      schema: "{{ env_var('WAREHOUSE_RUNNER_DBT_SCHEMA', 'public') }}"
+      threads: "{{ env_var('WAREHOUSE_RUNNER_DBT_THREADS', '4') | as_number }}"
+      connect_timeout: 10
+    prod:
+      type: postgres
+      host: "{{ env_var('WAREHOUSE_RUNNER_PG_HOST', 'localhost') }}"
+      port: "{{ env_var('WAREHOUSE_RUNNER_PG_PORT', '5432') | as_number }}"
+      user: "{{ env_var('WAREHOUSE_RUNNER_PG_USER', 'ecolens') }}"
+      password: "{{ env_var('WAREHOUSE_RUNNER_PG_PASSWORD', 'changeme') }}"
+      dbname: "{{ env_var('WAREHOUSE_RUNNER_PG_DATABASE', 'ecolens_warehouse') }}"
+      schema: "{{ env_var('WAREHOUSE_RUNNER_DBT_SCHEMA', 'public') }}"
+      threads: "{{ env_var('WAREHOUSE_RUNNER_DBT_THREADS', '4') | as_number }}"
+      connect_timeout: 10

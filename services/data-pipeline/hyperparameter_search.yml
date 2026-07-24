@@ -1,0 +1,48 @@
+# ECO-113: hyperparameter search space for the LSTM demand forecaster.
+#
+# Read by `ecolens.forecasting.training.tune` (via
+# `forecasting/training/search_space.py`'s `load_search_space()`) every
+# time `make model-tune` / `ecolens.forecasting.cli tune` runs. Edit
+# this file to change what gets searched -- widen `hidden_size`'s
+# choices, narrow `lr`'s range once you have a sense of what works,
+# add/drop a parameter -- without touching any Python code.
+#
+# Trial *count* is a separate knob and isn't set here: use
+# `make model-tune N_TRIALS=<n>` or `Settings.optuna_n_trials`.
+#
+# Each entry:
+#   type      - "categorical" (needs `choices`), "int", or "float"
+#               (both need `low`/`high`; `float` also accepts
+#               `log: true` for a log-uniform range -- appropriate for
+#               learning rates, which span orders of magnitude).
+#   setting   - the `ecolens.config.Settings` field this parameter
+#               overrides on the trial's own `Settings` copy (see
+#               `train_model()` -- it reads hyperparameters from
+#               `settings.model_*`, not from Optuna directly).
+#
+# A missing/malformed value falls back to this exact search space
+# (see search_space.py's `DEFAULT_SEARCH_SPACE`), so deleting this file
+# doesn't break `make model-tune` -- it just stops being editable
+# without a code change.
+
+search_space:
+  hidden_size:
+    type: categorical
+    setting: model_hidden_size
+    choices: [32, 64, 128, 256]
+  num_layers:
+    type: int
+    setting: model_num_layers
+    low: 1
+    high: 3
+  dropout:
+    type: float
+    setting: model_dropout
+    low: 0.0
+    high: 0.5
+  lr:
+    type: float
+    setting: model_train_lr
+    low: 0.0001
+    high: 0.01
+    log: true

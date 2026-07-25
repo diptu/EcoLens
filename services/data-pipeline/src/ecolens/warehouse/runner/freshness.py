@@ -1,20 +1,19 @@
 """Stage 1: source freshness check.
 
-Verifies that the MongoDB raw collections have fresh data. Compares
-the latest document timestamp in each source collection against the
-configured freshness threshold. If any source is stale, the run is
-aborted — running dbt on stale data produces a stale warehouse.
+Verifies that the DuckDB raw tables have fresh data. Compares each
+source's most recent `fetched_at` against the configured freshness
+threshold. If any source is stale, the run is aborted — running dbt on
+stale data produces a stale warehouse.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
-from pymongo import MongoClient
-
-from ecolens.ingestion.storage.settings import MongoSettings, get_mongo_settings
+from ecolens.config import get_settings
+from ecolens.ingestion.storage import duckdb_store
 from ecolens.shared.observability.logging import get_logger
 
 from .models import StageResult
@@ -24,82 +23,61 @@ log = get_logger(__name__)
 
 
 class SourceFreshnessChecker:
-    """Verify that the MongoDB raw collections have fresh data.
+    """Verify that the DuckDB raw tables have fresh data.
 
-    Connects via `MongoSettings` (the same settings the ingestion
-    fetchers themselves use), not a second warehouse-runner-specific
-    copy -- see settings.py's module docstring for why.
+    Reads `Settings.historical_duckdb_path` -- the same path every
+    ingestion write path uses -- rather than a warehouse-runner-specific
+    duplicate (see settings.py's module docstring for why).
     """
 
-    def __init__(
-        self,
-        settings: WarehouseRunnerSettings,
-        mongo_settings: MongoSettings | None = None,
-    ) -> None:
+    def __init__(self, settings: WarehouseRunnerSettings) -> None:
         self.settings = settings
-        self.mongo_settings = mongo_settings or get_mongo_settings()
-        self._client: MongoClient | None = None
-        # (collection, timestamp_field, threshold) -- built from settings so
-        # overriding e.g. freshness_threshold_aemo actually takes effect.
-        self.sources: list[tuple[str, str, Any]] = [
-            ("aemo_nem_dispatch", "fetched_at", settings.freshness_threshold_aemo),
-            ("aemo_wem_dispatch", "fetched_at", settings.freshness_threshold_aemo),
-            (
-                "openelectricity_responses",
-                "fetched_at",
-                settings.freshness_threshold_aemo,
-            ),
-            ("bom_observations", "fetched_at", settings.freshness_threshold_bom),
-            (
-                "aemo_holidays",
-                "fetched_at",
-                settings.freshness_threshold_holidays,
-            ),
+        self._db_path: Path | None = None
+        # (source, threshold) -- built from settings so overriding e.g.
+        # freshness_threshold_aemo actually takes effect.
+        self.sources: list[tuple[str, Any]] = [
+            ("aemo_nem", settings.freshness_threshold_aemo),
+            ("aemo_wem", settings.freshness_threshold_aemo),
+            ("openelectricity", settings.freshness_threshold_aemo),
+            ("bom", settings.freshness_threshold_bom),
+            ("aemo_holidays", settings.freshness_threshold_holidays),
         ]
 
     def connect(self) -> None:
-        try:
-            self._client = MongoClient(
-                self.mongo_settings.mongo_uri, serverSelectionTimeoutMS=5000
-            )
-            self._client.admin.command("ping")
-            # Log only the host, never the full URI -- Mongo connection
-            # strings carry credentials inline (mongodb+srv://user:pass@...).
-            log.info(
-                "source_freshness.connected",
-                uri_host=urlparse(self.mongo_settings.mongo_uri).hostname,
-            )
-        except Exception as exc:  # noqa: BLE001
-            log.warning("source_freshness.connect_failed", error=str(exc))
-            self._client = None
+        path = get_settings().historical_duckdb_path.resolve()
+        if not path.exists():
+            log.warning("source_freshness.store_not_found", path=str(path))
+            self._db_path = None
+            return
+        self._db_path = path
+        log.info("source_freshness.connected", path=str(path))
 
     def close(self) -> None:
-        if self._client is not None:
-            self._client.close()
-            self._client = None
+        self._db_path = None
 
     def check(self, *, allow_skip: bool = False) -> StageResult:
         """Check source freshness.
 
         Args:
-            allow_skip: if True, treat "Mongo unavailable" as a soft
-                success (used by --validate-only mode which is meant
-                to run even when Mongo can't be reached). Default False.
+            allow_skip: if True, treat "DuckDB store not found" as a
+                soft success (used by --validate-only mode which is
+                meant to run even before the store has ever been
+                written to). Default False.
         """
         started = datetime.now(timezone.utc)
-        if self._client is None:
+        if self._db_path is None:
             return StageResult(
                 name="source_freshness",
                 started_at=started,
                 finished_at=datetime.now(timezone.utc),
                 success=allow_skip,
-                metrics={"status": "skipped", "reason": "mongo not available"},
+                metrics={"status": "skipped", "reason": "duckdb store not found"},
                 error=None
                 if allow_skip
-                else "MongoDB unavailable; cannot verify sources",
+                else "DuckDB store not found; cannot verify sources",
             )
         try:
-            return self._do_check(self._client)
+            return self._do_check(self._db_path)
         except Exception as exc:  # noqa: BLE001
             log.error("source_freshness.check_failed", error=str(exc))
             return StageResult(
@@ -110,38 +88,23 @@ class SourceFreshnessChecker:
                 error=f"freshness check failed: {exc}",
             )
 
-    def _do_check(self, client: MongoClient) -> StageResult:
+    def _do_check(self, db_path: Path) -> StageResult:
         started = datetime.now(timezone.utc)
-        db = client[self.mongo_settings.mongo_db_name]
         results: list[dict[str, Any]] = []
         all_fresh = True
-        for collection, ts_field, threshold in self.sources:
-            doc = db[collection].find_one(sort=[(ts_field, -1)])
-            if doc is None:
+        for source, threshold in self.sources:
+            latest_ts = duckdb_store.latest_fetched_at(source, db_path=db_path)
+            if latest_ts is None:
                 all_fresh = False
                 results.append(
                     {
-                        "collection": collection,
+                        "source": source,
                         "status": "missing",
                         "latest_ts": None,
                         "age_minutes": None,
                     }
                 )
                 continue
-            latest_ts = doc.get(ts_field)
-            if latest_ts is None:
-                all_fresh = False
-                results.append(
-                    {
-                        "collection": collection,
-                        "status": "no_ts_field",
-                        "latest_ts": None,
-                        "age_minutes": None,
-                    }
-                )
-                continue
-            if isinstance(latest_ts, str):
-                latest_ts = datetime.fromisoformat(latest_ts.replace("Z", "+00:00"))
             if latest_ts.tzinfo is None:
                 latest_ts = latest_ts.replace(tzinfo=timezone.utc)
             age = datetime.now(timezone.utc) - latest_ts
@@ -150,7 +113,7 @@ class SourceFreshnessChecker:
                 all_fresh = False
             results.append(
                 {
-                    "collection": collection,
+                    "source": source,
                     "status": "fresh" if is_fresh else "stale",
                     "latest_ts": latest_ts.isoformat(),
                     "age_minutes": round(age.total_seconds() / 60, 1),

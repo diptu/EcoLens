@@ -54,8 +54,7 @@ Usage:
     fetcher = AEMONEMFetcher()
     async with httpx.AsyncClient(timeout=60) as client:
         docs = await fetcher.fetch(client, since=..., until=...)
-        await bulk_upsert(db, "aemo_nem_dispatch", docs,
-                          unique_keys=("region", "ts"))
+        duckdb_store.write_historical("aemo_nem", docs)
 """
 
 from __future__ import annotations
@@ -126,7 +125,7 @@ class AEMONEMFetcher:
             until:  end of range (UTC, tz-aware). Defaults to "now".
 
         Returns:
-            A list of dicts ready for bulk_upsert into MongoDB. Each
+            A list of dicts ready for duckdb_store.write_historical. Each
             dict has all OUTPUT_COLUMNS, with `None` for missing values.
         """
         if since is None:

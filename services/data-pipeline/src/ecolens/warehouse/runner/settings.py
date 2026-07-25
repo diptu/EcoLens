@@ -1,19 +1,17 @@
 """Warehouse-runner-specific settings.
 
 Why a separate file?
-    Same rationale as `MongoSettings` / `WarehouseApiSettings`: this is
-    a distinct surface (dbt invocation, source-freshness thresholds,
-    quality thresholds, retention policy) with tuning that shouldn't
-    couple to the rest of the data-pipeline service.
+    Same rationale as `IngestionSettings` / `WarehouseApiSettings`: this
+    is a distinct surface (dbt invocation, source-freshness thresholds,
+    quality thresholds) with tuning that shouldn't couple to the rest
+    of the data-pipeline service.
 
-No MongoDB connection fields here on purpose: `SourceFreshnessChecker`
-and `ArchiveManager` both take an optional `MongoSettings` instead of
-duplicating `mongo_uri`/`mongo_db_name` on this class. A previous
-version of this file *did* duplicate them (`WAREHOUSE_RUNNER_MONGO_URI`,
-separate from the `MONGO_URI` env var ingestion actually reads) and it
-was a real footgun: set `MONGO_URI` for ingestion, forget the
-warehouse-runner-specific copy, and freshness/archive silently connect
-to `localhost:27017` instead of the real cluster.
+No DuckDB path field here on purpose: `SourceFreshnessChecker` reads
+`Settings.historical_duckdb_path` (the same path every other ingestion
+write path uses), not a warehouse-runner-specific duplicate -- keeping
+the DuckDB location single-sourced avoids the exact footgun a previous
+version of this file had with a separate `WAREHOUSE_RUNNER_MONGO_URI`
+env var drifting from the `MONGO_URI` ingestion actually read.
 
 Defaults are chosen to work out of the box in this repo/dev machine
 (the dbt project dir resolves to the real `warehouse/dbt_project/`
@@ -76,10 +74,9 @@ class WarehouseRunnerSettings(BaseSettings):
     max_consecutive_gap_minutes: int = 90  # 1.5h gap in 30-min series = error
 
     # ── Retention ─────────────────────────────────────────────────────────
-    archive_after_days: int = Field(default=365, ge=1)
     vacuum_after_hours: int = Field(default=24, ge=1)
 
-    # ── Raw sync (MongoDB -> PostgreSQL raw.*, ecolens.ingestion.storage.postgres) ──
+    # ── Raw sync (DuckDB -> PostgreSQL raw.*, ecolens.ingestion.storage.postgres) ──
     raw_sync_lookback_days: int = Field(
         default=5,
         ge=1,

@@ -33,7 +33,7 @@ Usage:
     # or, to try the live tier first:
     async with httpx.AsyncClient(timeout=30) as client:
         docs = await fetcher.fetch(client, year=2026)
-        await bulk_upsert(db, "aemo_holidays", docs, run_id)
+        duckdb_store.write_historical("aemo_holidays", docs)
 """
 
 from __future__ import annotations
@@ -107,7 +107,7 @@ class HolidayFetcher:
 
         Returns:
             A list of dicts, one per (region, date) holiday, ready
-            for bulk_upsert into MongoDB (`aemo_holidays` collection).
+            for duckdb_store.write_historical (`aemo_holidays` table).
             Each dict has all 13 `schema.HOLIDAY_OUTPUT_COLUMNS`.
         """
         if year is None:

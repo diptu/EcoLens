@@ -1,13 +1,13 @@
-"""Manually trigger holiday fetch(es) -> MongoDB upsert.
+"""Manually trigger holiday fetch(es) -> DuckDB upsert.
 
 Standalone script (not a pytest test): fetches Australian public
 holidays for one or more calendar years (falls back to local cache,
 then a synthetic Easter-aware stub, if the live data.gov.au API is
-unreachable) and upserts docs into the `aemo_holidays` collection.
+unreachable) and upserts docs into the `aemo_holidays` table.
 Loops year-by-year when a range is given — a bad year is logged and
 skipped rather than aborting the rest of the range (same idempotent,
 resumable shape as `backfill_aemo.py`). Re-running over an
-already-ingested year is safe — bulk_upsert is idempotent on
+already-ingested year is safe — write_historical is idempotent on
 (region, date).
 
 Run directly:
@@ -29,7 +29,7 @@ import httpx
 import pandera.errors
 
 from ecolens.ingestion.sources.holidays import HolidayFetcher
-from ecolens.ingestion.storage.mongo import bulk_upsert, get_db, get_mongo_client
+from ecolens.ingestion.storage import duckdb_store
 from ecolens.ingestion.validators.holidays import validate as validate_docs
 from ecolens.shared.observability.logging import get_logger
 
@@ -101,10 +101,9 @@ async def ingest_one_year(fetcher: HolidayFetcher, year: int) -> int:
     except Exception as exc:  # noqa: BLE001
         log.warning("cache_write_failed", run_id=run_id, year=year, error=str(exc))
 
-    db = get_db()
-    upserted = await bulk_upsert(db, "aemo_holidays", docs, run_id)
-    log.info("mongo.upsert_complete", run_id=run_id, year=year, upserted=upserted)
-    return upserted
+    written = duckdb_store.write_historical("aemo_holidays", docs, run_id=run_id)
+    log.info("duckdb.write_complete", run_id=run_id, year=year, written=written)
+    return written
 
 
 async def run(years: list[int]) -> None:
@@ -115,7 +114,6 @@ async def run(years: list[int]) -> None:
     for year in years:
         totals[year] = await ingest_one_year(fetcher, year)
 
-    get_mongo_client().close()
     log.info("ingest.complete", years=years, totals=totals)
 
 

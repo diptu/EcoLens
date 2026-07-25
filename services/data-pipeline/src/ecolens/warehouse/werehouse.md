@@ -4,25 +4,27 @@
 
 ## The problem we're solving
 
-Our fetchers drop raw data into MongoDB every 30 minutes. That's 6 weather stations, 5 NEM regions, 1 WEM region, all firing at the same time. The data lands in there messy — different shapes, different time zones, some of it 5-min, some 30-min, some of it not even time series at all (holidays, for instance, are just dates).
+Our fetchers drop raw data into a local DuckDB file every 30 minutes. That's 6 weather stations, 5 NEM regions, 1 WEM region, all firing at the same time. The data lands in there messy — different shapes, different time zones, some of it 5-min, some 30-min, some of it not even time series at all (holidays, for instance, are just dates).
 
 The forecast API needs to train a neural network on this stuff. The dashboard needs to plot it. And we need to be able to ask questions like "what was the average demand in VIC1 on a 38°C weekday in February?" without writing a 200-line query.
 
 So we need a warehouse. Not a fancy one. Just a place where the data is **clean, joined, and ready to answer questions** in under 200 milliseconds.
+
+(This used to be MongoDB instead of DuckDB — see TODO.md's ECO-159 for why and when that changed. DuckDB plays the exact same "parking lot" role Mongo did; the rest of this doc's layering is unchanged.)
 
 ---
 
 ## The simple version
 
 ```
-MongoDB (raw, messy)  →  dbt (the cleanup crew)  →  PostgreSQL (the answer machine)
+DuckDB (raw, messy)  →  dbt (the cleanup crew)  →  PostgreSQL (the answer machine)
 ```
 
 That's it. Three places. Each one has a job.
 
-- **MongoDB** is the parking lot. The data lands here first, and it doesn't have to be pretty.
+- **DuckDB** is the parking lot. The data lands here first, and it doesn't have to be pretty. It's a single embedded file, not a server — no cluster to run, and `RawSyncer` reads from it directly (no network hop).
 - **dbt** is the cleaning crew. It takes the messy stuff, fixes it up, joins it together, and writes the result.
-- **PostgreSQL** is where we keep the finished product. This is what the dashboard and the forecast API read from. They never touch MongoDB.
+- **PostgreSQL** is where we keep the finished product. This is what the dashboard and the forecast API read from. They never touch DuckDB.
 
 ---
 
@@ -32,7 +34,7 @@ The dbt project has four layers, and each one has a specific job. Think of it li
 
 ### 1. Staging — "just rename the columns"
 
-The first layer is a thin wrapper over MongoDB. It does almost nothing. It just:
+The first layer is a thin wrapper over `raw.*` (itself populated from DuckDB by `RawSyncer`). It does almost nothing. It just:
 
 - Picks the right fields
 - Renames them to snake_case
@@ -91,7 +93,7 @@ Every week    →  rebuild the ML training set (with 3-year lookback for late AE
 Every year    →  pull the new year's holiday calendar
 ```
 
-The 30-minute cron entry does the whole thing in one shot. It fetches the new data into MongoDB, and only if that succeeds does it run dbt to update the warehouse. If anything goes wrong, the next tick catches up — there's no corruption, no half-state.
+The 30-minute cron entry does the whole thing in one shot. It fetches the new data into DuckDB, and only if that succeeds does it run dbt to update the warehouse. If anything goes wrong, the next tick catches up — there's no corruption, no half-state.
 
 ---
 
@@ -99,9 +101,15 @@ The 30-minute cron entry does the whole thing in one shot. It fetches the new da
 
 ### The race condition
 
-We used to have the fetchers and dbt running on separate cron schedules, every 15 minutes each. Then we realized: if dbt starts at 9:15 and the fetcher is still writing rows at 9:18, dbt sees a half-finished MongoDB collection and produces a half-finished warehouse. Bad.
+We used to have the fetchers and dbt running on separate cron schedules, every 15 minutes each. Then we realized: if dbt starts at 9:15 and the fetcher is still writing rows at 9:18, dbt sees a half-finished raw table and produces a half-finished warehouse. Bad.
 
 **Fix:** Chain them. One script does fetch → dbt, in that order. If the fetch fails, dbt doesn't run.
+
+### The DuckDB single-writer lock
+
+DuckDB allows exactly one read-write connection to the file at a time. Someone poking around with `duckdb -ui` or a plain interactive `duckdb <file>` session (opened read-write by default) blocks every fetcher trying to write until that session closes — and unlike a real database server, there's no queueing, the second connection just fails immediately.
+
+**Fix:** `duckdb_store._connect_with_retry` retries a lock conflict with backoff+jitter instead of failing on the first attempt. For humans: always add `-readonly` when just looking at the data (`duckdb <file> -readonly`) — a read-only connection doesn't block writers. `scripts/check_duckdb_status.py` diagnoses this directly, naming the exact PID holding the lock.
 
 ### Daylight saving time
 
@@ -129,12 +137,12 @@ If you want to find something, here's the cheat sheet:
 
 | Looking for… | Go to |
 |--------------|-------|
-| Raw energy data from AEMO | MongoDB `raw.aemo_nem_dispatch` |
+| Raw energy data from AEMO | DuckDB `aemo_nem_dispatch` table (`uv run --active ./scripts/check_duckdb_status.py`) |
 | Clean energy data, ready to chart | Postgres `fact_demand_30min` |
 | The gap-filled, uniform-interval series everything ML is built on | Postgres `int_energy_filled_30min` |
 | What features does the LSTM use? | Postgres `ml_features_demand_v1` |
 | Why is a holiday showing up? | Postgres `dim_holiday` |
-| What stations is BoM pulling from? | MongoDB `raw.bom_observations` |
+| What stations is BoM pulling from? | DuckDB `bom_observations` table |
 | When did dbt last run? | `/var/log/ecolens/ingest-*.log` |
 | What models are in the project? | `/opt/ecolens/dbt/models/` |
 
@@ -142,6 +150,6 @@ If you want to find something, here's the cheat sheet:
 
 ## TL;DR
 
-MongoDB is where data lands. dbt cleans it. PostgreSQL is where it lives once it's useful. The whole thing runs from a 30-minute cron entry, holds a million rows in a couple hundred MB, and feeds both the dashboard and the forecast API. The trick is being disciplined about the layers — don't put business logic in staging, don't do math in marts, don't reach back to MongoDB from the dashboard.
+DuckDB is where data lands. dbt cleans it. PostgreSQL is where it lives once it's useful. The whole thing runs from a 30-minute cron entry, holds a million rows in a couple hundred MB, and feeds both the dashboard and the forecast API. The trick is being disciplined about the layers — don't put business logic in staging, don't do math in marts, don't reach back to DuckDB from the dashboard.
 
 If you keep it that simple, the thing just runs.

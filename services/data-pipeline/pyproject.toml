@@ -13,14 +13,12 @@ dependencies = [
     "httpx>=0.28.1",
     "matplotlib>=3.9.0",
     "mlflow-skinny>=2.18.0",
-    "motor>=3.7.1",
     "numpy>=2.5.1",
     "optuna>=4.0.0",
     "pandas>=3.0.3",
     "pandera>=0.32.1",
     "pyarrow>=18.0.0",
     "psycopg2-binary>=2.9.9",
-    "pymongo>=4.17.0",
     "python-dotenv>=1.2.2",
     "pyyaml>=6.0.3",
     "redis>=5.0.0",
@@ -30,7 +28,6 @@ dependencies = [
     "scipy>=1.14.0",
     "torch>=2.5.0",
     "websocket-client>=1.8.0",
-    "duckdb>=1.5.5",
 ]
 
 [dependency-groups]

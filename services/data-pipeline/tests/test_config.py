@@ -25,7 +25,6 @@ class TestSettingsDefaults:
         assert settings.service_name == "ecolens-data-pipeline"
         assert settings.env == "dev"
         assert settings.log_level == "INFO"
-        assert settings.mongo_db_name == "ecolens"
         assert settings.oe_api_key is None
         assert settings.model_lookback == 48
         assert settings.optuna_n_trials == 50

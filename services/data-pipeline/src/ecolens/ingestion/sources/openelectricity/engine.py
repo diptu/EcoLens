@@ -63,14 +63,12 @@ Usage:
             client,
             since=datetime.now(timezone.utc) - timedelta(hours=1),
         )
-        await bulk_upsert(db, "openelectricity_responses", docs,
-                          unique_keys=("network_code", "ts"))
+        duckdb_store.write_historical("openelectricity", docs)
 
-    # Facility registry (monthly)
+    # Facility registry (monthly) -- not yet wired into
+    # IngestionSettings.table_for_source; illustrative only.
     facility_fetcher = OpenElectricityFacilityFetcher(api_key=settings.oe_api_key)
     facilities = await facility_fetcher.fetch_facilities(client)
-    await bulk_upsert(db, "openelectricity_facilities", facilities,
-                      unique_keys=("facility_id",))
 """
 
 from __future__ import annotations

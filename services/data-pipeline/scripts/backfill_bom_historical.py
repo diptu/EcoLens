@@ -1,4 +1,4 @@
-"""Backfill historical BoM weather via Open-Meteo (ERA5) -> MongoDB upsert.
+"""Backfill historical BoM weather via Open-Meteo (ERA5) -> DuckDB upsert.
 
 Standalone script (not a pytest test): the live BoM observations.json
 endpoint only returns ~24-48h of history, so LSTM training needs this
@@ -7,8 +7,8 @@ instead (same physics as BoM's own sensors — it assimilates BoM
 observations — but with no missing values, no quality flags, and
 hourly data back to 1940). Emits the same v1.0 schema as the live
 fetcher (`source="open_meteo_era5"`, `data_quality_status="final"`),
-duplicated into 30-min slots, and writes into the SAME cache/Mongo
-collection the live fetcher uses so both coexist for dbt.
+duplicated into 30-min slots, and writes into the SAME local cache/
+DuckDB table the live fetcher uses so both coexist for dbt.
 
 This is a one-shot bulk backfill (years of data per run), not a
 resumable day-by-day loop like `backfill_aemo.py` — Open-Meteo serves
@@ -39,7 +39,6 @@ from ecolens.ingestion.sources.bom.schema import (
     ERA5_LAG_DAYS,
     HISTORICAL_TIMEOUT_SECONDS,
 )
-from ecolens.ingestion.storage.mongo import bulk_upsert, get_db, get_mongo_client
 from ecolens.ingestion.validators.bom import validate as validate_docs
 from ecolens.shared.observability.logging import get_logger
 
@@ -120,23 +119,8 @@ async def run(
     except Exception as exc:  # noqa: BLE001
         log.warning("cache_write_failed", run_id=run_id, error=str(exc))
 
-    db = get_db()
-    upserted = await bulk_upsert(db, "bom", docs, run_id)
-    log.info("mongo.upsert_complete", run_id=run_id, upserted=upserted)
-
-    # docs already carry the ingest_run_id/fetched_at/source stamped by
-    # bulk_upsert (mutated in place) -- mirror the same batch into the
-    # local DuckDB historical store so this backfill survives
-    # warehouse/runner/archive.py's age-based Mongo deletion. Best-effort,
-    # same as the cache-write handling above: the Mongo write already
-    # succeeded, so a DuckDB failure here shouldn't fail the whole run.
-    try:
-        written = fetcher.write_duckdb(docs)
-        log.info("duckdb.write_complete", run_id=run_id, written=written)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("duckdb_write_failed", run_id=run_id, error=str(exc))
-
-    get_mongo_client().close()
+    written = fetcher.write_duckdb(docs, run_id=run_id)
+    log.info("duckdb.write_complete", run_id=run_id, written=written)
 
 
 if __name__ == "__main__":

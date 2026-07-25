@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from typing import Any
 
 
@@ -111,67 +110,6 @@ class FakeAsyncpgPool:
 
     async def close(self) -> None:
         self.closed = True
-
-
-class FakeMongoCollection:
-    """Duck-typed stand-in for a pymongo Collection."""
-
-    def __init__(
-        self,
-        *,
-        doc: dict[str, Any] | None = None,
-        delete_count: int = 0,
-    ) -> None:
-        self._doc = doc
-        self._delete_count = delete_count
-        self.delete_calls: list[Any] = []
-
-    def find_one(self, *args: Any, **kwargs: Any) -> dict[str, Any] | None:
-        return self._doc
-
-    def delete_many(self, filter: Any) -> SimpleNamespace:  # noqa: A002
-        self.delete_calls.append(filter)
-        return SimpleNamespace(deleted_count=self._delete_count)
-
-
-class FakeMongoClient:
-    """Duck-typed stand-in for `pymongo.MongoClient`.
-
-    `collections` maps collection name -> FakeMongoCollection; any
-    name not in the map gets an empty default collection (find_one ->
-    None, delete_many -> 0 deleted) rather than a KeyError.
-    """
-
-    def __init__(
-        self,
-        *args: Any,
-        collections: dict[str, FakeMongoCollection] | None = None,
-        ping_raises: Exception | None = None,
-        **kwargs: Any,
-    ) -> None:
-        self._collections = collections or {}
-        self._ping_raises = ping_raises
-        self.closed = False
-        self.admin = SimpleNamespace(command=self._command)
-
-    def _command(self, *args: Any, **kwargs: Any) -> dict[str, int]:
-        if self._ping_raises:
-            raise self._ping_raises
-        return {"ok": 1}
-
-    def __getitem__(self, _db_name: str) -> "_FakeMongoDb":
-        return _FakeMongoDb(self._collections)
-
-    def close(self) -> None:
-        self.closed = True
-
-
-class _FakeMongoDb:
-    def __init__(self, collections: dict[str, FakeMongoCollection]) -> None:
-        self._collections = collections
-
-    def __getitem__(self, name: str) -> FakeMongoCollection:
-        return self._collections.setdefault(name, FakeMongoCollection())
 
 
 class FakePgConnection:

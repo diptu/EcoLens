@@ -34,8 +34,14 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked
 
+      # [ECO-161] The DuckDB file this writes to (historical_duckdb_path)
+      # is local to this ephemeral runner and is discarded when the job
+      # ends -- unlike the old MONGO_URI-backed cluster, nothing here
+      # persists ingested rows across scheduled runs yet. Needs a
+      # restore-before / upload-after step (e.g. actions/cache,
+      # actions/upload-artifact + download, or an S3 sync) before this
+      # workflow actually accumulates history.
       - name: Trigger OpenElectricity ingest
         env:
           OE_API_KEY: ${{ secrets.OE_API_KEY }}
-          MONGO_URI: ${{ secrets.MONGO_URI }}
         run: uv run python scripts/trigger_ingest_openelectricity.py

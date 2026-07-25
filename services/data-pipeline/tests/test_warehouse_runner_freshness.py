@@ -1,39 +1,67 @@
 """Tests for ecolens.warehouse.runner.freshness.SourceFreshnessChecker.
 
-Uses a fake pymongo-shaped client (from conftest.py) so these never
-touch a real MongoDB server. Also exercises the actual freshness
-comparison logic, which the original script's tests never covered
-(they only asserted the "pymongo not installed" skip path, which
-never fires in this repo since pymongo is a hard dependency).
+Uses a real tmp_path-scoped DuckDB file (written via
+ecolens.ingestion.storage.duckdb_store.write_historical) rather than a
+mock -- freshness's whole job is "read what's actually in the store", so
+exercising the real read path is more direct than reimplementing it with
+a double. To simulate a *stale* source, a row is written (which always
+stamps `fetched_at` to "now") and then directly backdated with a raw
+UPDATE -- write_historical itself has no way to accept a caller-supplied
+fetched_at, by design (it should always reflect the real write time).
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from conftest import FakeMongoClient, FakeMongoCollection
+import duckdb
+import pytest
 
-import ecolens.warehouse.runner.freshness as freshness_module
+from ecolens.config import get_settings
+from ecolens.ingestion.storage import duckdb_store
+from ecolens.ingestion.storage.duckdb_store import write_historical
 from ecolens.warehouse.runner.freshness import SourceFreshnessChecker
 from ecolens.warehouse.runner.settings import WarehouseRunnerSettings
 
-
-def _fresh_doc() -> dict:
-    return {"fetched_at": datetime.now(timezone.utc) - timedelta(minutes=5)}
+_ALL_SOURCES = ["aemo_nem", "aemo_wem", "openelectricity", "bom", "aemo_holidays"]
 
 
-def _stale_doc() -> dict:
-    return {"fetched_at": datetime.now(timezone.utc) - timedelta(hours=5)}
+@pytest.fixture(autouse=True)
+def _duckdb_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("HISTORICAL_DUCKDB_PATH", str(tmp_path / "historical.duckdb"))
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
-def _all_fresh_collections() -> dict[str, FakeMongoCollection]:
-    return {
-        "aemo_nem_dispatch": FakeMongoCollection(doc=_fresh_doc()),
-        "aemo_wem_dispatch": FakeMongoCollection(doc=_fresh_doc()),
-        "openelectricity_responses": FakeMongoCollection(doc=_fresh_doc()),
-        "bom_observations": FakeMongoCollection(doc=_fresh_doc()),
-        "aemo_holidays": FakeMongoCollection(doc=_fresh_doc()),
-    }
+def _doc(source: str) -> dict:
+    if source == "bom":
+        return {"station_id": "1", "ts": datetime(2026, 1, 1, tzinfo=timezone.utc)}
+    if source == "aemo_wem":
+        return {"ts": datetime(2026, 1, 1, tzinfo=timezone.utc)}
+    if source == "aemo_holidays":
+        return {"region": "NSW1", "date": "2026-01-01"}
+    if source == "openelectricity":
+        return {"network_code": "NEM", "ts": datetime(2026, 1, 1, tzinfo=timezone.utc)}
+    return {"region": "NSW1", "ts": datetime(2026, 1, 1, tzinfo=timezone.utc)}
+
+
+def _write_all_fresh() -> None:
+    for source in _ALL_SOURCES:
+        write_historical(source, [_doc(source)])
+
+
+def _backdate(source: str, age: timedelta) -> None:
+    """Directly rewrite a source's fetched_at to simulate staleness."""
+    path = get_settings().historical_duckdb_path.resolve()
+    table = duckdb_store.get_ingestion_settings().table_for_source(source)
+    con = duckdb.connect(str(path))
+    try:
+        con.execute(
+            f'UPDATE "{table}" SET fetched_at = ?', [datetime.now(timezone.utc) - age]
+        )
+    finally:
+        con.close()
 
 
 class TestNotConnected:
@@ -48,16 +76,17 @@ class TestNotConnected:
         checker = SourceFreshnessChecker(WarehouseRunnerSettings())
         result = checker.check(allow_skip=False)
         assert result.success is False
-        assert "unavailable" in (result.error or "").lower()
+        assert "not found" in (result.error or "").lower()
+
+    def test_connect_with_no_store_leaves_db_path_none(self):
+        checker = SourceFreshnessChecker(WarehouseRunnerSettings())
+        checker.connect()
+        assert checker._db_path is None
 
 
 class TestConnected:
-    def test_all_fresh_sources_succeeds(self, monkeypatch):
-        monkeypatch.setattr(
-            freshness_module,
-            "MongoClient",
-            lambda *a, **kw: FakeMongoClient(collections=_all_fresh_collections()),
-        )
+    def test_all_fresh_sources_succeeds(self):
+        _write_all_fresh()
         checker = SourceFreshnessChecker(WarehouseRunnerSettings())
         checker.connect()
         result = checker.check()
@@ -65,86 +94,54 @@ class TestConnected:
         assert result.metrics["all_fresh"] is True
         assert len(result.metrics["sources"]) == 5
 
-    def test_one_stale_source_fails(self, monkeypatch):
-        collections = _all_fresh_collections()
-        collections["bom_observations"] = FakeMongoCollection(doc=_stale_doc())
-        monkeypatch.setattr(
-            freshness_module,
-            "MongoClient",
-            lambda *a, **kw: FakeMongoClient(collections=collections),
-        )
+    def test_one_stale_source_fails(self):
+        _write_all_fresh()
+        _backdate("bom", timedelta(hours=5))  # exceeds freshness_threshold_bom (2h)
         checker = SourceFreshnessChecker(WarehouseRunnerSettings())
         checker.connect()
         result = checker.check()
         assert result.success is False
         assert result.error == "one or more sources are stale"
-        statuses = {s["collection"]: s["status"] for s in result.metrics["sources"]}
-        assert statuses["bom_observations"] == "stale"
-        assert statuses["aemo_nem_dispatch"] == "fresh"
+        statuses = {s["source"]: s["status"] for s in result.metrics["sources"]}
+        assert statuses["bom"] == "stale"
+        assert statuses["aemo_nem"] == "fresh"
 
-    def test_missing_collection_fails(self, monkeypatch):
-        collections = _all_fresh_collections()
-        collections["aemo_holidays"] = FakeMongoCollection(doc=None)
-        monkeypatch.setattr(
-            freshness_module,
-            "MongoClient",
-            lambda *a, **kw: FakeMongoClient(collections=collections),
-        )
+    def test_missing_source_fails(self):
+        for source in _ALL_SOURCES:
+            if source != "aemo_holidays":
+                write_historical(source, [_doc(source)])
         checker = SourceFreshnessChecker(WarehouseRunnerSettings())
         checker.connect()
         result = checker.check()
         assert result.success is False
-        statuses = {s["collection"]: s["status"] for s in result.metrics["sources"]}
+        statuses = {s["source"]: s["status"] for s in result.metrics["sources"]}
         assert statuses["aemo_holidays"] == "missing"
 
-    def test_string_timestamp_is_parsed(self, monkeypatch):
-        collections = _all_fresh_collections()
-        recent = (
-            (datetime.now(timezone.utc) - timedelta(minutes=1))
-            .isoformat()
-            .replace("+00:00", "Z")
-        )
-        collections["bom_observations"] = FakeMongoCollection(
-            doc={"fetched_at": recent}
-        )
-        monkeypatch.setattr(
-            freshness_module,
-            "MongoClient",
-            lambda *a, **kw: FakeMongoClient(collections=collections),
-        )
+    def test_check_failure_returns_failed_stage(self, monkeypatch):
+        _write_all_fresh()
         checker = SourceFreshnessChecker(WarehouseRunnerSettings())
         checker.connect()
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(duckdb_store, "latest_fetched_at", _boom)
         result = checker.check()
-        assert result.success is True
-
-    def test_connect_failure_leaves_client_none(self, monkeypatch):
-        monkeypatch.setattr(
-            freshness_module,
-            "MongoClient",
-            lambda *a, **kw: FakeMongoClient(ping_raises=ConnectionError("down")),
-        )
-        checker = SourceFreshnessChecker(WarehouseRunnerSettings())
-        checker.connect()
-        assert checker._client is None
-        result = checker.check(allow_skip=False)
         assert result.success is False
+        assert "boom" in (result.error or "")
 
-    def test_close_resets_client(self, monkeypatch):
-        monkeypatch.setattr(
-            freshness_module,
-            "MongoClient",
-            lambda *a, **kw: FakeMongoClient(collections=_all_fresh_collections()),
-        )
+    def test_close_resets_db_path(self):
+        _write_all_fresh()
         checker = SourceFreshnessChecker(WarehouseRunnerSettings())
         checker.connect()
-        assert checker._client is not None
+        assert checker._db_path is not None
         checker.close()
-        assert checker._client is None
+        assert checker._db_path is None
 
 
 class TestSourcesBuiltFromSettings:
     def test_thresholds_come_from_settings_not_hardcoded(self):
         settings = WarehouseRunnerSettings(freshness_threshold_bom=timedelta(minutes=1))
         checker = SourceFreshnessChecker(settings)
-        bom_entries = [s for s in checker.sources if s[0] == "bom_observations"]
-        assert bom_entries[0][2] == timedelta(minutes=1)
+        bom_entries = [s for s in checker.sources if s[0] == "bom"]
+        assert bom_entries[0][1] == timedelta(minutes=1)

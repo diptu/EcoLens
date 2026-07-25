@@ -1,52 +1,72 @@
-# ecoLens — MongoDB Ingestion Pipeline
+# ecoLens — DuckDB Ingestion Pipeline
 
 The ingestion pipeline is **Part 1 of the ecoLens three-layer architecture**:
 
 ```text
-External APIs → MongoDB → PostgreSQL raw.* → dbt
+External APIs → DuckDB → PostgreSQL raw.* → dbt
 ```
 
-## Why MongoDB?
+(This used to be `External APIs → MongoDB → PostgreSQL raw.* → dbt` — MongoDB
+has been removed entirely; see TODO.md's ECO-159 for the migration record.)
+
+## Why DuckDB?
 
 | Storage                | Purpose                                      |
-| ---------------------- | -------------------------------------------- |
-| **MongoDB**            | Raw, semi-structured, evolving API responses |
-| **PostgreSQL `raw.*`** | Structured data consumed by dbt              |
+| ---------------------- | --------------------------------------------- |
+| **DuckDB**              | Raw, typed, per-source local file store       |
+| **PostgreSQL `raw.*`** | Structured data consumed by dbt               |
 
-> **MongoDB = raw source of truth. PostgreSQL `raw.*` = structured transformation input.**
+> **DuckDB = raw source of truth. PostgreSQL `raw.*` = structured transformation input.**
+
+Unlike the MongoDB it replaced, DuckDB is an embedded, zero-ops, single-file
+store — no server process, no cluster to provision or pay for. The tradeoff
+is DuckDB allows exactly **one read-write connection to the file at a time**;
+`ingestion/storage/duckdb_store.py`'s `_connect_with_retry` absorbs
+transient lock conflicts (e.g. two fetchers writing at once, or someone with
+an interactive `duckdb` session left open) with backoff+jitter rather than
+failing on the first attempt, but a long-held external connection can still
+make a write wait or eventually fail — see `scripts/check_duckdb_status.py`
+for diagnosing that.
 
 ---
 
-## MongoDB Collections
+## DuckDB Tables
+
+One table per source, in the file at `Settings.historical_duckdb_path`
+(default `data/historical/ecolens_historical.duckdb`, resolved to an
+absolute path regardless of the calling process's cwd):
 
 ```text
-ecoLens
+ecolens_historical.duckdb
 ├── openelectricity_responses  # OE network, emissions, intensity
 ├── aemo_nem_dispatch          # NEM 5-minute dispatch
 ├── aemo_wem_dispatch          # WEM 30-minute data
-├── bom_observations            # BoM weather observations
-├── aemo_holidays               # Regional holiday snapshots
-└── meta_ingest_runs            # Ingestion audit logs
+├── bom_observations           # BoM weather observations
+└── aemo_holidays              # Regional holiday snapshots
 ```
 
-### Unique Indexes
+### Unique keys (`IngestionSettings.unique_key_for_source`)
 
-| Collection                  | Unique Key          |
-| --------------------------- | ------------------- |
-| `openelectricity_responses` | `network_code + ts` |
-| `aemo_nem_dispatch`         | `region + ts`       |
-| `aemo_wem_dispatch`         | `ts`                |
-| `bom_observations`          | `station_id + ts`   |
-| `aemo_holidays`             | `region + date`     |
+| Source            | Table                        | Unique Key           |
+| ------------------ | ----------------------------- | --------------------- |
+| `openelectricity`  | `openelectricity_responses`  | `network_code + ts`   |
+| `aemo_nem`         | `aemo_nem_dispatch`          | `region + ts`         |
+| `aemo_wem`         | `aemo_wem_dispatch`          | `ts`                  |
+| `bom`              | `bom_observations`           | `station_id + ts`     |
+| `aemo_holidays`    | `aemo_holidays`              | `region + date`       |
 
-All data collections also include:
+Every table also carries:
 
 ```text
-ts
+ts (or date, for holidays)
 ingest_run_id
 fetched_at
 source
 ```
+
+stamped by `duckdb_store.write_historical()` itself (mutating each doc in
+place before writing) — every caller gets this bookkeeping "for free" the
+same way MongoDB's old `bulk_upsert` used to provide it as a side effect.
 
 ---
 
@@ -56,104 +76,84 @@ source
 External API
      │
      ▼
-┌─────────────────────────────┐
-│ MongoIngestionPipeline      │
-│                             │
-│ 1. Fetch via httpx          │
-│ 2. Retry + exponential backoff│
-│ 3. Redis circuit breaker    │
-│ 4. Validate with pandera    │
-│ 5. Bulk upsert to MongoDB   │
-│ 6. Log ingestion run        │
-└──────────────┬──────────────┘
+┌───────────────────────────────┐
+│ fetch → validate → write      │
+│                                │
+│ 1. Fetch via httpx             │
+│ 2. Retry + exponential backoff │
+│ 3. Redis circuit breaker       │
+│ 4. Validate with pandera       │
+│ 5. duckdb_store.write_historical│
+└──────────────┬─────────────────┘
                ▼
-            MongoDB
+       ecolens_historical.duckdb
 ```
 
-Each source runs concurrently. Within a source, regions and stations are processed concurrently using `asyncio.TaskGroup`.
+Each source runs concurrently (fetch side — HTTP calls, not the DuckDB
+write itself, which is serialized by the single-writer-lock retry
+mentioned above). Within a source, regions and stations are processed
+concurrently using `asyncio.TaskGroup`.
 
 ---
 
-## MongoDB Upsert
+## DuckDB Upsert
 
 ```python
-async def _upsert(
-    self,
-    source: Source,
+# ecolens.ingestion.storage.duckdb_store.write_historical
+def write_historical(
+    source: str,
     docs: list[dict],
-    run_id: str,
+    *,
+    run_id: str | None = None,
 ) -> int:
     if not docs:
         return 0
 
+    run_id = run_id or uuid.uuid4().hex
+    fetched_at = datetime.now(timezone.utc)
     for doc in docs:
-        doc.update(
-            ingest_run_id=run_id,
-            fetched_at=datetime.now(timezone.utc),
-            source=source.name,
-        )
+        doc["ingest_run_id"] = run_id
+        doc["fetched_at"] = fetched_at
+        doc["source"] = source
 
-    operations = [
-        UpdateOne(
-            {key: doc[key] for key in source.unique_key},
-            {"$set": doc},
-            upsert=True,
-        )
-        for doc in docs
-    ]
-
-    result = await self.db[source.collection].bulk_write(
-        operations,
-        ordered=False,
-    )
-
-    return result.upserted_count + result.modified_count
+    table = settings.table_for_source(source)
+    key_columns = settings.unique_key_for_source(source)
+    # INSERT ... ON CONFLICT (key_columns) DO UPDATE SET ... -- see
+    # duckdb_store.py's _upsert() for the real SQL construction.
+    ...
+    return len(docs)
 ```
 
 ---
 
-## MongoDB → PostgreSQL Syncer
+## DuckDB → PostgreSQL Syncer
 
-The syncer converts raw MongoDB documents into structured PostgreSQL `raw.*` tables.
+The syncer (`ecolens.ingestion.storage.postgres.RawSyncer`) converts raw
+DuckDB rows into structured PostgreSQL `raw.*` tables.
 
 ```python
-async def sync_one(
-    self,
-    collection: str,
-    table: str,
-    flatten: Callable,
-) -> int:
+async def sync_one(self, source: str, *, since: datetime | None = None) -> int:
+    columns = _SOURCE_COLUMNS[source]
+    table = f"raw.{self.ingestion_settings.table_for_source(source)}"
 
-    cursor = self.mongo_db[collection].find({})
-    rows = []
+    # DuckDB has no async driver -- read in a thread so it doesn't
+    # block the event loop the rest of this class's Postgres I/O runs on.
+    rows = await asyncio.to_thread(
+        duckdb_store.read_historical_since, source, since=since
+    )
 
-    async for doc in cursor:
-        rows.extend(flatten(doc))
-
-    if not rows:
-        return 0
-
-    df = pd.DataFrame(rows)
-
-    async with self.pg_session() as session:
-        await load_to_postgres(
-            session,
-            df,
-            table,
-            schema="raw",
-        )
+    sql = _upsert_sql(table, columns, unique_key)
+    for batch in _chunks(rows, _PG_WRITE_CHUNK_SIZE):
+        await self._write_batch(sql, batch)
 
     return len(rows)
 ```
 
 ```text
-MongoDB Raw Documents
+DuckDB Raw Rows
           │
           ▼
-       Flatten
-          │
-          ▼
-      DataFrame
+   Column projection
           │
           ▼
 PostgreSQL raw.*
@@ -167,15 +167,15 @@ PostgreSQL raw.*
 ## Verification
 
 ```bash
-# Ingest external API data → MongoDB
-curl -X POST localhost:8001/v1/ingest/bom
+# Ingest external API data -> DuckDB (via the control API)
+curl -X POST "localhost:8001/ingestion/historical?source=bom&date=2026-01-01"
 
-# Verify MongoDB
-docker compose exec mongo mongosh ecolens --eval \
-'db.bom_observations.find().limit(1)'
+# Verify DuckDB directly
+uv run --active ./scripts/check_duckdb_status.py
+# or: duckdb data/historical/ecolens_historical.duckdb -readonly -c "SELECT * FROM bom_observations LIMIT 1"
 
-# Sync MongoDB → PostgreSQL raw.*
-curl -X POST localhost:8001/v1/ingest/sync
+# Sync DuckDB -> PostgreSQL raw.*
+uv run --active ./scripts/sync_raw.py
 
 # Verify PostgreSQL
 psql -U ecolens -d ecolens -c \
@@ -188,8 +188,8 @@ psql -U ecolens -d ecolens -c \
 
 * **Idempotent** — Unique keys prevent duplicate records during retries.
 * **Traceable** — `ingest_run_id` links records to ingestion executions.
-* **Replayable** — Raw API responses remain in MongoDB and can be reprocessed without refetching the API.
-* **Flexible** — MongoDB accommodates evolving external API schemas.
-* **Analytics-ready** — PostgreSQL `raw.*` provides structured input for dbt.
+* **Replayable** — Raw API responses remain in DuckDB and can be reprocessed without refetching the API.
+* **Zero-ops** — No server process, no cluster; a single portable file.
+* **Analytics-ready** — Queryable directly (via the `duckdb` CLI, a notebook, or `duckdb_store.read_historical`) without needing PostgreSQL at all, *and* PostgreSQL `raw.*` provides structured input for dbt.
 
-> **MongoDB preserves the raw truth. PostgreSQL structures the truth. dbt transforms the truth.**
+> **DuckDB preserves the raw truth. PostgreSQL structures the truth. dbt transforms the truth.**

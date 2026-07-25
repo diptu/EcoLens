@@ -74,7 +74,7 @@ def create_app(settings: WarehouseApiSettings | None = None) -> FastAPI:
         version="1.0.0",
         description=(
             "Read-only API over the PostgreSQL data warehouse produced by dbt. "
-            "Powers the dashboard and forecast-api services. Never queries MongoDB."
+            "Powers the dashboard and forecast-api services. Never queries DuckDB directly."
         ),
         lifespan=_build_lifespan(resolved_settings),
     )

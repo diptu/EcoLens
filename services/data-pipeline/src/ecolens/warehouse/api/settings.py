@@ -1,7 +1,7 @@
 """Warehouse-API-specific settings.
 
 Why a separate file?
-    Same rationale as `ecolens.ingestion.storage.settings.MongoSettings`:
+    Same rationale as `ecolens.ingestion.storage.settings.IngestionSettings`:
     this is a distinct read surface (its own Postgres pool sizing, Redis
     cache TTL, port, row limits) with tuning that shouldn't couple to the
     rest of the data-pipeline service or to the ingestion layer's own

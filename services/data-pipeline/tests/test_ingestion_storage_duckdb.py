@@ -154,3 +154,57 @@ class TestPathResolution:
         assert len(out) == 1
 
         get_settings.cache_clear()
+
+
+class TestLockRetry:
+    def test_retries_through_a_transient_lock_conflict_then_succeeds(
+        self, tmp_path, monkeypatch
+    ):
+        import duckdb
+
+        from ecolens.ingestion.storage import duckdb_store
+
+        db_path = tmp_path / "historical.duckdb"
+        real_connect = duckdb.connect
+        calls = {"n": 0}
+
+        def flaky_connect(path, read_only=False):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise duckdb.IOException("Could not set lock on file (simulated)")
+            return real_connect(path, read_only=read_only)
+
+        monkeypatch.setattr(duckdb_store.duckdb, "connect", flaky_connect)
+        monkeypatch.setattr(
+            duckdb_store.time, "sleep", lambda _: None
+        )  # don't slow the test down
+
+        written = write_historical(
+            "bom",
+            [_doc("066037", datetime(2024, 1, 1, tzinfo=timezone.utc), 20.0)],
+            db_path=db_path,
+        )
+        assert written == 1
+        assert calls["n"] == 3  # 2 failed attempts, 3rd succeeded
+
+    def test_exhausts_retries_and_raises_if_lock_never_clears(
+        self, tmp_path, monkeypatch
+    ):
+        import duckdb
+
+        from ecolens.ingestion.storage import duckdb_store
+
+        db_path = tmp_path / "historical.duckdb"
+
+        def always_locked(path, read_only=False):
+            raise duckdb.IOException("Could not set lock on file (simulated)")
+
+        monkeypatch.setattr(duckdb_store.duckdb, "connect", always_locked)
+        monkeypatch.setattr(duckdb_store.time, "sleep", lambda _: None)
+
+        with pytest.raises(duckdb.IOException):
+            write_historical(
+                "bom",
+                [_doc("066037", datetime(2024, 1, 1, tzinfo=timezone.utc), 20.0)],
+                db_path=db_path,
+            )

@@ -197,7 +197,7 @@ class TestWriteDuckdb:
         fetcher = HistoricalFetcher(cache_dir=tmp_path)
         calls = []
 
-        def fake_write_historical(source, docs):
+        def fake_write_historical(source, docs, **kwargs):
             calls.append((source, docs))
             return len(docs)
 

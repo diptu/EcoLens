@@ -36,7 +36,7 @@ Usage:
     fetcher = BomFetcher()
     async with httpx.AsyncClient(timeout=30) as client:
         docs = await fetcher.fetch(client, since=..., until=...)
-        await bulk_upsert(db, "bom", docs, run_id)
+        duckdb_store.write_historical("bom", docs)
 """
 
 from __future__ import annotations
@@ -107,8 +107,8 @@ class BomFetcher:
             until:  end of range (UTC, tz-aware). Defaults to "now".
 
         Returns:
-            A list of dicts ready for bulk_upsert into MongoDB
-            (`raw.bom_observations` collection). Each dict has all 22
+            A list of dicts ready for duckdb_store.write_historical
+            (`bom_observations` table). Each dict has all 22
             `schema.OBSERVATION_OUTPUT_COLUMNS`, with `None` for
             missing values. One doc per (region, ts).
         """

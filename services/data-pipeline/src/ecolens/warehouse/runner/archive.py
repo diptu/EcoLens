@@ -1,8 +1,16 @@
-"""Stage 6: move old raw data to cold storage + VACUUM the warehouse.
+"""Stage 6: VACUUM the warehouse.
 
-Two sub-tasks:
-  1. Archive: delete raw Mongo docs older than `archive_after_days`
-  2. Vacuum:  VACUUM ANALYZE on the warehouse to reclaim space
+Historically this stage also deleted raw Mongo docs older than
+`archive_after_days` -- the idea being that DuckDB held a durable
+"cold storage" backup, so the live Mongo cluster didn't need to keep
+years of raw history forever. Now that DuckDB is the sole raw store
+(no separate live cluster to prune "old" data away from -- see
+TODO.md's ECO-150..158 for that migration), there's nothing left to
+archive: deleting old DuckDB rows would just destroy data with no
+backup, the exact failure mode ECO-150..157 existed to prevent in the
+first place. `archive()` is kept as a documented no-op (rather than
+removed outright) so `WarehouseRunner`'s Stage 6 slot and
+`RunResult.stages` shape don't change.
 
 Vacuum uses a plain synchronous psycopg2 connection rather than
 asyncpg: `VACUUM` cannot run through asyncpg's extended query
@@ -14,13 +22,11 @@ workaround.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 import psycopg2
-from pymongo import MongoClient
 
-from ecolens.ingestion.storage.settings import MongoSettings, get_mongo_settings
 from ecolens.shared.observability.logging import get_logger
 
 from .models import StageResult
@@ -28,43 +34,17 @@ from .settings import WarehouseRunnerSettings
 
 log = get_logger(__name__)
 
-ARCHIVE_COLLECTIONS: list[str] = [
-    "aemo_nem_dispatch",
-    "aemo_wem_dispatch",
-    "openelectricity_responses",
-    "bom_observations",
-]
-
 VACUUM_TABLES: list[str] = ["fact_demand_30min", "ml_features_demand_v1"]
 
 
 class ArchiveManager:
-    """Moves old raw data to cold storage + VACUUMs the warehouse.
-
-    Connects to Mongo via `MongoSettings` (the same settings the
-    ingestion fetchers themselves use), not a second warehouse-runner-
-    specific copy -- see settings.py's module docstring for why.
+    """VACUUMs the warehouse. `archive()` is a documented no-op -- see
+    the module docstring for why there's no longer anything to archive.
     """
 
-    def __init__(
-        self,
-        settings: WarehouseRunnerSettings,
-        mongo_settings: MongoSettings | None = None,
-    ) -> None:
+    def __init__(self, settings: WarehouseRunnerSettings) -> None:
         self.settings = settings
-        self.mongo_settings = mongo_settings or get_mongo_settings()
-        self._mongo: MongoClient | None = None
         self._pg: Any = None
-
-    def connect_mongo(self) -> None:
-        try:
-            self._mongo = MongoClient(
-                self.mongo_settings.mongo_uri, serverSelectionTimeoutMS=5000
-            )
-            self._mongo.admin.command("ping")
-        except Exception as exc:  # noqa: BLE001
-            log.warning("archive.mongo_connect_failed", error=str(exc))
-            self._mongo = None
 
     def connect_pg(self) -> None:
         try:
@@ -82,36 +62,20 @@ class ArchiveManager:
             self._pg = None
 
     def archive(self) -> StageResult:
+        """No-op -- see the module docstring. DuckDB is the permanent
+        raw store now; there's no separate live cluster to prune old
+        data away from, and no cold-storage backup to prune *into*.
+        """
         started = datetime.now(timezone.utc)
-        if self._mongo is None:
-            return StageResult(
-                name="archive",
-                started_at=started,
-                finished_at=datetime.now(timezone.utc),
-                success=True,
-                metrics={"status": "skipped", "reason": "mongo not connected"},
-            )
-        db = self._mongo[self.mongo_settings.mongo_db_name]
-        cutoff = datetime.now(timezone.utc) - timedelta(
-            days=self.settings.archive_after_days
-        )
-        archived: list[dict[str, Any]] = []
-        for collection in ARCHIVE_COLLECTIONS:
-            result = db[collection].delete_many({"fetched_at": {"$lt": cutoff}})
-            archived.append({"collection": collection, "deleted": result.deleted_count})
-            log.info(
-                "archive.collection",
-                collection=collection,
-                deleted=result.deleted_count,
-            )
-        finished = datetime.now(timezone.utc)
         return StageResult(
             name="archive",
             started_at=started,
-            finished_at=finished,
+            finished_at=datetime.now(timezone.utc),
             success=True,
-            rows_affected=sum(a["deleted"] for a in archived),
-            metrics={"collections": archived, "cutoff": cutoff.isoformat()},
+            metrics={
+                "status": "skipped",
+                "reason": "no-op: DuckDB is the permanent raw store, nothing to archive",
+            },
         )
 
     def vacuum(self) -> StageResult:
@@ -148,12 +112,9 @@ class ArchiveManager:
         )
 
     def close(self) -> None:
-        if self._mongo is not None:
-            self._mongo.close()
-            self._mongo = None
         if self._pg is not None:
             self._pg.close()
             self._pg = None
 
 
-__all__ = ["ArchiveManager", "ARCHIVE_COLLECTIONS", "VACUUM_TABLES"]
+__all__ = ["ArchiveManager", "VACUUM_TABLES"]

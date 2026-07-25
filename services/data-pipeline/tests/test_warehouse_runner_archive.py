@@ -1,14 +1,16 @@
 """Tests for ecolens.warehouse.runner.archive.ArchiveManager.
 
-Uses fake pymongo/psycopg2-shaped doubles (conftest.py) so these
-never touch real servers.
+Uses a fake psycopg2-shaped double (conftest.py) so vacuum() tests never
+touch a real database. `archive()` is a documented no-op now that
+DuckDB is the sole raw store (see archive.py's module docstring) -- no
+double needed for it, just a direct assertion on its return shape.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from conftest import FakeMongoClient, FakeMongoCollection, FakePgConnection
+from conftest import FakePgConnection
 
 import ecolens.warehouse.runner.archive as archive_module
 from ecolens.warehouse.runner.archive import VACUUM_TABLES, ArchiveManager
@@ -20,45 +22,13 @@ def manager() -> ArchiveManager:
     return ArchiveManager(WarehouseRunnerSettings())
 
 
-class TestArchiveNotConnected:
-    def test_skips_when_mongo_not_connected(self, manager: ArchiveManager):
-        result = manager.archive()
-        assert result.success is True
-        assert result.metrics.get("status") == "skipped"
-
-
 class TestArchive:
-    def test_deletes_old_docs_across_collections(
-        self, manager: ArchiveManager, monkeypatch
-    ):
-        collections = {
-            "aemo_nem_dispatch": FakeMongoCollection(delete_count=10),
-            "aemo_wem_dispatch": FakeMongoCollection(delete_count=5),
-            "openelectricity_responses": FakeMongoCollection(delete_count=7),
-            "bom_observations": FakeMongoCollection(delete_count=3),
-        }
-        monkeypatch.setattr(
-            archive_module,
-            "MongoClient",
-            lambda *a, **kw: FakeMongoClient(collections=collections),
-        )
-        manager.connect_mongo()
+    def test_is_a_documented_noop(self, manager: ArchiveManager):
         result = manager.archive()
         assert result.success is True
-        assert result.rows_affected == 25
-
-    def test_mongo_connect_failure_leaves_client_none(
-        self, manager: ArchiveManager, monkeypatch
-    ):
-        monkeypatch.setattr(
-            archive_module,
-            "MongoClient",
-            lambda *a, **kw: FakeMongoClient(ping_raises=ConnectionError("down")),
-        )
-        manager.connect_mongo()
-        assert manager._mongo is None
-        result = manager.archive()
         assert result.metrics.get("status") == "skipped"
+        assert "no-op" in result.metrics.get("reason", "")
+        assert result.rows_affected == 0
 
 
 class TestVacuumNotConnected:
@@ -113,17 +83,10 @@ class TestVacuum:
 
 
 class TestClose:
-    def test_close_resets_both_connections(self, manager: ArchiveManager, monkeypatch):
-        monkeypatch.setattr(
-            archive_module,
-            "MongoClient",
-            lambda *a, **kw: FakeMongoClient(collections={}),
-        )
+    def test_close_resets_pg_connection(self, manager: ArchiveManager, monkeypatch):
         fake_conn = FakePgConnection()
         monkeypatch.setattr(archive_module.psycopg2, "connect", lambda **kw: fake_conn)
-        manager.connect_mongo()
         manager.connect_pg()
         manager.close()
-        assert manager._mongo is None
         assert manager._pg is None
         assert fake_conn.closed is True

@@ -6,12 +6,13 @@ the data in DuckDB" -- which is almost always one of:
 
   1. Another DuckDB connection (a `duckdb -ui` session, a plain CLI
      session, a stale notebook kernel) is holding the file's
-     single-writer lock, so the API's write silently failed (logged at
-     `error` server-side, but never surfaced in the job's API response --
-     `bulk_upsert` into Mongo is the job's actual success criterion).
+     single-writer lock, so the write failed (logged at `error`
+     server-side, but never surfaced in the job's API response --
+     `write_historical` retries internally, but a long-held lock can
+     still outlast those retries).
   2. The source fetch returned zero docs for the requested date/range, so
-     neither Mongo nor DuckDB ever got written to in the first place --
-     check the job's own `upserted` count first.
+     DuckDB never got written to in the first place -- check the job's
+     own `written` count first.
   3. The path resolved differently for the writer and whoever's looking
      (fixed by resolving to an absolute path -- see duckdb_store.py --
      but worth ruling out if running older code).

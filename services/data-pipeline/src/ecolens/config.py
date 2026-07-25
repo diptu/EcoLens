@@ -43,23 +43,6 @@ class Settings(BaseSettings):
     db_max_overflow: int = 5
     db_echo: bool = False
 
-    # ── MongoDB ─────────────────────────────────────────────────────────
-    mongo_uri: str = Field(
-        default="mongodb://mongo:27017",
-        description="MongoDB connection string.",
-    )
-    mongo_db_name: str = Field(
-        default="ecolens",
-        description="Default database name for the ecoLens collections.",
-    )
-    mongo_max_pool_size: int = 20
-    mongo_min_pool_size: int = 5
-    mongo_server_selection_timeout_ms: int = 5000
-    mongo_connect_timeout_ms: int = 10_000
-    mongo_socket_timeout_ms: int = 30_000
-    mongo_retry_reads: bool = True
-    mongo_retry_writes: bool = True
-
     # ── Redis ─────────────────────────────────────────────────────────────
     redis_dsn: RedisDsn = Field(  # type: ignore[assignment]
         default="redis://redis:6379/0",
@@ -119,12 +102,10 @@ class Settings(BaseSettings):
     historical_duckdb_path: Path = Field(
         default=Path("data/historical/ecolens_historical.duckdb"),
         description=(
-            "Local DuckDB file the ingestion layer's historical backfills "
-            "(e.g. HistoricalFetcher's ERA5 backfill, see "
-            "ingestion/storage/duckdb_store.py) write into, in addition to "
-            "MongoDB -- a durable, queryable record that survives "
-            "warehouse/runner/archive.py's age-based Mongo deletion. Relative "
-            "to CWD by default, like bom_cache_dir/training_snapshot_dir above."
+            "Local DuckDB file the ingestion layer writes into -- the sole "
+            "raw-data store for the pipeline (see "
+            "ingestion/storage/duckdb_store.py). Relative to CWD by "
+            "default, like bom_cache_dir/training_snapshot_dir above."
         ),
     )
 

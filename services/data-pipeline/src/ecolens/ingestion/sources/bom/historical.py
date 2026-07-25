@@ -34,18 +34,15 @@ Strategy (historical_client.py -> historical_transformers.py -> here):
     3. Cache to the SAME directory the live fetcher uses
        (`cache.write_cache`, deduped on (region, ts, station_id)), so
        live and backfilled rows coexist in one place for dbt to read.
-    4. Optionally persist into the local DuckDB historical store
-       (`write_duckdb`, deduped on the same (station_id, ts) key Mongo's
-       `bulk_upsert` uses) -- a durable, queryable record that survives
-       `warehouse/runner/archive.py`'s age-based Mongo deletion and
-       doesn't need a live Mongo/Postgres connection to query later.
+    4. Persist into the local DuckDB store (`write_duckdb`, deduped on
+       (station_id, ts)) -- the sole raw-data write path, doesn't need a
+       live Postgres connection to query later.
 
 Usage:
     fetcher = HistoricalFetcher()
     async with httpx.AsyncClient(timeout=60) as client:
         docs = await fetcher.fetch_all_stations(client, years=3)
         # ~52,500 docs backfilled in 1-2 minutes
-        await bulk_upsert(db, "bom", docs, run_id)
         fetcher.write_duckdb(docs)
 """
 
@@ -162,16 +159,18 @@ class HistoricalFetcher:
         """Persist docs to the same local cache the live fetcher reads/writes."""
         return cache_module.write_cache(self.cache_dir, docs)
 
-    def write_duckdb(self, docs: list[dict[str, Any]]) -> int:
-        """Persist docs into the local DuckDB historical store.
-
-        Idempotent on (station_id, ts) -- see
-        `ecolens.ingestion.storage.duckdb_store.write_historical`. Separate
-        from `write_cache`: the CSV cache is a dev/CI live-fetcher
-        fallback (`cache.py`'s docstring), this is the durable historical
-        record meant to survive `archive_after_days`.
+    def write_duckdb(
+        self, docs: list[dict[str, Any]], *, run_id: str | None = None
+    ) -> int:
+        """Persist docs into the local DuckDB store -- the sole raw-data
+        write path for this fetcher (see
+        `ecolens.ingestion.storage.duckdb_store.write_historical`, which
+        stamps `ingest_run_id`/`fetched_at`/`source` onto each doc).
+        Idempotent on (station_id, ts). Separate from `write_cache`: the
+        CSV cache is a dev/CI live-fetcher fallback (`cache.py`'s
+        docstring), this is the durable raw record.
         """
-        return duckdb_store.write_historical("bom", docs)
+        return duckdb_store.write_historical("bom", docs, run_id=run_id)
 
     # ──────────────────────────────────────────────────────────────
     # Internals

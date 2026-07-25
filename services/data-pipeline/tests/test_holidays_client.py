@@ -10,7 +10,7 @@ from conftest import FakeRedis
 
 from ecolens.ingestion.circuit_breaker import CircuitBreaker
 from ecolens.ingestion.sources.holidays.client import HolidayClient
-from ecolens.ingestion.storage.settings import MongoSettings
+from ecolens.ingestion.storage.settings import IngestionSettings
 
 DATASTORE_URL_REGEX = r"https://data\.gov\.au/data/api/3/action/datastore_search.*"
 
@@ -133,7 +133,7 @@ async def test_fetch_year_retries_then_succeeds(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_fetch_year_skips_call_when_breaker_open():
-    settings = MongoSettings(ingest_circuit_breaker_threshold=1)
+    settings = IngestionSettings(ingest_circuit_breaker_threshold=1)
     breaker = CircuitBreaker("holidays", FakeRedis(), settings=settings)
     await breaker.record_failure()  # threshold=1 -> already open
 
@@ -156,7 +156,7 @@ async def test_fetch_year_skips_call_when_breaker_open():
 async def test_fetch_year_records_failure_on_breaker(monkeypatch):
     monkeypatch.setattr("asyncio.sleep", _no_sleep)
     respx.get(url__regex=DATASTORE_URL_REGEX).mock(return_value=httpx.Response(500))
-    settings = MongoSettings(ingest_max_retries=1)
+    settings = IngestionSettings(ingest_max_retries=1)
     breaker = CircuitBreaker("holidays", FakeRedis(), settings=settings)
     client = HolidayClient(settings=settings, circuit_breaker=breaker)
 

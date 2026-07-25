@@ -36,7 +36,6 @@ uv run pytest                          # run all tests
 uv run pytest tests/path/test_x.py::test_name   # single test
 uv run ruff check . && uv run ruff format --check .
 uv run mypy src
-uv run python scripts/test_mongo_connection.py  # standalone Mongo connectivity smoke test (ING-0901)
 ```
 
 Integration tests are opt-in: set `RUN_INTEGRATION=1` before running pytest (see `services/data-pipeline/TODO.md` ING-0902).

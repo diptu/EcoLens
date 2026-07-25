@@ -1,7 +1,7 @@
-"""Manually trigger a MongoDB -> PostgreSQL `raw.*` sync (no dbt run).
+"""Manually trigger a DuckDB -> PostgreSQL `raw.*` sync (no dbt run).
 
-Standalone script (not a pytest test): copies each source's MongoDB
-collection into its `raw.*` Postgres table via `RawSyncer`. Useful for
+Standalone script (not a pytest test): copies each source's DuckDB
+table into its `raw.*` Postgres table via `RawSyncer`. Useful for
 debugging the sync step in isolation from the rest of the warehouse
 pipeline (`make warehouse` runs this as part of a full run; this script
 is the same sync, on its own).

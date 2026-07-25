@@ -20,7 +20,7 @@ from typing import Any
 import httpx
 
 from ecolens.ingestion.circuit_breaker import CircuitBreaker, retry_with_backoff
-from ecolens.ingestion.storage.settings import MongoSettings, get_mongo_settings
+from ecolens.ingestion.storage.settings import IngestionSettings, get_ingestion_settings
 from ecolens.shared.observability.logging import get_logger
 
 from .schema import DATA_GOV_AU_BASE, DATA_GOV_AU_DATASET, TIMEOUT_SECONDS
@@ -35,10 +35,10 @@ class HolidayClient:
     def __init__(
         self,
         *,
-        settings: MongoSettings | None = None,
+        settings: IngestionSettings | None = None,
         circuit_breaker: CircuitBreaker | None = None,
     ) -> None:
-        settings = settings or get_mongo_settings()
+        settings = settings or get_ingestion_settings()
         self.max_retries = settings.ingest_max_retries
         self.backoff_base = settings.ingest_retry_backoff_base
         self.circuit_breaker = circuit_breaker

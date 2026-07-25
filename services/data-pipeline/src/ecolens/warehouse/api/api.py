@@ -2,7 +2,7 @@
 
 Read-only API over the PostgreSQL data warehouse produced by dbt.
 Powers the dashboard (Next.js) and the forecast-api (PyTorch)
-services. Never queries MongoDB.
+services. Never queries DuckDB directly.
 
 Architecture
 ============
@@ -18,7 +18,7 @@ Architecture
             └───────┬───────┘
                     │ asyncpg
             ┌───────▼───────┐
-            │  PostgreSQL   │  ← populated by dbt (mongo → pg)
+            │  PostgreSQL   │  ← populated by dbt (duckdb → pg)
             │  warehouse    │
             └───────────────┘
 

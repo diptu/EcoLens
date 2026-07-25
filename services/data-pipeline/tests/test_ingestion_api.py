@@ -415,6 +415,44 @@ class TestIngestAemoHistorical:
         assert call_days == [d1, d2]  # d2 still attempted after d1 failed
         bulk_upsert.assert_called_once()  # only for d2, which succeeded
 
+    @pytest.mark.asyncio
+    async def test_one_bad_days_upsert_does_not_abort_the_range(self, monkeypatch):
+        # Regression: a Mongo bulk_upsert failure on a single day (e.g. a
+        # socket timeout against the historical Atlas cluster) used to
+        # propagate straight out of this function, aborting every
+        # remaining day in the range and losing upserted_total entirely
+        # (job status: "failed", upserted: null) -- even though fetch
+        # failures were already protected the same way.
+        d1, d3 = date(2026, 1, 1), date(2026, 1, 3)  # d2 (Jan 2) is the flaky day
+        fake_fetcher = MagicMock()
+        fake_fetcher.fetch_for_date = AsyncMock(
+            return_value=[{"region": "NSW1", "ts": "t"}]
+        )
+        monkeypatch.setitem(
+            api_module._AEMO_FETCHERS, "aemo_nem", MagicMock(return_value=fake_fetcher)
+        )
+        monkeypatch.setattr(api_module, "get_historical_db", lambda: object())
+
+        call_count = {"n": 0}
+
+        async def flaky_bulk_upsert(db, source, docs, run_id):
+            call_count["n"] += 1
+            if call_count["n"] == 2:  # d2's write times out
+                raise TimeoutError("socketTimeoutMS: 30000.0ms")
+            return len(docs)
+
+        monkeypatch.setattr(api_module, "bulk_upsert", flaky_bulk_upsert)
+        monkeypatch.setattr(
+            api_module.duckdb_store, "write_historical", MagicMock(return_value=0)
+        )
+
+        upserted_total = await api_module._ingest_aemo_historical("aemo_nem", d1, d3)
+
+        # d1 and d3 succeeded (1 doc each); d2's write failure was
+        # skipped, not fatal -- the function still returns a real total
+        # instead of raising and losing everything.
+        assert upserted_total == 2
+
 
 class TestIngestOpenelectricityHistorical:
     def _patch(self, monkeypatch, *, docs, has_api_key=True, validate_error=False):
@@ -553,6 +591,44 @@ class TestIngestHolidaysHistorical:
         assert api_module.duckdb_store.write_historical.call_args.args[0] == (
             "aemo_holidays"
         )
+
+    @pytest.mark.asyncio
+    async def test_one_bad_years_upsert_does_not_abort_the_range(self, monkeypatch):
+        # Same regression as TestIngestAemoHistorical's equivalent test --
+        # this loop has the identical bug pattern (fetch failures were
+        # already protected, bulk_upsert failures were not).
+        fake_fetcher = MagicMock()
+
+        async def fetch(client, year):
+            return [{"region": "NSW", "date": f"{year}-01-01"}]
+
+        fake_fetcher.fetch = AsyncMock(side_effect=fetch)
+        monkeypatch.setattr(
+            api_module, "HolidayFetcher", MagicMock(return_value=fake_fetcher)
+        )
+        monkeypatch.setattr(api_module, "get_historical_db", lambda: object())
+        monkeypatch.setattr(api_module, "validate_holidays", lambda d: d)
+        monkeypatch.setattr(
+            api_module.duckdb_store, "write_historical", MagicMock(return_value=0)
+        )
+
+        call_count = {"n": 0}
+
+        async def flaky_bulk_upsert(db, source, docs, run_id):
+            call_count["n"] += 1
+            if call_count["n"] == 2:  # 2027's write times out
+                raise TimeoutError("socketTimeoutMS: 30000.0ms")
+            return len(docs)
+
+        monkeypatch.setattr(api_module, "bulk_upsert", flaky_bulk_upsert)
+
+        upserted_total = await api_module._ingest_holidays_historical(
+            date(2026, 1, 1), date(2028, 12, 31)
+        )
+
+        # 2026 and 2028 succeeded (1 doc each); 2027's write failure was
+        # skipped, not fatal.
+        assert upserted_total == 2
 
 
 class _FakeAsyncCursor:

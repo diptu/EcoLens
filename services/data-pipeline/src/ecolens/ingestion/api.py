@@ -251,7 +251,27 @@ async def _ingest_aemo_historical(
                 continue
 
             if docs:
-                upserted = await bulk_upsert(db, source, docs, run_id)
+                try:
+                    upserted = await bulk_upsert(db, source, docs, run_id)
+                except Exception as exc:  # noqa: BLE001 - one bad day shouldn't abort the range
+                    # Same protection as the fetch step above -- a single
+                    # day's Mongo write timing out (e.g. a transient Atlas
+                    # hiccup) used to propagate straight out of this
+                    # function, aborting every remaining day in the range
+                    # and losing the job's `upserted_total` progress
+                    # entirely (job status: "failed", upserted: null).
+                    # Skip it instead; /ingestion/retry-missing already
+                    # finds and re-ingests exactly the days that ended up
+                    # with zero documents.
+                    log.error(
+                        "ingestion.historical.upsert_failed",
+                        run_id=run_id,
+                        source=source,
+                        day=day.isoformat(),
+                        error=str(exc),
+                    )
+                    day += timedelta(days=1)
+                    continue
                 upserted_total += upserted
                 log.info(
                     "ingestion.historical.day_complete",
@@ -391,7 +411,20 @@ async def _ingest_holidays_historical(
             continue
 
         db = get_historical_db() if historical else get_db()
-        upserted = await bulk_upsert(db, "aemo_holidays", docs, run_id)
+        try:
+            upserted = await bulk_upsert(db, "aemo_holidays", docs, run_id)
+        except Exception as exc:  # noqa: BLE001 - one bad year shouldn't abort the range
+            # Same protection as the fetch step above -- see
+            # _ingest_aemo_historical's identical fix for why this can't
+            # be allowed to propagate and abort every remaining year.
+            log.error(
+                "ingestion.historical.upsert_failed",
+                run_id=run_id,
+                source="holidays",
+                year=year,
+                error=str(exc),
+            )
+            continue
         upserted_total += upserted
         log.info(
             "ingestion.historical.upsert_complete",

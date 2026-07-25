@@ -106,8 +106,19 @@ def _write_duckdb_best_effort(source: str, docs: list[dict], run_id: str) -> Non
     `bulk_upsert`, with the same `source` string passed to that call
     (note: holidays upserts under Mongo collection key `"aemo_holidays"`,
     not `"holidays"` -- callers must pass the same key here). A DuckDB
-    failure logs a warning rather than raising, since the Mongo write --
-    the job's actual success criterion -- already succeeded.
+    failure does NOT raise -- the job's actual success criterion is the
+    Mongo write, which already succeeded by the time this runs, and a
+    dead DuckDB write shouldn't fail an otherwise-successful ingest.
+
+    Logged at `error` (not `warning`): this failure is invisible
+    everywhere else -- `GET /ingestion/historical/{job_id}` only reports
+    `upserted` (the Mongo count), so a DuckDB write silently not
+    happening (most commonly: another DuckDB connection -- `duckdb -ui`,
+    a CLI session, a stale kernel -- holding the file's single-writer
+    lock) has repeatedly looked like "the job completed but nothing
+    landed in DuckDB" with no clue why from the API response alone. See
+    `scripts/check_duckdb_status.py` for a standalone way to check
+    per-table row counts / last-write time without digging through logs.
     """
     try:
         written = duckdb_store.write_historical(source, docs)
@@ -118,7 +129,7 @@ def _write_duckdb_best_effort(source: str, docs: list[dict], run_id: str) -> Non
             written=written,
         )
     except Exception as exc:  # noqa: BLE001 - best-effort, Mongo write already succeeded
-        log.warning(
+        log.error(
             "ingestion.historical.duckdb_write_failed",
             run_id=run_id,
             source=source,

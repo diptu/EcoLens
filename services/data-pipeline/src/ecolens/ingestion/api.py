@@ -28,6 +28,17 @@ poll the matching `GET .../{job_id}` (backed by
 `ecolens.shared.job_tracker`, shared with `forecasting.api`'s equivalent
 job-polling endpoint) to find out whether it's still running, finished,
 or failed.
+
+Every `_ingest_*_historical` function also mirrors its upserted batch
+into the local DuckDB historical store (`ingestion/storage/duckdb_store`,
+see TODO.md's ECO-158) right after the Mongo upsert -- best-effort, same
+as `scripts/backfill_bom_historical.py`: a DuckDB write failure logs a
+warning and doesn't fail the job, since the Mongo write already
+succeeded. This runs regardless of the `historical` flag (both the
+`MONGO_URI_HISTORICAL` and live-cluster paths land in the same DuckDB
+table), since the fetched rows are identical in shape either way and the
+whole point of the DuckDB copy is a durable, queryable record that
+survives `warehouse/runner/archive.py`'s Mongo TTL deletion.
 """
 
 from __future__ import annotations
@@ -48,6 +59,7 @@ from ecolens.ingestion.sources.bom import HistoricalFetcher
 from ecolens.ingestion.sources.bom.schema import HISTORICAL_TIMEOUT_SECONDS
 from ecolens.ingestion.sources.holidays import HolidayFetcher
 from ecolens.ingestion.sources.openelectricity import OpenElectricityFetcher
+from ecolens.ingestion.storage import duckdb_store
 from ecolens.ingestion.storage.mongo import bulk_upsert, get_db, get_historical_db
 from ecolens.ingestion.storage.settings import get_mongo_settings
 from ecolens.ingestion.validators.bom import validate as validate_bom
@@ -85,6 +97,44 @@ _TIME_FIELD: dict[Source, tuple[str, Literal["datetime", "string"]]] = {
 }
 
 _jobs = JobTracker()
+
+
+def _write_duckdb_best_effort(source: str, docs: list[dict], run_id: str) -> None:
+    """Mirror `docs` into the local DuckDB historical store, best-effort.
+
+    Called right after each `_ingest_*_historical` function's own Mongo
+    `bulk_upsert`, with the same `source` string passed to that call
+    (note: holidays upserts under Mongo collection key `"aemo_holidays"`,
+    not `"holidays"` -- callers must pass the same key here). A DuckDB
+    failure does NOT raise -- the job's actual success criterion is the
+    Mongo write, which already succeeded by the time this runs, and a
+    dead DuckDB write shouldn't fail an otherwise-successful ingest.
+
+    Logged at `error` (not `warning`): this failure is invisible
+    everywhere else -- `GET /ingestion/historical/{job_id}` only reports
+    `upserted` (the Mongo count), so a DuckDB write silently not
+    happening (most commonly: another DuckDB connection -- `duckdb -ui`,
+    a CLI session, a stale kernel -- holding the file's single-writer
+    lock) has repeatedly looked like "the job completed but nothing
+    landed in DuckDB" with no clue why from the API response alone. See
+    `scripts/check_duckdb_status.py` for a standalone way to check
+    per-table row counts / last-write time without digging through logs.
+    """
+    try:
+        written = duckdb_store.write_historical(source, docs)
+        log.info(
+            "ingestion.historical.duckdb_write_complete",
+            run_id=run_id,
+            source=source,
+            written=written,
+        )
+    except Exception as exc:  # noqa: BLE001 - best-effort, Mongo write already succeeded
+        log.error(
+            "ingestion.historical.duckdb_write_failed",
+            run_id=run_id,
+            source=source,
+            error=str(exc),
+        )
 
 
 def _resolve_date_range(
@@ -165,6 +215,7 @@ async def _ingest_bom_historical(
         source="bom",
         upserted=upserted,
     )
+    _write_duckdb_best_effort("bom", docs, run_id)
     return upserted
 
 
@@ -200,7 +251,27 @@ async def _ingest_aemo_historical(
                 continue
 
             if docs:
-                upserted = await bulk_upsert(db, source, docs, run_id)
+                try:
+                    upserted = await bulk_upsert(db, source, docs, run_id)
+                except Exception as exc:  # noqa: BLE001 - one bad day shouldn't abort the range
+                    # Same protection as the fetch step above -- a single
+                    # day's Mongo write timing out (e.g. a transient Atlas
+                    # hiccup) used to propagate straight out of this
+                    # function, aborting every remaining day in the range
+                    # and losing the job's `upserted_total` progress
+                    # entirely (job status: "failed", upserted: null).
+                    # Skip it instead; /ingestion/retry-missing already
+                    # finds and re-ingests exactly the days that ended up
+                    # with zero documents.
+                    log.error(
+                        "ingestion.historical.upsert_failed",
+                        run_id=run_id,
+                        source=source,
+                        day=day.isoformat(),
+                        error=str(exc),
+                    )
+                    day += timedelta(days=1)
+                    continue
                 upserted_total += upserted
                 log.info(
                     "ingestion.historical.day_complete",
@@ -209,6 +280,7 @@ async def _ingest_aemo_historical(
                     day=day.isoformat(),
                     upserted=upserted,
                 )
+                _write_duckdb_best_effort(source, docs, run_id)
             else:
                 log.warning(
                     "ingestion.historical.no_data",
@@ -284,6 +356,7 @@ async def _ingest_openelectricity_historical(
         source="openelectricity",
         upserted=upserted,
     )
+    _write_duckdb_best_effort("openelectricity", docs, run_id)
     return upserted
 
 
@@ -338,7 +411,20 @@ async def _ingest_holidays_historical(
             continue
 
         db = get_historical_db() if historical else get_db()
-        upserted = await bulk_upsert(db, "aemo_holidays", docs, run_id)
+        try:
+            upserted = await bulk_upsert(db, "aemo_holidays", docs, run_id)
+        except Exception as exc:  # noqa: BLE001 - one bad year shouldn't abort the range
+            # Same protection as the fetch step above -- see
+            # _ingest_aemo_historical's identical fix for why this can't
+            # be allowed to propagate and abort every remaining year.
+            log.error(
+                "ingestion.historical.upsert_failed",
+                run_id=run_id,
+                source="holidays",
+                year=year,
+                error=str(exc),
+            )
+            continue
         upserted_total += upserted
         log.info(
             "ingestion.historical.upsert_complete",
@@ -347,6 +433,7 @@ async def _ingest_holidays_historical(
             year=year,
             upserted=upserted,
         )
+        _write_duckdb_best_effort("aemo_holidays", docs, run_id)
 
     return upserted_total
 

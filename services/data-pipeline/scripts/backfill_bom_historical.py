@@ -124,6 +124,18 @@ async def run(
     upserted = await bulk_upsert(db, "bom", docs, run_id)
     log.info("mongo.upsert_complete", run_id=run_id, upserted=upserted)
 
+    # docs already carry the ingest_run_id/fetched_at/source stamped by
+    # bulk_upsert (mutated in place) -- mirror the same batch into the
+    # local DuckDB historical store so this backfill survives
+    # warehouse/runner/archive.py's age-based Mongo deletion. Best-effort,
+    # same as the cache-write handling above: the Mongo write already
+    # succeeded, so a DuckDB failure here shouldn't fail the whole run.
+    try:
+        written = fetcher.write_duckdb(docs)
+        log.info("duckdb.write_complete", run_id=run_id, written=written)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("duckdb_write_failed", run_id=run_id, error=str(exc))
+
     get_mongo_client().close()
 
 

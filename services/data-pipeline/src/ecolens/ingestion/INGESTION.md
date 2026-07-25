@@ -184,6 +184,35 @@ psql -U ecolens -d ecolens -c \
 
 ---
 
+## Backups
+
+DuckDB is the *sole* raw store — there is no remote redundant copy the
+way MongoDB Atlas used to provide. The local `.duckdb` file is a single
+point of failure (disk loss, accidental `rm`, corruption), so back it
+up:
+
+```bash
+# Snapshot (read-only EXPORT DATABASE -> timestamped Parquet dir, keeps
+# the 14 most recent by default)
+uv run --active ./scripts/backup_duckdb.py
+# or: make backup-duckdb [KEEP=30]
+
+# List / restore
+uv run --active ./scripts/restore_duckdb.py --list
+uv run --active ./scripts/restore_duckdb.py --latest --target /path/to/restored.duckdb
+# or: make restore-duckdb SNAPSHOT=20260724T120000Z [TARGET=...] | make restore-duckdb LIST=1
+```
+
+The snapshot connection is read-only, but still subject to DuckDB's
+single-writer file lock (a read-only open blocks while any read-write
+connection is active elsewhere) — it retries with the same backoff
+`duckdb_store._connect_with_retry` uses, rather than failing on the
+first transient conflict. Not yet wired to a schedule; run manually or
+via cron for now (root TODO.md ECO-161 tracks doing the same for the
+CI ingest workflow, whose DuckDB file is otherwise ephemeral per run).
+
+---
+
 ## Design Benefits
 
 * **Idempotent** — Unique keys prevent duplicate records during retries.

@@ -168,6 +168,20 @@ backfill-aemo-wem: ## Backfill AEMO WEM over a date range, day by day. Usage: ma
 	@if [ -z "$(START)" ]; then echo "Usage: make backfill-aemo-wem START=2026-07-01 [END=2026-07-19]"; exit 1; fi
 	cd services/data-pipeline && $(UV) run --active python ../scripts/backfill_aemo.py --start $(START) $(if $(END),--end $(END),) --source wem
 
+.PHONY: backup-duckdb
+backup-duckdb: ## Snapshot the historical DuckDB store (read-only EXPORT DATABASE, Parquet) -- DuckDB is the sole raw store since MongoDB removal (ECO-159), this is its only backup. Usage: make backup-duckdb [KEEP=30] (default: keep 14 most recent).
+	cd services/data-pipeline && $(UV) run --active python scripts/backup_duckdb.py $(if $(KEEP),--keep $(KEEP),)
+
+.PHONY: restore-duckdb
+restore-duckdb: ## Restore a DuckDB snapshot written by `make backup-duckdb`. Usage: make restore-duckdb SNAPSHOT=20260724T120000Z [TARGET=/path/to/restored.duckdb] | make restore-duckdb LIST=1.
+	@if [ -n "$(LIST)" ]; then \
+		cd services/data-pipeline && $(UV) run --active python scripts/restore_duckdb.py --list; \
+	elif [ -z "$(SNAPSHOT)" ]; then \
+		echo "Usage: make restore-duckdb SNAPSHOT=20260724T120000Z [TARGET=/path/to/restored.duckdb] | make restore-duckdb LIST=1"; exit 1; \
+	else \
+		cd services/data-pipeline && $(UV) run --active python scripts/restore_duckdb.py --snapshot-name $(SNAPSHOT) --target $(if $(TARGET),$(TARGET),restored_$(SNAPSHOT).duckdb); \
+	fi
+
 # ── Forecasting Model (train/tune/evaluate/promote in data-pipeline; ──────
 # ── forecast-api never trains, it only loads+serves whatever is aliased ───
 # ── "production" in the MLflow Registry -- see services/forecast-api/ ─────

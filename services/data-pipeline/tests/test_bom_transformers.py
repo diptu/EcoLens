@@ -46,52 +46,69 @@ def _make_doc(**overrides) -> dict:
     return base
 
 
+def _v1_payload(**data_overrides) -> dict:
+    data = {
+        "temp": 28.5,
+        "temp_feels_like": 30.1,
+        "humidity": 45,
+        "wind": {"speed_kilometre": 15.0, "speed_knot": 8, "direction": "W"},
+        "gust": None,
+        "rain_since_9am": 2.4,
+        "station": {"bom_id": "066214", "name": "Sydney - Observatory Hill"},
+    }
+    data.update(data_overrides)
+    return {
+        "metadata": {"observation_time": "2026-07-20T14:00:00Z"},
+        "data": data,
+    }
+
+
 class TestNormalizeObservation:
     def test_maps_bom_fields_to_v1_row(self):
         now = pd.Timestamp.now(tz="UTC")
-        obs = {
-            "local_date_time_full": "20260720140000",
-            "air_temp": 28.5,
-            "apparent_t": 30.1,
-            "dewpt": 18.2,
-            "rel_hum": 45,
-            "wind_spd_kmh": 15.0,
-            "wind_dir": 270,
-            "gust_kmh": 25.0,
-            "press_msl": 1015.2,
-            "rain_trace": 2.4,
-            "cloud": 3,
-        }
-        row = normalize_observation(obs, "NSW1", "066037", now)
+        row = normalize_observation(_v1_payload(), "NSW1", "r3gx2s", now)
         assert row is not None
         assert row["region"] == "NSW1"
-        assert row["station_id"] == "066037"
+        assert row["station_id"] == "066214"
+        assert row["station_name"] == "Sydney - Observatory Hill"
         assert row["temp_c"] == 28.5
-        assert row["cloud_cover_pct"] == pytest.approx(37.5)
+        assert row["wind_direction_deg"] == 270.0  # "W"
+        assert row["dew_point_c"] is not None  # derived via Magnus, not from the API
         assert row["ts"].minute in (0, 30)
 
-    def test_missing_timestamp_returns_none(self):
+    def test_missing_observation_time_returns_none(self):
         now = pd.Timestamp.now(tz="UTC")
-        row = normalize_observation({"air_temp": 20.0}, "NSW1", "066037", now)
+        payload = _v1_payload()
+        payload["metadata"] = {}
+        row = normalize_observation(payload, "NSW1", "r3gx2s", now)
         assert row is None
 
-    def test_suspect_rain_quality_becomes_none(self):
+    def test_empty_data_returns_none(self):
         now = pd.Timestamp.now(tz="UTC")
-        obs = {
-            "local_date_time_full": "20260720140000",
-            "rain_trace": 999.0,
-            "rain_trace_quality": "S",
-        }
-        row = normalize_observation(obs, "NSW1", "066037", now)
-        assert row is not None
-        assert row["rain_since_9am_mm"] is None
+        row = normalize_observation({"metadata": {}, "data": {}}, "NSW1", "r3gx2s", now)
+        assert row is None
 
-    def test_no_cloud_reading_leaves_cover_pct_none(self):
+    def test_null_gust_leaves_wind_gust_none(self):
         now = pd.Timestamp.now(tz="UTC")
-        obs = {"local_date_time_full": "20260720140000"}
-        row = normalize_observation(obs, "NSW1", "066037", now)
+        row = normalize_observation(_v1_payload(gust=None), "NSW1", "r3gx2s", now)
+        assert row is not None
+        assert row["wind_gust_kmh"] is None
+
+    def test_missing_station_falls_back_to_geohash(self):
+        now = pd.Timestamp.now(tz="UTC")
+        row = normalize_observation(_v1_payload(station={}), "NSW1", "r3gx2s", now)
+        assert row is not None
+        assert row["station_id"] == "r3gx2s"
+
+    def test_cloud_and_pressure_always_none(self):
+        # Not present in the v1 API response at all -- see
+        # bom_obserbation.md §4 "Known caveats".
+        now = pd.Timestamp.now(tz="UTC")
+        row = normalize_observation(_v1_payload(), "NSW1", "r3gx2s", now)
         assert row is not None
         assert row["cloud_cover_pct"] is None
+        assert row["cloud_oktas"] is None
+        assert row["pressure_hpa"] is None
 
 
 class TestSyntheticStub:

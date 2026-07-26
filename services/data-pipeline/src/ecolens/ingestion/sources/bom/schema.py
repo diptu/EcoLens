@@ -15,8 +15,14 @@ SCHEMA_VERSION: str = "1.0"
 # ────────────────────────────────────────────────────────────────────
 # Source constants
 # ────────────────────────────────────────────────────────────────────
-BOM_BASE_URL = "http://www.bom.gov.au/fwo"
-BOM_OBSERVATIONS_PATH = "/observations.json"
+# BoM's legacy /fwo/{station_id}/observations.json endpoint 404s since
+# BoM's 2024 migration -- this is the v1 endpoint ecoLens now uses.
+# No auth required. Returns exactly one current observation per call
+# (no history, no date-range params) -- see client.py's module
+# docstring for what that means for `since`/`until` filtering.
+BOM_BASE_URL = "https://api.weather.bom.gov.au/v1"
+BOM_LOCATIONS_PATH = "/locations"
+BOM_OBSERVATIONS_PATH = "/observations"
 BOM_USER_AGENT = (
     "ecoLens/0.2.0 (https://github.com/diptu/ecoLens) contact: ops@ecolens.app"
 )
@@ -73,7 +79,14 @@ AUSTRALIA_UTC_OFFSETS: dict[str, int] = {
     "WEM": 8,  # AWST (UTC+8)
 }
 
-# Default BoM station map. Six stations, one per NEM/WEM region.
+# Default BoM station map -- canonical BoM station IDs, one per
+# NEM/WEM region. Used by the historical (Open-Meteo/ERA5) fetcher's
+# output rows and the synthetic-stub tier; NOT used to build the live
+# v1 API's request URL (that needs a geohash -- see
+# DEFAULT_BOM_GEOHASHES below). The live tier gets its authoritative
+# station ID from the v1 response itself (`station.bom_id`), since
+# resolving a geohash to its nearest station is the API's job, not
+# something ecoLens hardcodes.
 DEFAULT_BOM_STATIONS: dict[str, str] = {
     "NSW1": "066037",
     "QLD1": "040913",
@@ -82,6 +95,49 @@ DEFAULT_BOM_STATIONS: dict[str, str] = {
     "TAS1": "094029",
     "WEM": "009225",
 }
+
+# Region -> 6-char geohash for the v1 observations API
+# (api.weather.bom.gov.au/v1/locations/{geohash}/observations).
+# Truncated from the 7-char location-polygon geohash returned by
+# `/v1/locations?search=<city>` (the 7th char narrows to the specific
+# polygon; /observations wants the 6-char parent). WEM uses Perth
+# Airport's geohash, not Perth city's (qd66hr) -- matches the airport
+# station DEFAULT_BOM_STATIONS already used for WEM.
+DEFAULT_BOM_GEOHASHES: dict[str, str] = {
+    "NSW1": "r3gx2s",  # Sydney - Observatory Hill
+    "QLD1": "r7huht",  # Brisbane
+    "VIC1": "r1qcxv",  # Melbourne
+    "SA1": "r1f90q",  # Adelaide
+    "TAS1": "r22u08",  # Hobart
+    "WEM": "qd66qd",  # Perth Airport
+}
+
+# v1 API wind direction is a 16-point cardinal string (e.g. "WNW"),
+# not degrees -- ecoLens's schema wants degrees (0=N, 90=E, ...), so
+# map it here rather than storing the string.
+WIND_DIRECTION_DEGREES: dict[str, float] = {
+    "N": 0.0,
+    "NNE": 22.5,
+    "NE": 45.0,
+    "ENE": 67.5,
+    "E": 90.0,
+    "ESE": 112.5,
+    "SE": 135.0,
+    "SSE": 157.5,
+    "S": 180.0,
+    "SSW": 202.5,
+    "SW": 225.0,
+    "WSW": 247.5,
+    "W": 270.0,
+    "WNW": 292.5,
+    "NW": 315.0,
+    "NNW": 337.5,
+}
+
+# Magnus-Tetens approximation coefficients -- the v1 API doesn't
+# return dew point directly, so ecoLens derives it from temp + humidity.
+DEW_POINT_MAGNUS_A = 17.27
+DEW_POINT_MAGNUS_B = 237.7
 
 # Human-readable station names
 STATION_NAME_MAP: dict[str, str] = {

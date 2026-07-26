@@ -1,26 +1,22 @@
-"""API-triggered ingestion housekeeping: backfill into the *historical*
-MongoDB cluster (`MONGO_URI_HISTORICAL`), check day-by-day document
-counts against either cluster, and retry just the days that came back
-missing or short. A plain `APIRouter` (same shape as `forecasting.api`'s
-own router), meant to be mounted on data-pipeline's own control API
+"""API-triggered ingestion housekeeping: backfill historical data, check
+day-by-day row counts, and retry just the days that came back missing or
+short. A plain `APIRouter` (same shape as `forecasting.api`'s own
+router), meant to be mounted on data-pipeline's own control API
 (`ecolens.api.app`).
 
 Each `_ingest_*_historical` function mirrors its corresponding CLI
 script's fetch -> validate -> upsert logic exactly (see each function's
-docstring for which script) -- this module is a thin dispatch layer
-over the same building blocks (fetchers, validators, `bulk_upsert`), not
-a reimplementation. Each now takes a `historical: bool` flag (default
-`True`, preserving `/ingestion/historical`'s original behavior) so
-`/ingestion/retry-missing` can reuse the exact same functions against
-either `MONGO_URI_HISTORICAL` or the live `MONGO_URI`.
+docstring for which script) -- this module is a thin dispatch layer over
+the same building blocks (fetchers, validators,
+`duckdb_store.write_historical`), not a reimplementation.
 
 Retries are always safe to re-run and never duplicate records: every
-`bulk_upsert` call upserts on each source's unique key
-(`MongoSettings.unique_key_for_source`), so re-ingesting a day that
-already has full data just overwrites the same documents with
-(presumably identical, or corrected) values -- there is no separate
-"delete before reinsert" step to get right, upsert-by-unique-key already
-guarantees no duplicates.
+write upserts on each source's unique key
+(`IngestionSettings.unique_key_for_source`), so re-ingesting a day that
+already has full data just overwrites the same rows with (presumably
+identical, or corrected) values -- there is no separate "delete before
+reinsert" step to get right, upsert-by-unique-key already guarantees no
+duplicates.
 
 Runs in the background (a real range can take from seconds to minutes,
 see each endpoint's docstring) -- trigger responses include a `job_id`;
@@ -29,20 +25,16 @@ poll the matching `GET .../{job_id}` (backed by
 job-polling endpoint) to find out whether it's still running, finished,
 or failed.
 
-Every `_ingest_*_historical` function also mirrors its upserted batch
-into the local DuckDB historical store (`ingestion/storage/duckdb_store`,
-see TODO.md's ECO-158) right after the Mongo upsert -- best-effort, same
-as `scripts/backfill_bom_historical.py`: a DuckDB write failure logs a
-warning and doesn't fail the job, since the Mongo write already
-succeeded. This runs regardless of the `historical` flag (both the
-`MONGO_URI_HISTORICAL` and live-cluster paths land in the same DuckDB
-table), since the fetched rows are identical in shape either way and the
-whole point of the DuckDB copy is a durable, queryable record that
-survives `warehouse/runner/archive.py`'s Mongo TTL deletion.
+Historically this endpoint backfilled into a *separate* "historical"
+MongoDB cluster, distinct from the live one -- that whole dual-cluster
+split is gone now that DuckDB is the sole raw store (see TODO.md's
+ECO-150..158): there's just one store, written to by both this endpoint
+and the live per-source ingestion paths.
 """
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date as _date
 from datetime import datetime, timedelta, timezone
 from typing import Literal
@@ -59,9 +51,8 @@ from ecolens.ingestion.sources.bom import HistoricalFetcher
 from ecolens.ingestion.sources.bom.schema import HISTORICAL_TIMEOUT_SECONDS
 from ecolens.ingestion.sources.holidays import HolidayFetcher
 from ecolens.ingestion.sources.openelectricity import OpenElectricityFetcher
+from ecolens.ingestion.sources.openelectricity.schema import MAX_5M_INTERVAL_DAYS
 from ecolens.ingestion.storage import duckdb_store
-from ecolens.ingestion.storage.mongo import bulk_upsert, get_db, get_historical_db
-from ecolens.ingestion.storage.settings import get_mongo_settings
 from ecolens.ingestion.validators.bom import validate as validate_bom
 from ecolens.ingestion.validators.holidays import validate as validate_holidays
 from ecolens.ingestion.validators.openelectricity import (
@@ -76,65 +67,29 @@ router = APIRouter(prefix="/ingestion", tags=["ingestion"])
 
 Source = Literal["bom", "aemo_nem", "aemo_wem", "openelectricity", "holidays"]
 
+# Sources with a fetch_month() -- currently only aemo_nem
+# (AEMONEMFetcher.fetch_month, see trigger_historical_month_ingest).
+# A narrower Literal than Source so Swagger's dropdown for
+# /ingestion/historical/month only ever offers what actually works,
+# instead of listing all 5 sources and 400ing on 4 of them.
+MonthSource = Literal["aemo_nem"]
+
 _AEMO_FETCHERS = {"aemo_nem": AEMONEMFetcher, "aemo_wem": AEMOWEMFetcher}
 
-# Per source: (the field docs are timestamped by, whether that field is
-# stored as a real BSON datetime or a plain ISO-8601 string). Not
-# uniform across sources -- bom/aemo_nem/aemo_wem's `ts` is a genuine
-# datetime (built via pd.to_datetime/pd.Timestamp before upsert), but
-# openelectricity's `ts` and holidays' `date` are validated as
-# `Series[str]` (see validators/openelectricity.py, and
-# sources/holidays/transformers.py's explicit `.isoformat()` calls) --
-# comparing a string field against a Python datetime bound in a Mongo
-# query does not coerce and silently matches nothing, so daily-count/
-# retry queries need to know which comparison type to use.
-_TIME_FIELD: dict[Source, tuple[str, Literal["datetime", "string"]]] = {
-    "bom": ("ts", "datetime"),
-    "aemo_nem": ("ts", "datetime"),
-    "aemo_wem": ("ts", "datetime"),
-    "openelectricity": ("ts", "string"),
-    "holidays": ("date", "string"),
+# Per source: the field its rows are timestamped by. `count_by_day`
+# CASTs this to DATE/TIMESTAMP in SQL, so it works whether the field
+# lands as a native temporal column or an ISO-8601 string (some
+# sources' fields are the latter -- see write_historical) without
+# needing to track that distinction here.
+_TIME_FIELD: dict[Source, str] = {
+    "bom": "ts",
+    "aemo_nem": "ts",
+    "aemo_wem": "ts",
+    "openelectricity": "ts",
+    "holidays": "date",
 }
 
 _jobs = JobTracker()
-
-
-def _write_duckdb_best_effort(source: str, docs: list[dict], run_id: str) -> None:
-    """Mirror `docs` into the local DuckDB historical store, best-effort.
-
-    Called right after each `_ingest_*_historical` function's own Mongo
-    `bulk_upsert`, with the same `source` string passed to that call
-    (note: holidays upserts under Mongo collection key `"aemo_holidays"`,
-    not `"holidays"` -- callers must pass the same key here). A DuckDB
-    failure does NOT raise -- the job's actual success criterion is the
-    Mongo write, which already succeeded by the time this runs, and a
-    dead DuckDB write shouldn't fail an otherwise-successful ingest.
-
-    Logged at `error` (not `warning`): this failure is invisible
-    everywhere else -- `GET /ingestion/historical/{job_id}` only reports
-    `upserted` (the Mongo count), so a DuckDB write silently not
-    happening (most commonly: another DuckDB connection -- `duckdb -ui`,
-    a CLI session, a stale kernel -- holding the file's single-writer
-    lock) has repeatedly looked like "the job completed but nothing
-    landed in DuckDB" with no clue why from the API response alone. See
-    `scripts/check_duckdb_status.py` for a standalone way to check
-    per-table row counts / last-write time without digging through logs.
-    """
-    try:
-        written = duckdb_store.write_historical(source, docs)
-        log.info(
-            "ingestion.historical.duckdb_write_complete",
-            run_id=run_id,
-            source=source,
-            written=written,
-        )
-    except Exception as exc:  # noqa: BLE001 - best-effort, Mongo write already succeeded
-        log.error(
-            "ingestion.historical.duckdb_write_failed",
-            run_id=run_id,
-            source=source,
-            error=str(exc),
-        )
 
 
 def _resolve_date_range(
@@ -170,14 +125,10 @@ def _resolve_date_range(
     return start_date, end_date
 
 
-async def _ingest_bom_historical(
-    start: _date, end: _date, *, historical: bool = True
-) -> int:
+async def _ingest_bom_historical(start: _date, end: _date) -> int:
     """Mirrors `scripts/backfill_bom_historical.py`'s `--start-date`/
-    `--end-date` path (Open-Meteo ERA5 reanalysis), against the
-    historical Mongo cluster by default (`historical=False` targets the
-    live cluster instead -- used by `/ingestion/retry-missing`). Returns
-    the number of documents upserted (0 if nothing was fetched/validated).
+    `--end-date` path (Open-Meteo ERA5 reanalysis). Returns the number of
+    rows written (0 if nothing was fetched/validated).
     """
     run_id = uuid4().hex
     fetcher = HistoricalFetcher()
@@ -207,107 +158,178 @@ async def _ingest_bom_historical(
         )
         return 0
 
-    db = get_historical_db() if historical else get_db()
-    upserted = await bulk_upsert(db, "bom", docs, run_id)
+    written = duckdb_store.write_historical("bom", docs, run_id=run_id)
     log.info(
-        "ingestion.historical.upsert_complete",
+        "ingestion.historical.write_complete",
         run_id=run_id,
         source="bom",
-        upserted=upserted,
+        written=written,
     )
-    _write_duckdb_best_effort("bom", docs, run_id)
-    return upserted
+    return written
 
 
-async def _ingest_aemo_historical(
-    source: str, start: _date, end: _date, *, historical: bool = True
-) -> int:
-    """Mirrors `services/scripts/backfill_aemo.py`'s day-by-day loop
-    (neither AEMO fetcher supports a native range, unlike bom/
-    openelectricity) -- one bad day is logged and skipped rather than
-    aborting the rest of the range, against the historical Mongo
-    cluster by default (`historical=False` targets the live cluster
-    instead). Returns the total number of documents upserted across the
-    whole range.
+# Concurrent day-fetches per batch for _ingest_aemo_historical. Both AEMO
+# fetchers' fetch_for_date() makes several sequential HTTP requests per
+# day (NEM: directory probe + zip download; WEM: current-then-previous
+# fallback across 3 feeds) -- at ~4-5s/day, a fully sequential day-by-day
+# loop over a multi-month range takes minutes. Bounded batches of
+# concurrent days cut that roughly by this factor without firing the
+# whole range at AEMO's servers at once.
+_AEMO_HISTORICAL_BATCH_SIZE = 10
+
+
+async def _fetch_aemo_day_safe(
+    fetcher: AEMONEMFetcher | AEMOWEMFetcher,
+    client: httpx.AsyncClient,
+    day: _date,
+) -> tuple[_date, list[dict] | None, str | None]:
+    """One day's fetch, exception captured rather than raised -- so one
+    bad day in a concurrent batch doesn't cancel the others via
+    `asyncio.gather`.
+    """
+    try:
+        docs = await fetcher.fetch_for_date(client, day)
+    except Exception as exc:  # noqa: BLE001 - one bad day shouldn't abort the range
+        return day, None, str(exc)
+    return day, docs, None
+
+
+async def _ingest_aemo_historical(source: str, start: _date, end: _date) -> int:
+    """Mirrors `services/scripts/backfill_aemo.py`'s day-by-day loop,
+    fetching `_AEMO_HISTORICAL_BATCH_SIZE` days concurrently at a time
+    (both AEMO fetchers' own `fetch()` already fetches a whole range
+    concurrently internally -- this just bounds that concurrency rather
+    than either going fully sequential or firing every day in the range
+    at once) -- one bad day (fetch OR write) is logged and skipped
+    rather than aborting the rest of the range. Returns the total
+    number of rows written across the whole range.
     """
     fetcher = _AEMO_FETCHERS[source]()
-    db = get_historical_db() if historical else get_db()
-    upserted_total = 0
+    written_total = 0
+    all_days: list[_date] = []
     day = start
-    async with httpx.AsyncClient(timeout=60) as client:
-        while day <= end:
-            run_id = uuid4().hex
-            try:
-                docs = await fetcher.fetch_for_date(client, day)
-            except Exception as exc:  # noqa: BLE001 - one bad day shouldn't abort the range
-                log.error(
-                    "ingestion.historical.fetch_failed",
-                    run_id=run_id,
-                    source=source,
-                    day=day.isoformat(),
-                    error=str(exc),
-                )
-                day += timedelta(days=1)
-                continue
+    while day <= end:
+        all_days.append(day)
+        day += timedelta(days=1)
 
-            if docs:
-                try:
-                    upserted = await bulk_upsert(db, source, docs, run_id)
-                except Exception as exc:  # noqa: BLE001 - one bad day shouldn't abort the range
-                    # Same protection as the fetch step above -- a single
-                    # day's Mongo write timing out (e.g. a transient Atlas
-                    # hiccup) used to propagate straight out of this
-                    # function, aborting every remaining day in the range
-                    # and losing the job's `upserted_total` progress
-                    # entirely (job status: "failed", upserted: null).
-                    # Skip it instead; /ingestion/retry-missing already
-                    # finds and re-ingests exactly the days that ended up
-                    # with zero documents.
+    async with httpx.AsyncClient(timeout=60) as client:
+        for i in range(0, len(all_days), _AEMO_HISTORICAL_BATCH_SIZE):
+            batch = all_days[i : i + _AEMO_HISTORICAL_BATCH_SIZE]
+            results = await asyncio.gather(
+                *(_fetch_aemo_day_safe(fetcher, client, d) for d in batch)
+            )
+            for fetched_day, docs, fetch_error in results:
+                run_id = uuid4().hex
+                if fetch_error is not None:
                     log.error(
-                        "ingestion.historical.upsert_failed",
+                        "ingestion.historical.fetch_failed",
                         run_id=run_id,
                         source=source,
-                        day=day.isoformat(),
+                        day=fetched_day.isoformat(),
+                        error=fetch_error,
+                    )
+                    continue
+
+                if not docs:
+                    log.warning(
+                        "ingestion.historical.no_data",
+                        run_id=run_id,
+                        source=source,
+                        day=fetched_day.isoformat(),
+                    )
+                    continue
+
+                try:
+                    written = duckdb_store.write_historical(source, docs, run_id=run_id)
+                except Exception as exc:  # noqa: BLE001 - one bad day shouldn't abort the range
+                    # A single day's write failing (e.g. a lock conflict
+                    # that outlasted write_historical's own internal
+                    # retries) used to be able to propagate straight out
+                    # of this function, aborting every remaining day in
+                    # the range and losing the job's `written_total`
+                    # progress entirely. Skip it instead;
+                    # /ingestion/retry-missing already finds and
+                    # re-ingests exactly the days that ended up with zero
+                    # rows.
+                    log.error(
+                        "ingestion.historical.write_failed",
+                        run_id=run_id,
+                        source=source,
+                        day=fetched_day.isoformat(),
                         error=str(exc),
                     )
-                    day += timedelta(days=1)
                     continue
-                upserted_total += upserted
+                written_total += written
                 log.info(
                     "ingestion.historical.day_complete",
                     run_id=run_id,
                     source=source,
-                    day=day.isoformat(),
-                    upserted=upserted,
+                    day=fetched_day.isoformat(),
+                    written=written,
                 )
-                _write_duckdb_best_effort(source, docs, run_id)
-            else:
-                log.warning(
-                    "ingestion.historical.no_data",
-                    run_id=run_id,
-                    source=source,
-                    day=day.isoformat(),
-                )
-            day += timedelta(days=1)
 
     log.info(
         "ingestion.historical.range_complete",
         source=source,
         days=(end - start).days + 1,
-        upserted_total=upserted_total,
+        written_total=written_total,
     )
-    return upserted_total
+    return written_total
 
 
-async def _ingest_openelectricity_historical(
-    start: _date, end: _date, *, historical: bool = True
-) -> int:
-    """`OpenElectricityFetcher.fetch()` supports `since`/`until` natively
-    (see `sources/openelectricity/engine.py`), but no backfill script
-    ever used it -- this is that range path, wired against the
-    historical Mongo cluster by default (`historical=False` targets the
-    live cluster instead). Returns the number of documents upserted (0
-    if nothing was fetched/validated, or if OE_API_KEY isn't configured).
+async def _ingest_aemo_nem_month(year: int, month: int) -> int:
+    """Mirrors `scripts/trigger_ingest_aemo_nem.py`'s `--month` path:
+    one NEMWeb Archive zip-of-zips download -> whole month's docs ->
+    a single DuckDB write, instead of looping `_ingest_aemo_historical`
+    day-by-day. Returns the number of rows written (0 if the month
+    hasn't been archived yet, or nothing was fetched).
+    """
+    run_id = uuid4().hex
+    fetcher = AEMONEMFetcher()
+    async with httpx.AsyncClient(timeout=300) as client:
+        docs = await fetcher.fetch_month(client, year, month)
+
+    log.info(
+        "ingestion.historical_month.fetch_complete",
+        run_id=run_id,
+        source="aemo_nem",
+        year=year,
+        month=month,
+        doc_count=len(docs),
+    )
+    if not docs:
+        log.warning(
+            "ingestion.historical_month.fetch_empty",
+            run_id=run_id,
+            source="aemo_nem",
+            year=year,
+            month=month,
+        )
+        return 0
+
+    written = duckdb_store.write_historical("aemo_nem", docs, run_id=run_id)
+    log.info(
+        "ingestion.historical_month.write_complete",
+        run_id=run_id,
+        source="aemo_nem",
+        written=written,
+    )
+    return written
+
+
+async def _ingest_openelectricity_historical(start: _date, end: _date) -> int:
+    """`OpenElectricityFetcher.fetch()` deliberately raises `ValueError`
+    rather than auto-chunking any request wider than
+    `MAX_5M_INTERVAL_DAYS` (the OE API's own hard limit for
+    `interval=5m`, confirmed live: 8 days works, 9 doesn't) -- a bare
+    `fetch()` call hides how many requests it's making if it silently
+    splits a wide range under the hood. This is the one place that
+    chunking happens instead: the requested range is split into
+    `MAX_5M_INTERVAL_DAYS`-sized windows here, each fetched + validated
+    + written independently, mirroring `_ingest_aemo_historical`'s
+    day-by-day loop -- one bad chunk (fetch, validation, OR write) is
+    logged and skipped rather than aborting the rest of the range.
+    Returns the total rows written (0 if OE_API_KEY isn't configured).
     """
     settings = get_settings()
     if not settings.oe_api_key:
@@ -316,64 +338,95 @@ async def _ingest_openelectricity_historical(
         )
         return 0
 
-    run_id = uuid4().hex
     fetcher = OpenElectricityFetcher(api_key=settings.oe_api_key)
-    since = datetime(start.year, start.month, start.day, tzinfo=timezone.utc)
-    until = datetime(end.year, end.month, end.day, tzinfo=timezone.utc) + timedelta(
+    range_start = datetime(start.year, start.month, start.day, tzinfo=timezone.utc)
+    range_end = datetime(end.year, end.month, end.day, tzinfo=timezone.utc) + timedelta(
         days=1
     )
+
+    written_total = 0
     async with httpx.AsyncClient(timeout=settings.oe_request_timeout_seconds) as client:
-        docs = await fetcher.fetch(client, since=since, until=until)
+        chunk_start = range_start
+        step = timedelta(days=MAX_5M_INTERVAL_DAYS)
+        while chunk_start < range_end:
+            chunk_end = min(chunk_start + step, range_end)
+            run_id = uuid4().hex
+            label = f"{chunk_start.date().isoformat()}..{chunk_end.date().isoformat()}"
 
-    log.info(
-        "ingestion.historical.fetch_complete",
-        run_id=run_id,
-        source="openelectricity",
-        doc_count=len(docs),
-    )
-    if not docs:
-        log.warning(
-            "ingestion.historical.fetch_empty", run_id=run_id, source="openelectricity"
-        )
-        return 0
+            try:
+                docs = await fetcher.fetch(client, since=chunk_start, until=chunk_end)
+            except Exception as exc:  # noqa: BLE001 - one bad chunk shouldn't abort the range
+                log.error(
+                    "ingestion.historical.fetch_failed",
+                    run_id=run_id,
+                    source="openelectricity",
+                    chunk=label,
+                    error=str(exc),
+                )
+                chunk_start = chunk_end
+                continue
 
-    try:
-        docs = validate_openelectricity(docs)
-    except pandera.errors.SchemaError as e:
-        log.error(
-            "ingestion.historical.validation_failed",
-            run_id=run_id,
-            source="openelectricity",
-            error=str(e),
-        )
-        return 0
+            if not docs:
+                log.warning(
+                    "ingestion.historical.no_data",
+                    run_id=run_id,
+                    source="openelectricity",
+                    chunk=label,
+                )
+                chunk_start = chunk_end
+                continue
 
-    db = get_historical_db() if historical else get_db()
-    upserted = await bulk_upsert(db, "openelectricity", docs, run_id)
-    log.info(
-        "ingestion.historical.upsert_complete",
-        run_id=run_id,
-        source="openelectricity",
-        upserted=upserted,
-    )
-    _write_duckdb_best_effort("openelectricity", docs, run_id)
-    return upserted
+            try:
+                docs = validate_openelectricity(docs)
+            except pandera.errors.SchemaError as e:
+                log.error(
+                    "ingestion.historical.validation_failed",
+                    run_id=run_id,
+                    source="openelectricity",
+                    chunk=label,
+                    error=str(e),
+                )
+                chunk_start = chunk_end
+                continue
+
+            try:
+                written = duckdb_store.write_historical(
+                    "openelectricity", docs, run_id=run_id
+                )
+            except Exception as exc:  # noqa: BLE001 - one bad chunk shouldn't abort the range
+                log.error(
+                    "ingestion.historical.write_failed",
+                    run_id=run_id,
+                    source="openelectricity",
+                    chunk=label,
+                    error=str(exc),
+                )
+                chunk_start = chunk_end
+                continue
+
+            written_total += written
+            log.info(
+                "ingestion.historical.chunk_complete",
+                run_id=run_id,
+                source="openelectricity",
+                chunk=label,
+                written=written,
+            )
+            chunk_start = chunk_end
+
+    return written_total
 
 
-async def _ingest_holidays_historical(
-    start: _date, end: _date, *, historical: bool = True
-) -> int:
+async def _ingest_holidays_historical(start: _date, end: _date) -> int:
     """Holidays are fetched per calendar *year*
     (`HolidayFetcher.fetch(year=...)`), so a date range is normalized to
     the distinct years it spans -- mirrors
     `scripts/trigger_ingest_holidays.py`'s `--start-year`/`--end-year`
-    loop, against the historical Mongo cluster by default
-    (`historical=False` targets the live cluster instead). Returns the
-    total number of documents upserted across every year spanned by the
-    range.
+    loop. Returns the total number of rows written across every year
+    spanned by the range.
     """
     fetcher = HolidayFetcher()
-    upserted_total = 0
+    written_total = 0
     for year in range(start.year, end.year + 1):
         run_id = uuid4().hex
         try:
@@ -410,131 +463,70 @@ async def _ingest_holidays_historical(
             )
             continue
 
-        db = get_historical_db() if historical else get_db()
         try:
-            upserted = await bulk_upsert(db, "aemo_holidays", docs, run_id)
+            written = duckdb_store.write_historical(
+                "aemo_holidays", docs, run_id=run_id
+            )
         except Exception as exc:  # noqa: BLE001 - one bad year shouldn't abort the range
             # Same protection as the fetch step above -- see
             # _ingest_aemo_historical's identical fix for why this can't
             # be allowed to propagate and abort every remaining year.
             log.error(
-                "ingestion.historical.upsert_failed",
+                "ingestion.historical.write_failed",
                 run_id=run_id,
                 source="holidays",
                 year=year,
                 error=str(exc),
             )
             continue
-        upserted_total += upserted
+        written_total += written
         log.info(
-            "ingestion.historical.upsert_complete",
+            "ingestion.historical.write_complete",
             run_id=run_id,
             source="holidays",
             year=year,
-            upserted=upserted,
+            written=written,
         )
-        _write_duckdb_best_effort("aemo_holidays", docs, run_id)
 
-    return upserted_total
+    return written_total
 
 
-async def _daily_counts(
-    source: Source, start: _date, end: _date, *, historical: bool
-) -> dict[_date, int]:
-    """Document count per calendar day in `[start, end]` (inclusive) for
-    one source's collection -- the shared logic behind both
-    `/ingestion/daily-counts` and `/ingestion/retry-missing` (the latter
-    just filters this down to the days that came back short).
-
-    Fetches only the timestamp field (`{field: 1, "_id": 0}` projection)
-    and buckets by day in Python rather than a server-side `$group`
-    aggregation -- deliberately, since the timestamp field's *storage
-    type* differs by source (see `_TIME_FIELD`'s comment), and getting
-    that wrong in a `$dateFromString`/`$dateTrunc` pipeline expression
-    fails silently (matches nothing) rather than raising. Python-side
-    parsing handles both cases with one code path, at the cost of
-    pulling one field per matching document over the wire instead of
-    letting Mongo do the bucketing -- fine at this endpoint's actual
-    scale (a review/ops tool, not a hot path), worth revisiting only if
-    someone points this at a many-year range on a very high-frequency
-    source.
+async def _daily_counts(source: Source, start: _date, end: _date) -> dict[_date, int]:
+    """Row count per calendar day in `[start, end]` (inclusive) for one
+    source -- the shared logic behind both `/ingestion/daily-counts` and
+    `/ingestion/retry-missing` (the latter just filters this down to the
+    days that came back short). A single SQL GROUP BY (`duckdb_store.
+    count_by_day`), not a Python-side bucketing workaround.
     """
-    db = get_historical_db() if historical else get_db()
-    collection_name = get_mongo_settings().collection_for_source(
-        "aemo_holidays" if source == "holidays" else source
+    field = _TIME_FIELD[source]
+    return duckdb_store.count_by_day(
+        "aemo_holidays" if source == "holidays" else source, field, start, end
     )
-    field, field_kind = _TIME_FIELD[source]
-
-    if field_kind == "datetime":
-        gte: object = datetime(start.year, start.month, start.day, tzinfo=timezone.utc)
-        lt: object = datetime(
-            end.year, end.month, end.day, tzinfo=timezone.utc
-        ) + timedelta(days=1)
-    else:
-        # ISO-8601 strings sort lexicographically in chronological order,
-        # so plain string bounds work correctly even when the field's
-        # actual values carry more precision than a bare date (e.g.
-        # openelectricity's full datetime strings vs. these date-only
-        # bounds) -- a date-only string is a *prefix* of any same-day
-        # datetime string, and prefixes always sort first.
-        gte = start.isoformat()
-        lt = (end + timedelta(days=1)).isoformat()
-
-    counts: dict[_date, int] = {}
-    cursor = db[collection_name].find({field: {"$gte": gte, "$lt": lt}}, {field: 1})
-    async for doc in cursor:
-        raw = doc[field]
-        day = (
-            raw.date()
-            if isinstance(raw, datetime)
-            else datetime.fromisoformat(str(raw).replace("Z", "+00:00")).date()
-        )
-        counts[day] = counts.get(day, 0) + 1
-
-    # Reindexed over the full requested range so days with zero
-    # documents show up as an explicit 0 instead of silently missing
-    # from the result (same "show gaps, don't hide them" convention as
-    # scripts/plot_data_frequency.py).
-    full_range: dict[_date, int] = {}
-    day = start
-    while day <= end:
-        full_range[day] = counts.get(day, 0)
-        day += timedelta(days=1)
-    return full_range
 
 
-async def _retry_missing_dates(
-    source: Source, missing_dates: list[_date], *, historical: bool
-) -> int:
+async def _retry_missing_dates(source: Source, missing_dates: list[_date]) -> int:
     """Re-ingests just the given (already-known-to-be-missing-or-short)
     dates. holidays is fetched per *year*, not per day, so a missing day
     there triggers a full re-fetch of that whole year (deduped -- one
     call per distinct year among `missing_dates`, not one per day).
-    Returns the total documents upserted across every retried
-    date/year.
+    Returns the total rows written across every retried date/year.
     """
-    upserted_total = 0
+    written_total = 0
     if source == "bom":
         for day in missing_dates:
-            upserted_total += await _ingest_bom_historical(
-                day, day, historical=historical
-            )
+            written_total += await _ingest_bom_historical(day, day)
     elif source in _AEMO_FETCHERS:
         for day in missing_dates:
-            upserted_total += await _ingest_aemo_historical(
-                source, day, day, historical=historical
-            )
+            written_total += await _ingest_aemo_historical(source, day, day)
     elif source == "openelectricity":
         for day in missing_dates:
-            upserted_total += await _ingest_openelectricity_historical(
-                day, day, historical=historical
-            )
+            written_total += await _ingest_openelectricity_historical(day, day)
     elif source == "holidays":
         for year in sorted({day.year for day in missing_dates}):
-            upserted_total += await _ingest_holidays_historical(
-                _date(year, 1, 1), _date(year, 12, 31), historical=historical
+            written_total += await _ingest_holidays_historical(
+                _date(year, 1, 1), _date(year, 12, 31)
             )
-    return upserted_total
+    return written_total
 
 
 @router.get("/daily-counts")
@@ -547,27 +539,16 @@ async def get_daily_counts(
     end_date: _date | None = Query(
         None, description="Last day of an inclusive range (YYYY-MM-DD)."
     ),
-    historical: bool = Query(
-        False,
-        description="Check the historical Mongo cluster instead of the live one.",
-    ),
 ) -> dict[str, object]:
-    """Document count per day for one source, over a single `date` or an
+    """Row count per day for one source, over a single `date` or an
     inclusive `start_date`/`end_date` range -- runs synchronously (not a
     background job; even a full year is a light read), returning 0 for
-    any day with no documents at all.
+    any day with no rows at all.
     """
-    if historical and not get_mongo_settings().mongo_uri_historical:
-        raise HTTPException(
-            status_code=503,
-            detail="MONGO_URI_HISTORICAL is not configured; historical ingestion is disabled.",
-        )
-
     start, end = _resolve_date_range(date, start_date, end_date)
-    counts = await _daily_counts(source, start, end, historical=historical)
+    counts = await _daily_counts(source, start, end)
     return {
         "source": source,
-        "historical": historical,
         "start_date": start.isoformat(),
         "end_date": end.isoformat(),
         "counts": [
@@ -588,39 +569,28 @@ async def trigger_retry_missing(
     end_date: _date | None = Query(
         None, description="Last day of an inclusive range (YYYY-MM-DD)."
     ),
-    historical: bool = Query(
-        False,
-        description="Check/retry against the historical Mongo cluster instead of the live one.",
-    ),
     min_expected_count: int | None = Query(
         None,
         description=(
-            "Also retry days with fewer than this many documents, not just "
-            "fully-missing (zero) days. Omit to only retry zero-document days."
+            "Also retry days with fewer than this many rows, not just "
+            "fully-missing (zero) days. Omit to only retry zero-row days."
         ),
     ),
 ) -> dict[str, object]:
-    """Finds days in `[date]`/`[start_date, end_date]` with zero
-    documents (or, if `min_expected_count` is given, fewer than that
-    many) and re-ingests just those -- never the whole range, and never
-    at risk of duplicating anything: every upsert is keyed on each
-    source's unique key (`MongoSettings.unique_key_for_source`), so
-    retrying an already-complete day just overwrites it with the same
-    values.
+    """Finds days in `[date]`/`[start_date, end_date]` with zero rows
+    (or, if `min_expected_count` is given, fewer than that many) and
+    re-ingests just those -- never the whole range, and never at risk of
+    duplicating anything: every write is keyed on each source's unique
+    key (`IngestionSettings.unique_key_for_source`), so retrying an
+    already-complete day just overwrites it with the same values.
 
     Returns immediately with the day count actually checked and the
     list of gaps found; if any were found, also a `job_id` -- poll
     `GET /ingestion/retry-missing/{job_id}` for the retry's outcome.
     Returns with no `job_id` (nothing scheduled) if no gaps were found.
     """
-    if historical and not get_mongo_settings().mongo_uri_historical:
-        raise HTTPException(
-            status_code=503,
-            detail="MONGO_URI_HISTORICAL is not configured; historical ingestion is disabled.",
-        )
-
     start, end = _resolve_date_range(date, start_date, end_date)
-    counts = await _daily_counts(source, start, end, historical=historical)
+    counts = await _daily_counts(source, start, end)
     missing_dates = sorted(
         day
         for day, count in counts.items()
@@ -637,23 +607,15 @@ async def trigger_retry_missing(
         return {
             "status": "no_gaps_found",
             "source": source,
-            "historical": historical,
             "days_checked": len(counts),
             "missing_dates": [],
         }
 
     job_id = _jobs.start(
-        source=source,
-        historical=historical,
-        missing_dates=[d.isoformat() for d in missing_dates],
+        source=source, missing_dates=[d.isoformat() for d in missing_dates]
     )
     background_tasks.add_task(
-        _jobs.run,
-        job_id,
-        _retry_missing_dates,
-        source,
-        missing_dates,
-        historical=historical,
+        _jobs.run, job_id, _retry_missing_dates, source, missing_dates
     )
     log.info(
         "api.retry_missing_triggered",
@@ -665,7 +627,6 @@ async def trigger_retry_missing(
         "status": "started",
         "job_id": job_id,
         "source": source,
-        "historical": historical,
         "days_checked": len(counts),
         "missing_dates": [d.isoformat() for d in missing_dates],
     }
@@ -675,10 +636,10 @@ async def trigger_retry_missing(
 async def get_retry_missing_status(job_id: str) -> dict[str, object]:
     """Poll a `/ingestion/retry-missing` trigger's outcome by its `job_id`.
 
-    `status` is `"running"`, `"completed"`, or `"failed"`; `upserted`
-    (only set once `completed`) is the total documents upserted across
-    every retried date, `error` (only set once `failed`) is the
-    exception message.
+    `status` is `"running"`, `"completed"`, or `"failed"`; `written`
+    (only set once `completed`) is the total rows written across every
+    retried date, `error` (only set once `failed`) is the exception
+    message.
     """
     job = _jobs.get(job_id)
     if job is None:
@@ -692,7 +653,7 @@ async def get_retry_missing_status(job_id: str) -> dict[str, object]:
         "status": job.status,
         "started_at": job.started_at,
         "finished_at": job.finished_at,
-        "upserted": job.result,
+        "written": job.result,
         "error": job.error,
     }
 
@@ -711,9 +672,8 @@ async def trigger_historical_ingest(
         None, description="Last day of an inclusive range (YYYY-MM-DD)."
     ),
 ) -> dict[str, str]:
-    """Backfills one source into the *historical* MongoDB cluster
-    (`MONGO_URI_HISTORICAL`), for a single `date` or an inclusive
-    `start_date`/`end_date` range.
+    """Backfills one source into the local DuckDB store, for a single
+    `date` or an inclusive `start_date`/`end_date` range.
 
     Query parameters, not a JSON body -- `source` being an `enum`-typed
     query param (rather than a body field) is what makes Swagger UI
@@ -726,14 +686,21 @@ async def trigger_historical_ingest(
     day-by-day loop, holidays' year-by-year loop) -- so this returns
     immediately rather than holding the request open. Poll
     `GET /ingestion/historical/{job_id}` with the returned `job_id` to
-    find out when it finishes and how many documents were upserted.
-    """
-    if not get_mongo_settings().mongo_uri_historical:
-        raise HTTPException(
-            status_code=503,
-            detail="MONGO_URI_HISTORICAL is not configured; historical ingestion is disabled.",
-        )
+    find out when it finishes and how many rows were written.
 
+    `source='openelectricity'` rejects (422) a range wider than
+    `MAX_5M_INTERVAL_DAYS` up front, before any job starts -- the OE
+    API itself rejects `interval=5m` requests over 8 days
+    (`OpenElectricityFetcher.fetch()` raises `ValueError` for exactly
+    this reason), and this endpoint doesn't chunk a too-wide
+    openelectricity range into multiple requests on your behalf.
+    Split it into several `start_date`/`end_date` calls yourself
+    instead. (bom/aemo_nem/aemo_wem/holidays have no such limit --
+    their own historical helpers already chunk day-by-day/year-by-year
+    internally; `_ingest_openelectricity_historical` now does the same
+    thing in `MAX_5M_INTERVAL_DAYS`-sized chunks, so `openelectricity`
+    accepts any range too.)
+    """
     start, end = _resolve_date_range(date, start_date, end_date)
 
     job_id = _jobs.start(
@@ -775,8 +742,8 @@ async def trigger_historical_ingest(
 async def get_historical_ingest_status(job_id: str) -> dict[str, object]:
     """Poll a `/ingestion/historical` trigger's outcome by its `job_id`.
 
-    `status` is `"running"`, `"completed"`, or `"failed"`; `upserted`
-    (only set once `completed`) is the total documents upserted, `error`
+    `status` is `"running"`, `"completed"`, or `"failed"`; `written`
+    (only set once `completed`) is the total rows written, `error`
     (only set once `failed`) is the exception message.
     """
     job = _jobs.get(job_id)
@@ -791,8 +758,54 @@ async def get_historical_ingest_status(job_id: str) -> dict[str, object]:
         "status": job.status,
         "started_at": job.started_at,
         "finished_at": job.finished_at,
-        "upserted": job.result,
+        "written": job.result,
         "error": job.error,
+    }
+
+
+@router.post("/historical/month")
+async def trigger_historical_month_ingest(
+    background_tasks: BackgroundTasks,
+    source: MonthSource = Query(
+        ..., description="Which source to backfill (only `aemo_nem` has a month-fetch)."
+    ),
+    year: int = Query(..., ge=2000, le=2100, description="Calendar year, e.g. 2026."),
+    month: int = Query(..., ge=1, le=12, description="Calendar month, 1-12."),
+) -> dict[str, str]:
+    """Backfills one whole calendar month directly from the source's
+    archive endpoint in a single request, instead of looping
+    `/ingestion/historical` day-by-day over `start_date`/`end_date`.
+
+    Only `aemo_nem` supports this (`AEMONEMFetcher.fetch_month`,
+    pulling NEMWeb's Archive zip-of-zips --
+    https://www.nemweb.com.au/Reports/ARCHIVE/Daily_Reports/ -- in one
+    ~150-200MB download instead of up to 31 Current-listing probes) --
+    `source` is typed as `MonthSource` (not the full `Source` enum),
+    so Swagger's dropdown only ever offers `aemo_nem`; any other value
+    fails FastAPI's own request validation (422) before this function
+    body even runs. Returns 0 rows written if the month hasn't been
+    archived yet (archive publishing lags live data by roughly a month).
+
+    Runs in the background like `/ingestion/historical` -- poll
+    `GET /ingestion/historical/{job_id}` (same job store) with the
+    returned `job_id`.
+    """
+    job_id = _jobs.start(source=source, year=year, month=month)
+    background_tasks.add_task(_jobs.run, job_id, _ingest_aemo_nem_month, year, month)
+
+    log.info(
+        "api.historical_month_ingest_triggered",
+        job_id=job_id,
+        source=source,
+        year=year,
+        month=month,
+    )
+    return {
+        "status": "started",
+        "job_id": job_id,
+        "source": source,
+        "year": str(year),
+        "month": str(month),
     }
 
 

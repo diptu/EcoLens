@@ -1,16 +1,15 @@
-"""MongoDB -> PostgreSQL `raw.*` syncer.
+"""DuckDB -> PostgreSQL `raw.*` syncer.
 
-See INGESTION.md's "MongoDB -> PostgreSQL Syncer" section for the design
-this implements. Every source's MongoDB documents already carry the
-target's flat column set verbatim (each fetcher stamps
-`ingest_run_id`/`fetched_at`/`source` onto its own already-flat
-OUTPUT_COLUMNS before upserting -- see `ecolens.ingestion.storage.mongo`)
-so "sync" here is a column projection + upsert, not a real reshape.
+Every source's DuckDB rows already carry the target's flat column set
+verbatim (`duckdb_store.write_historical` stamps `ingest_run_id`/
+`fetched_at`/`source` onto each doc before writing -- see
+`ecolens.ingestion.storage.duckdb_store`) so "sync" here is a column
+projection + upsert, not a real reshape.
 
 The `raw.*` table/column contract (including each source's unique key)
 must stay in lockstep with:
-  - `ecolens.ingestion.storage.settings.MongoSettings` (collection names,
-    `unique_key_for_source`) -- the Mongo side.
+  - `ecolens.ingestion.storage.settings.IngestionSettings` (table names,
+    `unique_key_for_source`) -- the DuckDB side.
   - `warehouse/dbt_project/macros/create_raw_schema.sql` -- the Postgres
     DDL dbt bootstraps `raw.*` from.
 
@@ -27,6 +26,7 @@ module -- a real circular import, not a style preference.
 
 from __future__ import annotations
 
+import asyncio
 import math
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Protocol
@@ -34,11 +34,17 @@ from typing import Any, Protocol
 import asyncpg
 
 from ecolens.ingestion.circuit_breaker import retry_with_backoff
-from ecolens.ingestion.storage.mongo import get_db
-from ecolens.ingestion.storage.settings import MongoSettings, get_mongo_settings
+from ecolens.ingestion.storage import duckdb_store
+from ecolens.ingestion.storage.settings import IngestionSettings, get_ingestion_settings
 from ecolens.shared.observability.logging import get_logger
 
 log = get_logger(__name__)
+
+# Rows per Postgres executemany() batch -- was MongoSettings.mongo_bulk_chunk_size
+# back when this synced from Mongo; now a plain Postgres-write-batching
+# constant local to this module, since it was never really an "ingest"
+# tunable, just repurposed from one.
+_PG_WRITE_CHUNK_SIZE = 1000
 
 
 class _PgConnParams(Protocol):
@@ -130,7 +136,7 @@ _HOLIDAY_COLUMNS: tuple[str, ...] = (
 )
 
 # source key -> column contract for its raw.* table (source keys match
-# MongoSettings.collection_for_source / unique_key_for_source exactly).
+# IngestionSettings.table_for_source / unique_key_for_source exactly).
 _SOURCE_COLUMNS: dict[str, tuple[str, ...]] = {
     "aemo_nem": _ENERGY_COLUMNS,
     "aemo_wem": _ENERGY_COLUMNS,
@@ -140,7 +146,7 @@ _SOURCE_COLUMNS: dict[str, tuple[str, ...]] = {
 }
 
 
-# Not every source's fetcher stores these as native BSON dates (e.g.
+# Not every source's rows carry these as native Python datetimes (e.g.
 # OpenElectricity's `ts` lands as an ISO string) -- coerce defensively
 # rather than assume, same as freshness.py already does for its own
 # timestamp field.
@@ -148,9 +154,9 @@ _TIMESTAMP_COLUMNS = frozenset({"ts", "fetched_at"})
 _DATE_COLUMNS = frozenset({"date", "observed_date"})
 # BoM's local CSV cache round-trip used to infer the all-numeric-looking
 # "1.0" as float64 (fixed at the source in bom/cache.py), so some
-# already-ingested Mongo docs still have schema_version stored as a
-# float -- coerce here too rather than assume every doc was written
-# after that fix.
+# already-ingested rows can still have schema_version stored as a float
+# -- coerce here too rather than assume every row was written after that
+# fix.
 _STRING_COLUMNS = frozenset({"schema_version"})
 
 
@@ -183,7 +189,7 @@ def _upsert_sql(
     update_cols = [c for c in columns if c not in unique_key]
     update_clause = ", ".join(f"{c} = excluded.{c}" for c in update_cols)
     # table/columns/unique_key come only from _SOURCE_COLUMNS and
-    # MongoSettings.collection_for_source()/unique_key_for_source() --
+    # IngestionSettings.table_for_source()/unique_key_for_source() --
     # hardcoded internal mappings, never request input.
     return (
         f"insert into {table} ({', '.join(columns)}) values ({placeholders}) "  # nosec B608
@@ -192,19 +198,19 @@ def _upsert_sql(
 
 
 class RawSyncer:
-    """Copies MongoDB raw collections into PostgreSQL `raw.*` tables.
+    """Copies DuckDB raw tables into PostgreSQL `raw.*` tables.
 
     Idempotent: every insert is an upsert on the same unique key the
-    Mongo collection itself is keyed on, so re-running (or overlapping
+    DuckDB table itself is keyed on, so re-running (or overlapping
     incremental windows) never creates duplicates.
     """
 
     def __init__(
         self,
-        mongo_settings: MongoSettings | None = None,
+        ingestion_settings: IngestionSettings | None = None,
         pg_settings: _PgConnParams | None = None,
     ) -> None:
-        self.mongo_settings = mongo_settings or get_mongo_settings()
+        self.ingestion_settings = ingestion_settings or get_ingestion_settings()
         if pg_settings is None:
             # Local import: only needed for this fallback (callers normally
             # pass their own settings, e.g. WarehouseRunner passes its own
@@ -238,32 +244,33 @@ class RawSyncer:
             self._pg_pool = None
 
     async def sync_one(self, source: str, *, since: datetime | None = None) -> int:
-        """Sync one source's Mongo collection into its raw.* table.
+        """Sync one source's DuckDB table into its raw.* table.
 
         `since` filters on `fetched_at` (incremental catch-up); omit
-        for a full resync of the whole collection.
+        for a full resync of the whole table.
         """
         if self._pg_pool is None:
             raise RuntimeError("RawSyncer.connect() must be called before sync_one()")
 
-        collection_name = self.mongo_settings.collection_for_source(source)
-        unique_key = self.mongo_settings.unique_key_for_source(source)
+        table_name = self.ingestion_settings.table_for_source(source)
+        unique_key = self.ingestion_settings.unique_key_for_source(source)
         columns = _SOURCE_COLUMNS[source]
-        table = f"raw.{collection_name}"
-        chunk_size = self.mongo_settings.mongo_bulk_chunk_size
+        table = f"raw.{table_name}"
 
-        query: dict[str, Any] = {}
-        if since is not None:
-            query["fetched_at"] = {"$gte": since}
+        # DuckDB has no async driver -- run the (typically fast, whole-
+        # table-scale) read in a thread so it doesn't block the event
+        # loop the rest of this class's Postgres I/O runs on.
+        rows = await asyncio.to_thread(
+            duckdb_store.read_historical_since, source, since=since
+        )
 
         sql = _upsert_sql(table, columns, unique_key)
-        collection = get_db()[collection_name]
 
         synced = 0
         batch: list[tuple[Any, ...]] = []
-        async for doc in collection.find(query):
+        for doc in rows:
             batch.append(tuple(_coerce(col, doc.get(col)) for col in columns))
-            if len(batch) >= chunk_size:
+            if len(batch) >= _PG_WRITE_CHUNK_SIZE:
                 await self._write_batch(sql, batch)
                 synced += len(batch)
                 batch = []
@@ -297,8 +304,8 @@ class RawSyncer:
         # cheap since every row is an idempotent upsert.
         await retry_with_backoff(
             _do_write,
-            max_retries=self.mongo_settings.ingest_max_retries,
-            backoff_base=self.mongo_settings.ingest_retry_backoff_base,
+            max_retries=self.ingestion_settings.ingest_max_retries,
+            backoff_base=self.ingestion_settings.ingest_retry_backoff_base,
             on_retry=lambda attempt, exc, delay: log.warning(
                 "raw_sync.batch_retry",
                 attempt=attempt,

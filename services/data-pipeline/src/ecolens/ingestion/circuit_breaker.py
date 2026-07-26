@@ -1,7 +1,7 @@
 """Shared network-safety primitives for the ingestion layer.
 
-Two independent pieces, both driven by the `ingest_*` tunables already
-declared on `MongoSettings` (previously unused -- every source hand-rolled
+Two independent pieces, both driven by the `ingest_*` tunables declared
+on `IngestionSettings` (previously unused -- every source hand-rolled
 its own retry loop, if it had one at all):
 
   - `retry_with_backoff()` -- exponential backoff with jitter, no
@@ -34,7 +34,7 @@ from ecolens.shared.observability.logging import get_logger
 if TYPE_CHECKING:
     from redis.asyncio import Redis
 
-    from ecolens.ingestion.storage.settings import MongoSettings
+    from ecolens.ingestion.storage.settings import IngestionSettings
 
 log = get_logger(__name__)
 
@@ -68,7 +68,7 @@ async def retry_with_backoff(
 
     `max_retries` is a total-attempt count (matches the existing
     per-source convention in aemo_nem/client.py and bom/client.py, not
-    "retries after the first"). `MongoSettings.ingest_max_retries`
+    "retries after the first"). `IngestionSettings.ingest_max_retries`
     allows 0 -- treated as "try once, don't retry" rather than raising.
     """
     if max_retries < 1:
@@ -104,13 +104,13 @@ class CircuitBreaker:
         source: str,
         redis: "Redis",
         *,
-        settings: "MongoSettings | None" = None,
+        settings: "IngestionSettings | None" = None,
     ) -> None:
-        from ecolens.ingestion.storage.settings import get_mongo_settings
+        from ecolens.ingestion.storage.settings import get_ingestion_settings
 
         self.source = source
         self.redis = redis
-        settings = settings or get_mongo_settings()
+        settings = settings or get_ingestion_settings()
         self.threshold = settings.ingest_circuit_breaker_threshold
         self.timeout_seconds = settings.ingest_circuit_breaker_timeout_seconds
         self._failures_key = f"circuit_breaker:{source}:failures"

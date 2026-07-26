@@ -72,8 +72,8 @@ class WarehouseRunner:
             self.metrics.emit(result)
             return result
 
-        # Stage 1.5: sync MongoDB raw collections -> PostgreSQL raw.*
-        # (what dbt actually reads -- freshness above only checks Mongo).
+        # Stage 1.5: sync DuckDB raw tables -> PostgreSQL raw.*
+        # (what dbt actually reads -- freshness above only checks DuckDB).
         r = await self._run_raw_sync(mode)
         result.stages.append(r)
         if not r.success:
@@ -116,10 +116,9 @@ class WarehouseRunner:
         result.success = all(s.success for s in result.stages)
         result.stages.append(self.metrics.emit(result))
 
-        # Stage 6: archive (optional)
+        # Stage 6: archive (no-op, see archive.py) + vacuum (optional)
         if not skip_archive:
             try:
-                self.archiver.connect_mongo()
                 self.archiver.connect_pg()
                 result.stages.append(self.archiver.archive())
                 result.stages.append(self.archiver.vacuum())

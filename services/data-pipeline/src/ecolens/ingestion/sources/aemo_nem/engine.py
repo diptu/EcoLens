@@ -54,8 +54,7 @@ Usage:
     fetcher = AEMONEMFetcher()
     async with httpx.AsyncClient(timeout=60) as client:
         docs = await fetcher.fetch(client, since=..., until=...)
-        await bulk_upsert(db, "aemo_nem_dispatch", docs,
-                          unique_keys=("region", "ts"))
+        duckdb_store.write_historical("aemo_nem", docs)
 """
 
 from __future__ import annotations
@@ -126,7 +125,7 @@ class AEMONEMFetcher:
             until:  end of range (UTC, tz-aware). Defaults to "now".
 
         Returns:
-            A list of dicts ready for bulk_upsert into MongoDB. Each
+            A list of dicts ready for duckdb_store.write_historical. Each
             dict has all OUTPUT_COLUMNS, with `None` for missing values.
         """
         if since is None:
@@ -163,7 +162,44 @@ class AEMONEMFetcher:
             log.warning("aemo_nem.fetch.no_data")
             return []
         combined = pd.concat(all_rows, ignore_index=True)
+        return self._finalize(combined, days=len(days))
 
+    async def fetch_month(
+        self, client: httpx.AsyncClient, year: int, month: int
+    ) -> list[dict[str, Any]]:
+        """Fetch one whole calendar month directly from the NEMWeb
+        Archive (https://www.nemweb.com.au/Reports/Archive/Daily_Reports/),
+        for backfilling a month that has already rolled out of Current's
+        ~60-day window.
+
+        Unlike `fetch()`/`fetch_for_date()` looped day-by-day over a
+        month (up to 31 Current-listing probes, each falling back to
+        the same cached archive zip), this goes straight to the
+        archive: one ~150-200MB zip-of-zips download
+        (`AEMONEMClient.fetch_month_tables`), parsed into every day it
+        contains in one pass. Returns `[]` if the month hasn't been
+        archived yet (still only in Current — archive publishing lags
+        by roughly a month).
+        """
+        day_tables = await self._client.fetch_month_tables(client, year, month)
+        if not day_tables:
+            log.warning("aemo_nem.fetch_month.no_data", year=year, month=month)
+            return []
+
+        frames = [
+            build_day_frame(tables, self.duid_map) for tables in day_tables.values()
+        ]
+        frames = [df for df in frames if df is not None and not df.empty]
+        if not frames:
+            log.warning("aemo_nem.fetch_month.no_data", year=year, month=month)
+            return []
+        combined = pd.concat(frames, ignore_index=True)
+        return self._finalize(combined, days=len(day_tables))
+
+    def _finalize(self, combined: pd.DataFrame, *, days: int) -> list[dict[str, Any]]:
+        """Shared tail of `fetch()`/`fetch_month()`: network aggregation,
+        the full v1.0 column contract, data-quality fixes, diagnostics.
+        """
         # Aggregate to network level if requested
         if self.aggregate_to_network:
             combined = aggregate_to_network(combined)
@@ -180,7 +216,7 @@ class AEMONEMFetcher:
         docs = combined.to_dict("records")
         docs = apply_data_quality_fixes(docs)
         diagnose(docs)
-        log.info("aemo_nem.fetch.complete", rows=len(docs), days=len(days))
+        log.info("aemo_nem.fetch.complete", rows=len(docs), days=days)
         return docs
 
     async def fetch_for_date(

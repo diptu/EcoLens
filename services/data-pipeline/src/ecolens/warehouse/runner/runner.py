@@ -1,19 +1,19 @@
 """ecoLens warehouse runner — entry point.
 
-Orchestrates the MongoDB -> dbt -> PostgreSQL pipeline that keeps the
+Orchestrates the DuckDB -> dbt -> PostgreSQL pipeline that keeps the
 ecoLens warehouse fresh.
 
 What it does
 ============
     ┌──────────────┐
-    │  MongoDB     │  raw collections (aemo_nem_dispatch, bom_observations, ...)
+    │  DuckDB      │  raw tables (aemo_nem_dispatch, bom_observations, ...)
     └──────┬───────┘
            │
            │  Stage 1: source freshness check
            │
     ┌──────▼──────────────────────────────────────────────┐
     │  dbt build  (staging → intermediate → marts)        │
-    │    - staging:  1:1 views over MongoDB               │
+    │    - staging:  1:1 views over raw.* (synced from DuckDB) │
     │    - intermediate:  joins + grain alignment         │
     │    - marts:  fact_demand_30min, ml_features, dims   │
     └──────┬──────────────────────────────────────────────┘
@@ -32,14 +32,14 @@ This runner coordinates all of that. It runs from a 30-min cron
 rhythm).
 
 Split by concern (unlike the original single-file draft):
-  settings.py       WarehouseRunnerSettings — pg/mongo/dbt/threshold tuning
+  settings.py       WarehouseRunnerSettings — pg/dbt/threshold tuning
   models.py         StageResult / RunResult dataclasses
-  freshness.py       Stage 1 — SourceFreshnessChecker (MongoDB)
+  freshness.py       Stage 1 — SourceFreshnessChecker (DuckDB)
   dbt_runner.py     Stage 2 — DbtRunner (dbt build via subprocess)
   quality.py        Stage 3 — DataQualityValidator (freshness/nulls/gaps)
   aggregates.py     Stage 4 — AggregateRefresher (REFRESH MATERIALIZED VIEW)
   metrics.py        Stage 5 — MetricsEmitter (JSONL + human-readable log)
-  archive.py        Stage 6 — ArchiveManager (Mongo TTL delete + VACUUM)
+  archive.py        Stage 6 — ArchiveManager (no-op archive + Postgres VACUUM)
   orchestrator.py   WarehouseRunner — runs all 6 stages in order
   cli.py            argparse CLI (--full / --incremental / --validate-only / --select)
   runner.py         this file — entry point, `if __name__ == "__main__"`

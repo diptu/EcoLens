@@ -23,7 +23,7 @@ import httpx
 import pandas as pd
 
 from ecolens.ingestion.circuit_breaker import CircuitBreaker, retry_with_backoff
-from ecolens.ingestion.storage.settings import MongoSettings, get_mongo_settings
+from ecolens.ingestion.storage.settings import IngestionSettings, get_ingestion_settings
 from ecolens.shared.observability.logging import get_logger
 
 from .schema import (
@@ -58,7 +58,7 @@ class OpenElectricityClient:
         api_key: str | None = None,
         *,
         use_sdk: bool = True,
-        settings: MongoSettings | None = None,
+        settings: IngestionSettings | None = None,
         circuit_breaker: CircuitBreaker | None = None,
     ) -> None:
         self.api_key = api_key
@@ -68,7 +68,7 @@ class OpenElectricityClient:
         self.headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         if not self.headers:
             log.warning("oe.client.no_api_key", note="Requests will likely 401.")
-        settings = settings or get_mongo_settings()
+        settings = settings or get_ingestion_settings()
         self.max_retries = settings.ingest_max_retries
         self.backoff_base = settings.ingest_retry_backoff_base
         self.circuit_breaker = circuit_breaker

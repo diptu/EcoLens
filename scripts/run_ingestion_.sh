@@ -1,14 +1,14 @@
 #!/bin/bash
 
 # Configuration: Change these dates or interval as needed (or pass them as arguments)
-START_DATE="${1:-2026-06-14}"
-END_DATE="${2:-2026-06-20}"
+START_DATE="${1:-2026-07-11}"
+END_DATE="${2:-2026-07-20 create safegards againest }"
 POLL_INTERVAL="${3:-2}"
 BASE_URL="http://127.0.0.1:8001/ingestion/historical"
 
 # List of sources
 # SOURCES=("bom" "aemo_nem" "aemo_wem" "openelectricity" "holidays")
-SOURCES=("aemo_nem")
+SOURCES=("openelectricity")
 
 
 echo "Starting historical data ingestion day-by-day with polling..."

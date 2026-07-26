@@ -28,6 +28,16 @@ NETWORK_TIMEZONE_LABEL: dict[str, str] = {
     "WEM": "Australia/Perth",
 }
 
+# The OE v4 API rejects any `interval=5m` request spanning more than 8
+# days ("Date range too large for 5m interval. Maximum range is 8
+# days.", confirmed live 2026-07 -- every metric hardcodes interval=5m
+# in client.py). Any `fetch()` call wider than this must be chunked
+# into consecutive windows this size or smaller, or every single
+# metric request 400s and the whole fetch silently returns 0 rows
+# (each per-metric failure is caught and logged individually in
+# engine.py, never raised).
+MAX_5M_INTERVAL_DAYS: int = 7
+
 
 # ────────────────────────────────────────────────────────────────────
 # FUEL_MAP v1.0 — disaggregated coal and gas (was aggregated in v0.x)

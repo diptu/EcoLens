@@ -63,14 +63,12 @@ Usage:
             client,
             since=datetime.now(timezone.utc) - timedelta(hours=1),
         )
-        await bulk_upsert(db, "openelectricity_responses", docs,
-                          unique_keys=("network_code", "ts"))
+        duckdb_store.write_historical("openelectricity", docs)
 
-    # Facility registry (monthly)
+    # Facility registry (monthly) -- not yet wired into
+    # IngestionSettings.table_for_source; illustrative only.
     facility_fetcher = OpenElectricityFacilityFetcher(api_key=settings.oe_api_key)
     facilities = await facility_fetcher.fetch_facilities(client)
-    await bulk_upsert(db, "openelectricity_facilities", facilities,
-                      unique_keys=("facility_id",))
 """
 
 from __future__ import annotations
@@ -87,7 +85,12 @@ from ecolens.ingestion.circuit_breaker import CircuitBreaker
 from ecolens.shared.observability.logging import get_logger
 
 from .client import OpenElectricityClient
-from .schema import DEFAULT_METRICS, NETWORK_CAPABILITIES, SCHEMA_VERSION
+from .schema import (
+    DEFAULT_METRICS,
+    MAX_5M_INTERVAL_DAYS,
+    NETWORK_CAPABILITIES,
+    SCHEMA_VERSION,
+)
 from .transformers import diagnose_data_quality, merge_network
 
 log = get_logger(__name__)
@@ -136,11 +139,34 @@ class OpenElectricityFetcher:
         *,
         metrics: list[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Fetch OE for every (network × metric) and return merged docs."""
+        """Fetch OE for every (network × metric) and return merged docs.
+
+        Raises:
+            ValueError: `until` is before `since`, or the range exceeds
+                `MAX_5M_INTERVAL_DAYS` -- the OE API 400s any wider
+                `interval=5m` request ("Date range too large for 5m
+                interval. Maximum range is 8 days.", confirmed live).
+                This fetcher does NOT chunk a too-wide range into
+                multiple requests on your behalf: silently splitting
+                one call into many would hide how many requests you're
+                actually making against a metered API from the call
+                site. Callers that need a wider backfill (e.g.
+                `ecolens.ingestion.api._ingest_openelectricity_historical`)
+                must chunk explicitly and call `fetch()` once per chunk.
+        """
         if since is None:
             since = datetime.now(timezone.utc) - timedelta(minutes=30)
         if until is None:
             until = datetime.now(timezone.utc)
+        if until < since:
+            raise ValueError("`until` is before `since`")
+        if until - since > timedelta(days=MAX_5M_INTERVAL_DAYS):
+            raise ValueError(
+                f"date range too wide ({(until - since).days} days): the OE API "
+                f"rejects interval=5m requests over {MAX_5M_INTERVAL_DAYS} days -- "
+                "split into multiple `fetch()` calls, each spanning at most "
+                f"{MAX_5M_INTERVAL_DAYS} days"
+            )
         if networks is None:
             networks = ["NEM", "WEM"]
         if metrics is None:
@@ -166,7 +192,7 @@ class OpenElectricityFetcher:
         results = await asyncio.gather(*coros, return_exceptions=False)
 
         # Bucket the frames by network
-        per_network: dict[str, dict[str, pd.DataFrame]] = {}
+        per_network: dict[str, dict[str, pd.DataFrame | None]] = {}
         for network, metric, df in results:
             per_network.setdefault(network, {})[metric] = df
 

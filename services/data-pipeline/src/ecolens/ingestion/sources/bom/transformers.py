@@ -2,12 +2,14 @@
 
 Pure(ish) pandas/dict transforms — no network I/O (see client.py for
 that, cache.py for the local CSV tier). `normalize_observation` turns
-one raw BoM JSON record into a v1.0 row; `apply_data_quality_fixes`
-and `synthetic_stub` are shared by every fetch tier in engine.py.
+one raw BoM v1 `/observations` response into a v1.0 row;
+`apply_data_quality_fixes` and `synthetic_stub` are shared by every
+fetch tier in engine.py.
 """
 
 from __future__ import annotations
 
+import math
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -19,70 +21,93 @@ from ecolens.shared.observability.logging import get_logger
 
 from .schema import (
     AUSTRALIA_UTC_OFFSETS,
+    DEW_POINT_MAGNUS_A,
+    DEW_POINT_MAGNUS_B,
     PHYSICAL_BOUNDS,
     SCHEMA_VERSION,
     STATION_NAME_MAP,
+    WIND_DIRECTION_DEGREES,
 )
 
 log = get_logger(__name__)
 
 
-def normalize_observation(
-    obs: dict[str, Any],
-    region: str,
-    station_id: str,
-    now: pd.Timestamp,
-) -> dict[str, Any] | None:
-    """Map one raw BoM `observations.json` record to a v1.0 row.
-
-    Returns None if the record has no usable timestamp.
+def _dew_point_magnus(temp_c: float | None, humidity_pct: float | None) -> float | None:
+    """Magnus-Tetens approximation — the v1 API doesn't return dew point
+    directly, unlike the legacy endpoint's `dewpt` field.
     """
+    if temp_c is None or humidity_pct is None or humidity_pct <= 0:
+        return None
+    a, b = DEW_POINT_MAGNUS_A, DEW_POINT_MAGNUS_B
     try:
-        local_str = obs.get("local_date_time_full") or obs.get("aifstime_utc")
-        if not local_str:
-            return None
-        local_ts = pd.to_datetime(local_str, errors="coerce")
-        if pd.isna(local_ts):
-            return None
-        offset_hours = AUSTRALIA_UTC_OFFSETS.get(region, 10)
-        if local_ts.tzinfo is None:
-            ts_utc = (local_ts - pd.Timedelta(hours=offset_hours)).tz_localize("UTC")
-        else:
-            ts_utc = local_ts.tz_convert("UTC")
-        ts_30 = ts_utc.floor("30min")
-        if ts_30.tzinfo is None:
-            ts_30 = ts_30.tz_localize("UTC")
-    except (ValueError, TypeError) as exc:
-        log.debug("bom.parse.timestamp_failed", region=region, error=str(exc))
+        alpha = ((a * temp_c) / (b + temp_c)) + math.log(humidity_pct / 100.0)
+        return (b * alpha) / (a - alpha)
+    except (ValueError, ZeroDivisionError):
         return None
 
-    # BoM's quality flag (only check critical fields)
-    rain_trace = obs.get("rain_trace")
-    if obs.get("rain_trace_quality") in ("W", "S"):
-        rain_trace = None
 
-    cloud_oktas = obs.get("cloud")
-    cloud_cover_pct = (cloud_oktas * 12.5) if cloud_oktas is not None else None
+def normalize_observation(
+    payload: dict[str, Any],
+    region: str,
+    geohash: str,
+    now: pd.Timestamp,
+) -> dict[str, Any] | None:
+    """Map one BoM v1 `/locations/{geohash}/observations` response to a
+    v1.0 row.
+
+    Returns None if the payload has no usable `data`/observation time.
+    The station identity (`station_id`/`station_name`) comes from the
+    response itself (`data.station.bom_id`/`.name`) — the v1 API
+    resolves `geohash` to its nearest station, which isn't necessarily
+    the same station the legacy hardcoded IDs pointed at, so ecoLens
+    trusts the response rather than a local map.
+    """
+    data = payload.get("data")
+    if not data:
+        return None
+    metadata = payload.get("metadata") or {}
+    obs_time = metadata.get("observation_time")
+    if not obs_time:
+        return None
+    ts_utc = pd.to_datetime(obs_time, utc=True, errors="coerce")
+    if pd.isna(ts_utc):
+        return None
+    ts_30 = ts_utc.floor("30min")
+    if ts_30.tzinfo is None:
+        ts_30 = ts_30.tz_localize("UTC")
+
+    station = data.get("station") or {}
+    station_id = station.get("bom_id") or geohash
+    station_name = station.get("name", "Unknown")
+
+    wind = data.get("wind") or {}
+    gust = data.get("gust") or {}
+
+    temp_c = data.get("temp")
+    humidity_pct = data.get("humidity")
+    wind_direction = wind.get("direction")
 
     return {
         "ts": ts_30,
         "region": region,
         "station_id": station_id,
-        "station_name": STATION_NAME_MAP.get(station_id, "Unknown"),
+        "station_name": station_name,
         "schema_version": SCHEMA_VERSION,
-        "temp_c": obs.get("air_temp"),
-        "apparent_temp_c": obs.get("apparent_t"),
-        "dew_point_c": obs.get("dewpt"),
-        "humidity_pct": obs.get("rel_hum"),
-        "wind_speed_kmh": obs.get("wind_spd_kmh"),
-        "wind_direction_deg": obs.get("wind_dir"),
-        "wind_gust_kmh": obs.get("gust_kmh"),
-        "pressure_hpa": obs.get("press_msl"),
-        "rain_since_9am_mm": rain_trace,
+        "temp_c": temp_c,
+        "apparent_temp_c": data.get("temp_feels_like"),
+        "dew_point_c": _dew_point_magnus(temp_c, humidity_pct),
+        "humidity_pct": humidity_pct,
+        "wind_speed_kmh": wind.get("speed_kilometre"),
+        "wind_direction_deg": (
+            WIND_DIRECTION_DEGREES.get(wind_direction) if wind_direction else None
+        ),
+        "wind_gust_kmh": gust.get("speed_kilometre"),
+        "pressure_hpa": None,  # not in v1 -- use Open-Meteo (historical.py) for this
+        "rain_since_9am_mm": data.get("rain_since_9am"),
         "rain_last_hour_mm": None,  # filled in by apply_data_quality_fixes
-        "cloud_oktas": cloud_oktas,
-        "cloud_cover_pct": cloud_cover_pct,
-        "data_quality_status": "preliminary" if obs.get("aifstime_utc") else "unknown",
+        "cloud_oktas": None,  # not in v1 -- use Open-Meteo for this
+        "cloud_cover_pct": None,  # not in v1 -- use Open-Meteo for this
+        "data_quality_status": "preliminary",
         "source": "bom",
         "ingest_run_id": None,  # filled in by the caller
         "ingested_at": now,

@@ -1,14 +1,14 @@
-"""Manually trigger BoM fetch(es) -> MongoDB upsert.
+"""Manually trigger BoM fetch(es) -> DuckDB upsert.
 
 Standalone script (not a pytest test): fetches observations for the 6
 default NEM/WEM stations (falls back to local cache, then a synthetic
 stub, if the live API is unreachable) and upserts docs into the
-`bom_observations` collection. Defaults to the last 1 hour
+`bom_observations` table. Defaults to the last 1 hour
 (near-real-time); also supports a single past UTC day or a day-by-day
 range for backfill, mirroring `backfill_aemo.py` / the holidays
 trigger's year range — a bad day is logged and skipped rather than
 aborting the rest of the range, and re-running an already-ingested day
-is safe (bulk_upsert is idempotent on (station_id, ts)).
+is safe (write_historical is idempotent on (station_id, ts)).
 
 Caveat: BoM's live JSON API only exposes ~72 hours of recent
 observations. Requesting a day older than that will not pull real
@@ -37,7 +37,7 @@ import pandera.errors
 
 from ecolens.config import get_settings
 from ecolens.ingestion.sources.bom import BomFetcher
-from ecolens.ingestion.storage.mongo import bulk_upsert, get_db, get_mongo_client
+from ecolens.ingestion.storage import duckdb_store
 from ecolens.ingestion.validators.bom import validate as validate_docs
 from ecolens.shared.observability.logging import get_logger
 
@@ -130,10 +130,9 @@ async def ingest_window(
     except Exception as exc:  # noqa: BLE001
         log.warning("cache_write_failed", run_id=run_id, window=label, error=str(exc))
 
-    db = get_db()
-    upserted = await bulk_upsert(db, "bom", docs, run_id)
-    log.info("mongo.upsert_complete", run_id=run_id, window=label, upserted=upserted)
-    return upserted
+    written = duckdb_store.write_historical("bom", docs, run_id=run_id)
+    log.info("duckdb.write_complete", run_id=run_id, window=label, written=written)
+    return written
 
 
 async def run(windows: list[tuple[datetime | None, datetime | None, str]]) -> None:
@@ -147,7 +146,6 @@ async def run(windows: list[tuple[datetime | None, datetime | None, str]]) -> No
             fetcher, settings.bom_request_timeout_seconds, since, until, label=label
         )
 
-    get_mongo_client().close()
     log.info("ingest.complete", totals=totals)
 
 

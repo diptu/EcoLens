@@ -127,30 +127,30 @@ pipeline: ## Run data-pipeline locally.
 	cd services/data-pipeline && $(UV) run --package data-pipeline uvicorn ecolens.api.app:app --reload --port 8001
 
 .PHONY: ingest-openelectricity
-ingest-openelectricity: ## Manually trigger one OpenElectricity (NEM/WEM) fetch -> validate -> Mongo upsert.
+ingest-openelectricity: ## Manually trigger one OpenElectricity (NEM/WEM) fetch -> validate -> DuckDB upsert.
 	cd services/data-pipeline && $(UV) run --active python scripts/trigger_ingest_openelectricity.py
 
 .PHONY: ingest-aemo-nem
-ingest-aemo-nem: ## Manually trigger one AEMO NEM dispatch fetch -> Mongo upsert. Usage: make ingest-aemo-nem [DATE=2026-07-19] (default: yesterday, AEST).
-	cd services/data-pipeline && $(UV) run --active python scripts/trigger_ingest_aemo_nem.py $(if $(DATE),--date $(DATE),)
+ingest-aemo-nem: ## Manually trigger one AEMO NEM dispatch fetch -> DuckDB upsert. Usage: make ingest-aemo-nem [DATE=2026-07-19] or [MONTH=2026-05] (default: yesterday, AEST).
+	cd services/data-pipeline && $(UV) run --active python scripts/trigger_ingest_aemo_nem.py $(if $(MONTH),--month $(MONTH),$(if $(DATE),--date $(DATE),))
 
 .PHONY: ingest-aemo-wem
-ingest-aemo-wem: ## Manually trigger one AEMO WEM dispatch fetch -> Mongo upsert. Usage: make ingest-aemo-wem [DATE=2026-07-18] (default: yesterday, AWST).
+ingest-aemo-wem: ## Manually trigger one AEMO WEM dispatch fetch -> DuckDB upsert. Usage: make ingest-aemo-wem [DATE=2026-07-18] (default: yesterday, AWST).
 	cd services/data-pipeline && $(UV) run --active python scripts/trigger_ingest_aemo_wem.py $(if $(DATE),--date $(DATE),)
 
 .PHONY: ingest-bom
-ingest-bom: ## Manually trigger BoM weather observation fetch(es) -> validate -> Mongo upsert. Usage: make ingest-bom [DATE=2026-07-01] | [START_DATE=2026-06-01 END_DATE=2026-07-01] (default: last 1 hour).
+ingest-bom: ## Manually trigger BoM weather observation fetch(es) -> validate -> DuckDB upsert. Usage: make ingest-bom [DATE=2026-07-01] | [START_DATE=2026-06-01 END_DATE=2026-07-01] (default: last 1 hour).
 	cd services/data-pipeline && $(UV) run --active python scripts/trigger_ingest_bom.py $(if $(DATE),--date $(DATE),) $(if $(START_DATE),--start-date $(START_DATE),) $(if $(END_DATE),--end-date $(END_DATE),)
 
 .PHONY: ingest-holidays
-ingest-holidays: ## Manually trigger public-holidays fetch(es) -> validate -> Mongo upsert. Usage: make ingest-holidays [YEAR=2027] | [START_YEAR=2015 END_YEAR=2027] (default: current year).
+ingest-holidays: ## Manually trigger public-holidays fetch(es) -> validate -> DuckDB upsert. Usage: make ingest-holidays [YEAR=2027] | [START_YEAR=2015 END_YEAR=2027] (default: current year).
 	cd services/data-pipeline && $(UV) run --active python scripts/trigger_ingest_holidays.py $(if $(YEAR),--year $(YEAR),) $(if $(START_YEAR),--start-year $(START_YEAR),) $(if $(END_YEAR),--end-year $(END_YEAR),)
 
 .PHONY: ingest-all
 ingest-all: ingest-openelectricity ingest-aemo-nem ingest-aemo-wem ingest-bom ingest-holidays ## Manually trigger all five ingest sources in sequence.
 
 .PHONY: backfill-bom-historical
-backfill-bom-historical: ## Backfill historical BoM weather via Open-Meteo (ERA5) -> validate -> Mongo upsert. Usage: make backfill-bom-historical [YEARS=2] | [START_DATE=2023-01-01 END_DATE=2023-12-31] (default: 3 years).
+backfill-bom-historical: ## Backfill historical BoM weather via Open-Meteo (ERA5) -> validate -> DuckDB upsert. Usage: make backfill-bom-historical [YEARS=2] | [START_DATE=2023-01-01 END_DATE=2023-12-31] (default: 3 years).
 	cd services/data-pipeline && $(UV) run --active python scripts/backfill_bom_historical.py $(if $(YEARS),--years $(YEARS),) $(if $(START_DATE),--start-date $(START_DATE),) $(if $(END_DATE),--end-date $(END_DATE),)
 
 .PHONY: backfill-aemo
@@ -167,6 +167,20 @@ backfill-aemo-nem: ## Backfill AEMO NEM over a date range, day by day. Usage: ma
 backfill-aemo-wem: ## Backfill AEMO WEM over a date range, day by day. Usage: make backfill-aemo-wem START=2026-07-01 [END=2026-07-19].
 	@if [ -z "$(START)" ]; then echo "Usage: make backfill-aemo-wem START=2026-07-01 [END=2026-07-19]"; exit 1; fi
 	cd services/data-pipeline && $(UV) run --active python ../scripts/backfill_aemo.py --start $(START) $(if $(END),--end $(END),) --source wem
+
+.PHONY: backup-duckdb
+backup-duckdb: ## Snapshot the historical DuckDB store (read-only EXPORT DATABASE, Parquet) -- DuckDB is the sole raw store since MongoDB removal (ECO-159), this is its only backup. Usage: make backup-duckdb [KEEP=30] (default: keep 14 most recent).
+	cd services/data-pipeline && $(UV) run --active python scripts/backup_duckdb.py $(if $(KEEP),--keep $(KEEP),)
+
+.PHONY: restore-duckdb
+restore-duckdb: ## Restore a DuckDB snapshot written by `make backup-duckdb`. Usage: make restore-duckdb SNAPSHOT=20260724T120000Z [TARGET=/path/to/restored.duckdb] | make restore-duckdb LIST=1.
+	@if [ -n "$(LIST)" ]; then \
+		cd services/data-pipeline && $(UV) run --active python scripts/restore_duckdb.py --list; \
+	elif [ -z "$(SNAPSHOT)" ]; then \
+		echo "Usage: make restore-duckdb SNAPSHOT=20260724T120000Z [TARGET=/path/to/restored.duckdb] | make restore-duckdb LIST=1"; exit 1; \
+	else \
+		cd services/data-pipeline && $(UV) run --active python scripts/restore_duckdb.py --snapshot-name $(SNAPSHOT) --target $(if $(TARGET),$(TARGET),restored_$(SNAPSHOT).duckdb); \
+	fi
 
 # ── Forecasting Model (train/tune/evaluate/promote in data-pipeline; ──────
 # ── forecast-api never trains, it only loads+serves whatever is aliased ───
@@ -224,7 +238,7 @@ mlflow-ui: ## Browse MLflow experiment tracking (runs/params/metrics/registered 
 	echo "First run downloads/caches mlflow + its full dependency set (~10s-1min); reused after."; \
 	uvx --from mlflow mlflow ui --backend-store-uri "$$uri" --port "$$port"
 
-# ── Warehouse (MongoDB raw -> PostgreSQL raw.* -> dbt) ─────────────────────
+# ── Warehouse (DuckDB raw -> PostgreSQL raw.* -> dbt) ───────────────────────
 # DBT_TARGET/DBT_SELECT are for the direct `dbt-*` passthrough targets below
 # (ad-hoc project work); the `warehouse*` targets go through the Python
 # runner instead, which defaults its own dbt --target to "prod" (see
@@ -258,7 +272,7 @@ warehouse-logs: ## Tail the warehouse runner's JSONL run log (data/log/warehouse
 	@tail -f services/data-pipeline/data/log/warehouse-runs.jsonl
 
 .PHONY: sync-raw
-sync-raw: ## Manually trigger MongoDB -> PostgreSQL raw.* sync only (no dbt). Usage: make sync-raw [FULL=1] [LOOKBACK_DAYS=10].
+sync-raw: ## Manually trigger DuckDB -> PostgreSQL raw.* sync only (no dbt). Usage: make sync-raw [FULL=1] [LOOKBACK_DAYS=10].
 	cd services/data-pipeline && $(UV) run --active python scripts/sync_raw.py $(if $(FULL),--full,) $(if $(LOOKBACK_DAYS),--lookback-days $(LOOKBACK_DAYS),)
 
 # ── dbt direct access (warehouse project) ──────────────────────────────────

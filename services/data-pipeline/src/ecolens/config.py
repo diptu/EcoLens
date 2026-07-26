@@ -43,23 +43,6 @@ class Settings(BaseSettings):
     db_max_overflow: int = 5
     db_echo: bool = False
 
-    # ── MongoDB ─────────────────────────────────────────────────────────
-    mongo_uri: str = Field(
-        default="mongodb://mongo:27017",
-        description="MongoDB connection string.",
-    )
-    mongo_db_name: str = Field(
-        default="ecolens",
-        description="Default database name for the ecoLens collections.",
-    )
-    mongo_max_pool_size: int = 20
-    mongo_min_pool_size: int = 5
-    mongo_server_selection_timeout_ms: int = 5000
-    mongo_connect_timeout_ms: int = 10_000
-    mongo_socket_timeout_ms: int = 30_000
-    mongo_retry_reads: bool = True
-    mongo_retry_writes: bool = True
-
     # ── Redis ─────────────────────────────────────────────────────────────
     redis_dsn: RedisDsn = Field(  # type: ignore[assignment]
         default="redis://redis:6379/0",
@@ -88,7 +71,27 @@ class Settings(BaseSettings):
             "SA1": "023034",  # Adelaide
             "TAS1": "094029",  # Hobart
             "WEM": "009225",  # Perth
-        }
+        },
+        description=(
+            "Region -> canonical BoM station ID. Feeds the historical "
+            "(Open-Meteo/ERA5) fetcher's output rows and the synthetic-stub "
+            "tier -- NOT the live v1 API's request URL, see bom_geohashes."
+        ),
+    )
+    bom_geohashes: dict[str, str] = Field(
+        default_factory=lambda: {
+            "NSW1": "r3gx2s",  # Sydney - Observatory Hill
+            "QLD1": "r7huht",  # Brisbane
+            "VIC1": "r1qcxv",  # Melbourne
+            "SA1": "r1f90q",  # Adelaide
+            "TAS1": "r22u08",  # Hobart
+            "WEM": "qd66qd",  # Perth Airport
+        },
+        description=(
+            "Region -> 6-char BoM geohash for the live v1 observations API "
+            "(api.weather.bom.gov.au/v1/locations/{geohash}/observations). "
+            "Look up new ones via /v1/locations?search=<city>."
+        ),
     )
 
     # ── Ingest tunables ───────────────────────────────────────────────────
@@ -119,12 +122,10 @@ class Settings(BaseSettings):
     historical_duckdb_path: Path = Field(
         default=Path("data/historical/ecolens_historical.duckdb"),
         description=(
-            "Local DuckDB file the ingestion layer's historical backfills "
-            "(e.g. HistoricalFetcher's ERA5 backfill, see "
-            "ingestion/storage/duckdb_store.py) write into, in addition to "
-            "MongoDB -- a durable, queryable record that survives "
-            "warehouse/runner/archive.py's age-based Mongo deletion. Relative "
-            "to CWD by default, like bom_cache_dir/training_snapshot_dir above."
+            "Local DuckDB file the ingestion layer writes into -- the sole "
+            "raw-data store for the pipeline (see "
+            "ingestion/storage/duckdb_store.py). Relative to CWD by "
+            "default, like bom_cache_dir/training_snapshot_dir above."
         ),
     )
 

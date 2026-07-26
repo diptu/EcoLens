@@ -1,7 +1,7 @@
-"""Manually trigger one OpenElectricity fetch -> MongoDB upsert.
+"""Manually trigger one OpenElectricity fetch -> DuckDB upsert.
 
 Standalone script (not a pytest test): fetches the live NEM/WEM generation
-mix and upserts it into the `openelectricity_responses` collection. Run
+mix and upserts it into the `openelectricity_responses` table. Run
 directly:
 
     uv run --active ./scripts/trigger_ingest_openelectricity.py
@@ -16,7 +16,7 @@ import pandera.errors
 
 from ecolens.config import get_settings
 from ecolens.ingestion.sources.openelectricity import OpenElectricityFetcher
-from ecolens.ingestion.storage.mongo import bulk_upsert, get_db, get_mongo_client
+from ecolens.ingestion.storage import duckdb_store
 from ecolens.ingestion.validators.openelectricity import validate as validate_docs
 from ecolens.shared.observability.logging import get_logger
 
@@ -43,11 +43,8 @@ async def run() -> None:
         return
     log.info("validation.passed", run_id=run_id, doc_count=len(docs))
 
-    db = get_db()
-    upserted = await bulk_upsert(db, "openelectricity", docs, run_id)
-    log.info("mongo.upsert_complete", run_id=run_id, upserted=upserted)
-
-    get_mongo_client().close()
+    written = duckdb_store.write_historical("openelectricity", docs, run_id=run_id)
+    log.info("duckdb.write_complete", run_id=run_id, written=written)
 
 
 if __name__ == "__main__":

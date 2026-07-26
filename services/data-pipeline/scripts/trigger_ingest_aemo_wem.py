@@ -1,8 +1,8 @@
-"""Manually trigger one AEMO WEM fetch -> MongoDB upsert.
+"""Manually trigger one AEMO WEM fetch -> DuckDB upsert.
 
 Standalone script (not a pytest test): downloads one AWST calendar
 day's WEMDE feeds (public, no API key) and upserts docs into the
-`aemo_wem_dispatch` collection. Run directly:
+`aemo_wem_dispatch` table. Run directly:
 
     uv run --active ./scripts/trigger_ingest_aemo_wem.py                # yesterday (AWST)
     uv run --active ./scripts/trigger_ingest_aemo_wem.py --date 2026-07-18
@@ -24,7 +24,7 @@ from datetime import date
 import httpx
 
 from ecolens.ingestion.sources.aemo_wem import AEMOWEMFetcher
-from ecolens.ingestion.storage.mongo import bulk_upsert, get_db, get_mongo_client
+from ecolens.ingestion.storage import duckdb_store
 from ecolens.shared.observability.logging import get_logger
 
 log = get_logger("trigger_ingest_aemo_wem")
@@ -52,11 +52,8 @@ async def run(for_date: date | None) -> None:
         log.warning("fetch.empty", run_id=run_id)
         return
 
-    db = get_db()
-    upserted = await bulk_upsert(db, "aemo_wem", docs, run_id)
-    log.info("mongo.upsert_complete", run_id=run_id, upserted=upserted)
-
-    get_mongo_client().close()
+    written = duckdb_store.write_historical("aemo_wem", docs, run_id=run_id)
+    log.info("duckdb.write_complete", run_id=run_id, written=written)
 
 
 if __name__ == "__main__":

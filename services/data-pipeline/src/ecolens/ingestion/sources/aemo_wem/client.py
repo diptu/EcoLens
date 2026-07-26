@@ -30,7 +30,7 @@ from io import BytesIO
 import httpx
 
 from ecolens.ingestion.circuit_breaker import CircuitBreaker, retry_with_backoff
-from ecolens.ingestion.storage.settings import MongoSettings, get_mongo_settings
+from ecolens.ingestion.storage.settings import IngestionSettings, get_ingestion_settings
 from ecolens.shared.observability.logging import get_logger
 
 log = get_logger(__name__)
@@ -45,10 +45,10 @@ class AEMOWEMClient:
     def __init__(
         self,
         *,
-        settings: MongoSettings | None = None,
+        settings: IngestionSettings | None = None,
         circuit_breaker: CircuitBreaker | None = None,
     ) -> None:
-        settings = settings or get_mongo_settings()
+        settings = settings or get_ingestion_settings()
         self.max_retries = settings.ingest_max_retries
         self.backoff_base = settings.ingest_retry_backoff_base
         self.circuit_breaker = circuit_breaker

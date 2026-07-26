@@ -24,6 +24,7 @@ from .historical_client import OpenMeteoClient
 from .models import BomObservationDoc
 from .schema import (
     AUSTRALIA_UTC_OFFSETS,
+    DEFAULT_BOM_GEOHASHES,
     DEFAULT_BOM_STATIONS,
     ERA5_LAG_DAYS,
     OBSERVATION_OUTPUT_COLUMNS,
@@ -31,6 +32,7 @@ from .schema import (
     SCHEMA_VERSION,
     STATION_COORDS,
     STATION_NAME_MAP,
+    WIND_DIRECTION_DEGREES,
 )
 from .transformers import (
     apply_data_quality_fixes,
@@ -48,11 +50,13 @@ __all__ = [
     "SCHEMA_VERSION",
     "AUSTRALIA_UTC_OFFSETS",
     "DEFAULT_BOM_STATIONS",
+    "DEFAULT_BOM_GEOHASHES",
     "STATION_NAME_MAP",
     "STATION_COORDS",
     "PHYSICAL_BOUNDS",
     "OBSERVATION_OUTPUT_COLUMNS",
     "ERA5_LAG_DAYS",
+    "WIND_DIRECTION_DEGREES",
     "normalize_observation",
     "apply_data_quality_fixes",
     "synthetic_stub",

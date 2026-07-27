@@ -17,6 +17,17 @@ models:
       - name: region
         tests: [not_null]
 
+  - name: stg_aemo_nem_fueltech
+    description: >
+      Renamed/cast view over raw.aemo_nem_dispatch, keeping only the
+      network-level "NEM" row (fuel-tech generation mix) --
+      stg_aemo_nem_dispatch's complement, which keeps the per-region
+      market rows instead. Broadcast onto all 5 NEM sub-regions in
+      int_energy_unified_30min.
+    columns:
+      - name: ts
+        tests: [not_null]
+
   - name: stg_openelectricity_network
     description: Renamed/cast view over raw.openelectricity_responses. Network-level (not per-region).
     columns:

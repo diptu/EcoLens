@@ -178,30 +178,57 @@ async def get_holidays(
     pool: ConnectionPool,
     year: int,
     region: str | None = None,
-) -> list[dict[str, Any]]:
+    *,
+    limit: int = 100,
+    offset: int = 0,
+) -> tuple[list[dict[str, Any]], int]:
+    """Returns `(page, total)` -- `total` is the full match count for
+    `year`/`region` *before* `limit`/`offset` are applied, via a
+    separate `COUNT(*)` rather than a `COUNT(*) OVER()` window column:
+    a window column would silently report 0 once `offset` runs past the
+    last matching row (zero rows come back at all), which is exactly
+    the case a caller paging to the end needs `total` to still be
+    correct for.
+    """
     today = date.today()
     if region:
+        total = await pool.fetchval(
+            "SELECT COUNT(*) FROM dim_holiday "
+            "WHERE region = $1 AND EXTRACT(YEAR FROM date) = $2",
+            region,
+            year,
+        )
         rows = await pool.fetch(
             "SELECT date, region, state, holiday_name, holiday_type, is_observed, "
-            "  EXTRACT(DAY FROM (date - $2::date)) AS days_until "
+            "  (date - $2::date) AS days_until "
             "FROM dim_holiday "
             "WHERE region = $1 AND EXTRACT(YEAR FROM date) = $3 "
-            "ORDER BY date",
+            "ORDER BY date "
+            "LIMIT $4 OFFSET $5",
             region,
             today,
             year,
+            limit,
+            offset,
         )
     else:
-        rows = await pool.fetch(
-            "SELECT date, region, state, holiday_name, holiday_type, is_observed, "
-            "  EXTRACT(DAY FROM (date - $1::date)) AS days_until "
-            "FROM dim_holiday "
-            "WHERE EXTRACT(YEAR FROM date) = $2 "
-            "ORDER BY date, region",
-            today,
+        total = await pool.fetchval(
+            "SELECT COUNT(*) FROM dim_holiday WHERE EXTRACT(YEAR FROM date) = $1",
             year,
         )
-    return [
+        rows = await pool.fetch(
+            "SELECT date, region, state, holiday_name, holiday_type, is_observed, "
+            "  (date - $1::date) AS days_until "
+            "FROM dim_holiday "
+            "WHERE EXTRACT(YEAR FROM date) = $2 "
+            "ORDER BY date, region "
+            "LIMIT $3 OFFSET $4",
+            today,
+            year,
+            limit,
+            offset,
+        )
+    items = [
         {
             **r,
             "days_until": int(r["days_until"])
@@ -210,6 +237,7 @@ async def get_holidays(
         }
         for r in rows
     ]
+    return items, total or 0
 
 
 __all__ = [

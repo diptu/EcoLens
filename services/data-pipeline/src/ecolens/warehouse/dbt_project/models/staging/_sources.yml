@@ -16,8 +16,11 @@ sources:
         description: >
           AEMO NEM 5-minute per-region dispatch data (NSW1, QLD1, VIC1,
           SA1, TAS1) plus one network-level "NEM" aggregate row per ts
-          (see ingestion/sources/aemo_nem/engine.py) -- the per-region
-          staging model (stg_aemo_nem_dispatch) filters "NEM" back out.
+          (see ingestion/sources/aemo_nem/engine.py) -- two staging
+          models split this table by row type: stg_aemo_nem_dispatch
+          keeps the 5 per-region market rows (demand/price/flow),
+          stg_aemo_nem_fueltech keeps the "NEM" row (the fuel-tech
+          generation mix, which AEMO never attributes per-region).
           Same 34-column v1.0 schema as openelectricity_responses.
         freshness:
           warn_after: { count: 45, period: minute }

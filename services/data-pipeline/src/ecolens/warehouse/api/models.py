@@ -7,7 +7,7 @@ from this one wide mart), `dim_holiday`.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from pydantic import BaseModel
@@ -77,13 +77,20 @@ class DemandSummary(BaseModel):
 
 
 class HolidayRow(BaseModel):
-    date: str
+    date: date
     region: str
     state: str
     holiday_name: str
     holiday_type: str
     is_observed: bool = False
     days_until: int | None = None
+
+
+class PaginatedHolidays(BaseModel):
+    items: list[HolidayRow]
+    total: int
+    limit: int
+    offset: int
 
 
 class HealthResponse(BaseModel):

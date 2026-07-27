@@ -169,12 +169,29 @@ class TestHolidays:
                     "is_observed": False,
                     "days_until": 100,
                 }
-            ]
+            ],
+            fetchval_result=1,
         )
         with client_with_pool(pool) as client:
             r = client.get("/holidays/2026")
         assert r.status_code == 200
-        assert r.json()[0]["holiday_name"] == "Christmas Day"
+        body = r.json()
+        assert body["total"] == 1
+        assert body["limit"] == 100
+        assert body["offset"] == 0
+        assert body["items"][0]["holiday_name"] == "Christmas Day"
+
+    def test_pagination_params_are_passed_through(self):
+        pool = FakeConnectionPool(fetch_result=[], fetchval_result=0)
+        with client_with_pool(pool) as client:
+            r = client.get("/holidays/2026", params={"limit": 10, "offset": 20})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["limit"] == 10
+        assert body["offset"] == 20
+        # fetchval (count) then fetch (page) -- both get the paging args.
+        fetch_call = next(c for c in pool.calls if c[0] == "fetch")
+        assert fetch_call[2][-2:] == (10, 20)
 
     def test_invalid_year_400s_before_touching_pool(self):
         with client_with_pool(None) as client:
@@ -183,7 +200,7 @@ class TestHolidays:
 
     def test_invalid_region_filter_400s(self):
         # Pool override still required (manual validation, same as /features).
-        pool = FakeConnectionPool(fetch_result=[])
+        pool = FakeConnectionPool(fetch_result=[], fetchval_result=0)
         with client_with_pool(pool) as client:
             r = client.get("/holidays/2026", params={"region": "BOGUS"})
         assert r.status_code == 400

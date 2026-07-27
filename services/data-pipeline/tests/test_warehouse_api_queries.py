@@ -89,31 +89,62 @@ async def test_get_latest_features_defaults_to_48_rows():
 
 @pytest.mark.asyncio
 async def test_get_holidays_without_region_omits_region_arg():
-    pool = FakeConnectionPool(fetch_result=[])
+    pool = FakeConnectionPool(fetch_result=[], fetchval_result=0)
     await queries.get_holidays(pool, 2026)
-    # (today, year) -- no region
-    assert len(pool.calls[0][2]) == 2
+    fetch_call = next(c for c in pool.calls if c[0] == "fetch")
+    # (today, year, limit, offset) -- no region
+    assert len(fetch_call[2]) == 4
 
 
 @pytest.mark.asyncio
 async def test_get_holidays_with_region_includes_region_arg():
-    pool = FakeConnectionPool(fetch_result=[])
+    pool = FakeConnectionPool(fetch_result=[], fetchval_result=0)
     await queries.get_holidays(pool, 2026, region="NSW1")
-    assert pool.calls[0][2][0] == "NSW1"
+    fetch_call = next(c for c in pool.calls if c[0] == "fetch")
+    assert fetch_call[2][0] == "NSW1"
+
+
+@pytest.mark.asyncio
+async def test_get_holidays_defaults_to_limit_100_offset_0():
+    pool = FakeConnectionPool(fetch_result=[], fetchval_result=0)
+    await queries.get_holidays(pool, 2026)
+    fetch_call = next(c for c in pool.calls if c[0] == "fetch")
+    assert fetch_call[2][-2:] == (100, 0)
+
+
+@pytest.mark.asyncio
+async def test_get_holidays_passes_custom_limit_and_offset():
+    pool = FakeConnectionPool(fetch_result=[], fetchval_result=0)
+    await queries.get_holidays(pool, 2026, region="NSW1", limit=10, offset=5)
+    fetch_call = next(c for c in pool.calls if c[0] == "fetch")
+    assert fetch_call[2][-2:] == (10, 5)
+
+
+@pytest.mark.asyncio
+async def test_get_holidays_returns_total_from_count_query():
+    pool = FakeConnectionPool(fetch_result=[], fetchval_result=42)
+    items, total = await queries.get_holidays(pool, 2026)
+    assert items == []
+    assert total == 42
+    assert pool.calls[0][0] == "fetchval"
 
 
 @pytest.mark.asyncio
 async def test_get_holidays_casts_days_until_to_int():
     pool = FakeConnectionPool(
-        fetch_result=[{"date": "2026-12-25", "days_until": 157.0}]
+        fetch_result=[{"date": "2026-12-25", "days_until": 157.0}],
+        fetchval_result=1,
     )
-    result = await queries.get_holidays(pool, 2026)
-    assert result[0]["days_until"] == 157
-    assert isinstance(result[0]["days_until"], int)
+    items, _total = await queries.get_holidays(pool, 2026)
+    assert items[0]["days_until"] == 157
+    assert isinstance(items[0]["days_until"], int)
 
 
 @pytest.mark.asyncio
 async def test_get_holidays_none_days_until_stays_none():
-    pool = FakeConnectionPool(fetch_result=[{"date": "2026-12-25", "days_until": None}])
-    result = await queries.get_holidays(pool, 2026)
-    assert result[0]["days_until"] is None
+    pool = FakeConnectionPool(
+        fetch_result=[{"date": "2026-12-25", "days_until": None}],
+        fetchval_result=1,
+    )
+    items, _total = await queries.get_holidays(pool, 2026)
+    assert items[0]["days_until"] is None

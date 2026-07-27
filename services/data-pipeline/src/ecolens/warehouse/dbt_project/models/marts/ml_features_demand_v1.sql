@@ -1,8 +1,15 @@
+{#
+  schema="ml" below overrides marts' directory-level +schema: analytics
+  -- this is the one mart forecasting/data.py's TrainingSetLoader reads,
+  kept in its own pre-provisioned `ml` schema rather than mixed in with
+  the dashboard-facing fact/dim/mv tables.
+#}
 {{
     config(
         materialized="table",
         tags=["marts", "ml", "ml_features"],
         pre_hook="SET LOCAL work_mem = '64MB'",
+        schema="ml",
     )
 }}
 

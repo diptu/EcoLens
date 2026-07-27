@@ -44,20 +44,40 @@
 {% endmacro %}
 
 {#
-  The metric columns that get averaged when rolling 5-min NEM data (and
-  re-aggregating already-30-min WEM data) up to the unified 30-min
-  grain. Returned as a plain list so callers can Jinja-loop `avg(col)`.
+  Split of energy_metric_columns() below by what AEMO NEM actually
+  populates per row -- see int_energy_unified_30min's header comment.
+  Market columns live on NEM's per-region rows (NSW1/QLD1/VIC1/SA1/
+  TAS1) and on WEM's own rows. Fuel-tech columns live on NEM's
+  network-level "NEM" row (stg_aemo_nem_fueltech) and on WEM's own
+  rows -- NEM's per-region rows never populate them.
 #}
-{% macro energy_metric_columns() %}
+{% macro market_metric_columns() %}
 {{ return([
     "demand_mw", "price_mwh", "market_value",
+    "interconnector_imports_mw", "interconnector_exports_mw", "net_import_mw"
+]) }}
+{% endmacro %}
+
+{% macro fueltech_metric_columns() %}
+{{ return([
     "coal_black_mw", "coal_brown_mw", "gas_ccgt_mw", "gas_ocgt_mw", "gas_other_mw",
     "hydro_mw", "pumped_hydro_mw", "wind_mw", "solar_utility_mw", "solar_rooftop_mw",
     "biomass_mw", "distillate_mw", "battery_discharge_mw", "battery_charge_mw",
     "curtailment_solar_utility_mw", "curtailment_wind_mw", "total_generation_mw",
-    "renewable_proportion", "emissions_intensity_kgco2e_per_mwh",
-    "interconnector_imports_mw", "interconnector_exports_mw", "net_import_mw"
+    "renewable_proportion", "emissions_intensity_kgco2e_per_mwh"
 ]) }}
+{% endmacro %}
+
+{#
+  The metric columns that get averaged when rolling 5-min NEM data (and
+  re-aggregating already-30-min WEM data) up to the unified 30-min
+  grain. Returned as a plain list so callers can Jinja-loop `avg(col)`.
+  Downstream of int_energy_unified_30min this split doesn't matter
+  (every row has both by then), so int_energy_with_weather/
+  int_energy_filled_30min keep using this combined list.
+#}
+{% macro energy_metric_columns() %}
+{{ return(market_metric_columns() + fueltech_metric_columns()) }}
 {% endmacro %}
 
 {#

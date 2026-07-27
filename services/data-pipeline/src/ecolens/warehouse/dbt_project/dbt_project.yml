@@ -34,13 +34,21 @@ models:
     staging:
       +materialized: view
       +tags: ["staging"]
+      +schema: staging
     intermediate:
       +materialized: incremental
       +on_schema_change: sync_all_columns
       +tags: ["intermediate"]
+      +schema: intermediate
     marts:
       +materialized: table
       +tags: ["marts"]
+      # One schema per layer, pre-provisioned on the warehouse Postgres
+      # (see generate_schema_name.sql for why this lands verbatim, not
+      # `<default>_analytics`). ml_features_demand_v1 overrides this
+      # to `ml` in its own config() -- it's the one mart forecasting/
+      # reads from, kept out of the dashboard-facing analytics schema.
+      +schema: analytics
 
 seeds:
   ecolens_warehouse:

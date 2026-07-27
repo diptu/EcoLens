@@ -31,6 +31,8 @@ dependencies = [
     "torch>=2.5.0",
     "websocket-client>=1.8.0",
     "duckdb>=1.5.5",
+    "statsmodels>=0.14.6",
+    "lightgbm>=4.7.0",
 ]
 
 [dependency-groups]

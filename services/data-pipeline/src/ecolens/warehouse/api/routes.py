@@ -28,7 +28,7 @@ from .models import (
     DemandSummary,
     GenerationRow,
     HealthResponse,
-    HolidayRow,
+    PaginatedHolidays,
     Region,
     WeatherRow,
 )
@@ -155,16 +155,23 @@ async def features_latest(
     return await queries.get_latest_features(pool, region, n)
 
 
-@data_router.get("/holidays/{year}", response_model=list[HolidayRow], tags=["metadata"])
+@data_router.get(
+    "/holidays/{year}", response_model=PaginatedHolidays, tags=["metadata"]
+)
 async def holidays(
     request: Request,
     year: int = Depends(validate_year_dep),
     region: str | None = Query(default=None, description="filter to one region"),
+    limit: int = Query(100, ge=1, le=500, description="rows per page"),
+    offset: int = Query(0, ge=0, description="rows to skip"),
     pool: ConnectionPool = Depends(require_pool),
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     if region:
         validate_region(region, request.app.state.settings)
-    return await queries.get_holidays(pool, year, region)
+    items, total = await queries.get_holidays(
+        pool, year, region, limit=limit, offset=offset
+    )
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
 router = APIRouter()

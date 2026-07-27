@@ -126,6 +126,10 @@ api-prod: ## Run forecast-api under Gunicorn + UvicornWorker (production process
 pipeline: ## Run data-pipeline locally.
 	cd services/data-pipeline && $(UV) run --package data-pipeline uvicorn ecolens.api.app:app --reload --port 8001
 
+.PHONY: warehouse-api
+warehouse-api: ## Run the warehouse API locally (read-only PostgreSQL surface for the dashboard/forecast-api -- distinct from `make pipeline`'s control API, which triggers the pipeline instead of serving its output).
+	cd services/data-pipeline && $(UV) run --package data-pipeline uvicorn ecolens.warehouse.api.api:app --reload --port 8002
+
 .PHONY: ingest-openelectricity
 ingest-openelectricity: ## Manually trigger one OpenElectricity (NEM/WEM) fetch -> validate -> DuckDB upsert.
 	cd services/data-pipeline && $(UV) run --active python scripts/trigger_ingest_openelectricity.py

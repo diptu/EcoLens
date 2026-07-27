@@ -10,16 +10,41 @@
 
 -- Unifies AEMO NEM (5-min) and AEMO WEM (30-min) onto one 30-min grain
 -- per region, per werehouse.md's "make the grains match" layer.
--- OpenElectricity is network-level, not per-region, so it's excluded
--- here -- see stg_openelectricity_network for that series.
+--
+-- Structural quirk this has to account for: AEMO NEM's per-region rows
+-- (NSW1/QLD1/VIC1/SA1/TAS1, stg_aemo_nem_dispatch) only ever populate
+-- the *market* columns (demand/price/interconnector flow) -- the
+-- fuel-tech generation mix is only ever populated on the network-level
+-- "NEM" row (stg_aemo_nem_fueltech), which isn't itself one of the 6
+-- regions in dim_region. Left un-broadcast, every NEM sub-region's
+-- fuel-mix columns would be NULL all the way down to fact_demand_30min
+-- (where renewable_generation_mw is computed via
+-- `coalesce(hydro_mw, 0) + ...`, so it would silently read 0 instead of
+-- NULL -- a wrong answer, not a visible gap). So nem_fueltech_30min
+-- below is broadcast onto all 5 NEM sub-regions by ts_30 alone (no
+-- region key on that side of the join).
+--
+-- OpenElectricity (stg_openelectricity_network) is network-level too --
+-- it fills a gap for WEM directly (same region key), and for NEM's
+-- broadcast fuel-tech mix, but it CANNOT substitute for a missing
+-- NSW1/QLD1/VIC1/SA1/TAS1 *market* row: OpenElectricity never reports
+-- NEM below the whole-network level, so there's no equivalent-
+-- granularity fallback for per-region demand/price today.
 --
 -- Incremental with a lookback window (default 5 days, see
 -- dbt_project.yml's `lookback_days` var) to pick up AEMO's
 -- late-arriving/revised settlement data without reprocessing all of
 -- history every run.
 
-with nem as (
+with nem_market as (
     select * from {{ ref("stg_aemo_nem_dispatch") }}
+    {% if is_incremental() %}
+    where ts >= {{ lookback_cutoff() }}
+    {% endif %}
+),
+
+nem_fueltech as (
+    select * from {{ ref("stg_aemo_nem_fueltech") }}
     {% if is_incremental() %}
     where ts >= {{ lookback_cutoff() }}
     {% endif %}
@@ -32,17 +57,37 @@ wem as (
     {% endif %}
 ),
 
-nem_30min as (
+oe as (
+    select * from {{ ref("stg_openelectricity_network") }}
+    {% if is_incremental() %}
+    where ts >= {{ lookback_cutoff() }}
+    {% endif %}
+),
+
+nem_market_30min as (
     select
         region,
         {{ bucket_30min("ts") }} as ts_30,
-        {% for col in energy_metric_columns() %}
+        {% for col in market_metric_columns() %}
         avg({{ col }}) as {{ col }},
         {% endfor %}
         max(data_quality_status) as data_quality_status,
         max(source) as source
-    from nem
+    from nem_market
     group by region, {{ bucket_30min("ts") }}
+),
+
+-- One row per ts_30 (no region) -- broadcast onto all 5 NEM
+-- sub-regions in nem_final below.
+nem_fueltech_30min as (
+    select
+        {{ bucket_30min("ts") }} as ts_30,
+        {% for col in fueltech_metric_columns() %}
+        avg({{ col }}) as {{ col }},
+        {% endfor %}
+        max(source) as source
+    from nem_fueltech
+    group by {{ bucket_30min("ts") }}
 ),
 
 wem_30min as (
@@ -58,10 +103,60 @@ wem_30min as (
     group by region, {{ bucket_30min("ts") }}
 ),
 
+-- Network-level fallback, keyed by region so 'NEM' broadcasts onto the
+-- 5 sub-regions the same way nem_fueltech_30min does, and 'WEM' joins
+-- directly onto wem_30min.
+oe_30min as (
+    select
+        region,
+        {{ bucket_30min("ts") }} as ts_30,
+        {% for col in energy_metric_columns() %}
+        avg({{ col }}) as {{ col }},
+        {% endfor %}
+        max(source) as source
+    from oe
+    group by region, {{ bucket_30min("ts") }}
+),
+
+nem_final as (
+    select
+        m.region,
+        m.ts_30,
+        {% for col in market_metric_columns() %}
+        m.{{ col }},
+        {% endfor %}
+        {% for col in fueltech_metric_columns() %}
+        coalesce(f.{{ col }}, oe_nem.{{ col }}) as {{ col }},
+        {% endfor %}
+        m.data_quality_status,
+        m.source
+    from nem_market_30min m
+    left join nem_fueltech_30min f
+        on f.ts_30 = m.ts_30
+    left join oe_30min oe_nem
+        on oe_nem.region = 'NEM'
+        and oe_nem.ts_30 = m.ts_30
+),
+
+wem_final as (
+    select
+        w.region,
+        w.ts_30,
+        {% for col in energy_metric_columns() %}
+        coalesce(w.{{ col }}, oe_wem.{{ col }}) as {{ col }},
+        {% endfor %}
+        w.data_quality_status,
+        w.source
+    from wem_30min w
+    left join oe_30min oe_wem
+        on oe_wem.region = 'WEM'
+        and oe_wem.ts_30 = w.ts_30
+),
+
 unioned as (
-    select * from nem_30min
+    select * from nem_final
     union all
-    select * from wem_30min
+    select * from wem_final
 )
 
 select * from unioned

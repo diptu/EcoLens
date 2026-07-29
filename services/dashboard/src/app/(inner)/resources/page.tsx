@@ -59,7 +59,7 @@ export default function ResourcesPage() {
             </MotionItem>
             <h1 className="mt-4 text-4xl font-extrabold leading-[1.1] tracking-tight text-white md:text-5xl lg:text-6xl">
               Knowledge Today.
-              <span className="ml-2 block bg-gradient-to-r from-lime-300 via-emerald-300 to-lime-300 bg-clip-text text-transparent">
+              <span className="ml-2 block bg-gradient-to-r from-lime-100 via-emerald-100 to-lime-100 bg-clip-text text-transparent">
                 Sustainability Tomorrow.
               </span>
             </h1>
@@ -91,11 +91,11 @@ export default function ResourcesPage() {
         <div className="mx-auto max-w-7xl px-6">
           <div className="mb-8 flex flex-col items-start justify-between gap-4 sm:flex-row sm:items-end">
             <h2 className="text-2xl font-bold text-white md:text-3xl">
-              Explore by <span className="text-lime-300">Category</span>
+              Explore by <span className="text-lime-100">Category</span>
             </h2>
             <a
               href="/resources/categories"
-              className="inline-flex items-center gap-1 rounded-md border border-emerald-400/30 bg-emerald-400/5 px-3 py-1.5 text-xs font-medium text-emerald-300 transition-colors hover:bg-emerald-400/10"
+              className="inline-flex items-center gap-1 rounded-md border border-emerald-200/30 bg-emerald-200/5 px-3 py-1.5 text-xs font-medium text-emerald-100 transition-colors hover:bg-emerald-200/10"
             >
               View All Categories <ArrowRight />
             </a>
@@ -108,7 +108,7 @@ export default function ResourcesPage() {
       <section className="py-14">
         <div className="mx-auto max-w-7xl px-6">
           <SectionHeader
-            title={<>Featured <span className="text-lime-300">Resources</span></>}
+            title={<>Featured <span className="text-lime-100">Resources</span></>}
             subtitle="Handpicked content to help you take meaningful action."
             action={{ label: "View All Resources", href: "/resources/all" }}
           />
@@ -120,7 +120,7 @@ export default function ResourcesPage() {
       <section className="border-t border-white/5 py-14">
         <div className="mx-auto max-w-7xl px-6">
           <SectionHeader
-            title={<>Tools & <span className="text-lime-300">Templates</span></>}
+            title={<>Tools & <span className="text-lime-100">Templates</span></>}
             subtitle="Practical resources to simplify your sustainability workflow."
             action={{ label: "Browse All Tools", href: "/resources/tools" }}
           />
@@ -132,7 +132,7 @@ export default function ResourcesPage() {
       <CtaBanner
         variant="minimal"
         heading="Join a global community"
-        highlight={<span className="block text-lime-300">of sustainability leaders.</span>}
+        highlight={<span className="block text-lime-100">of sustainability leaders.</span>}
         body="Share knowledge. Exchange ideas. Create impact together."
         primary={{ label: "Join Community" }}
         features={["Trusted by organizations worldwide"]}
@@ -219,9 +219,9 @@ function CenterBadge({ children }: { children: React.ReactNode }) {
   return (
     <m.span
       variants={fadeUp}
-      className="inline-flex items-center gap-2 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-3 py-1 text-xs font-medium tracking-wider text-emerald-300"
+      className="inline-flex items-center gap-2 rounded-full border border-emerald-200/30 bg-emerald-200/10 px-3 py-1 text-xs font-medium tracking-wider text-emerald-100"
     >
-      <span className="grid h-4 w-4 place-items-center rounded-full bg-emerald-400/20">
+      <span className="grid h-4 w-4 place-items-center rounded-full bg-emerald-200/20">
         <svg viewBox="0 0 8 8" fill="currentColor" className="h-2.5 w-2.5">
           <path d="M4 0L4.6 3.4L8 4L4.6 4.6L4 8L3.4 4.6L0 4L3.4 3.4Z" />
         </svg>
@@ -318,7 +318,7 @@ function SectionHeader({ title, subtitle, action }: { title: React.ReactNode; su
       {action && (
         <a
           href={action.href}
-          className="inline-flex items-center gap-1 rounded-md border border-emerald-400/30 bg-emerald-400/5 px-3 py-1.5 text-xs font-medium text-emerald-300 transition-colors hover:bg-emerald-400/10"
+          className="inline-flex items-center gap-1 rounded-md border border-emerald-200/30 bg-emerald-200/5 px-3 py-1.5 text-xs font-medium text-emerald-100 transition-colors hover:bg-emerald-200/10"
         >
           {action.label} <ArrowRight />
         </a>
@@ -334,16 +334,16 @@ function ToolsGrid({ tools }: { tools: ReturnType<typeof toTool>[] }) {
         <MotionItem
           key={tool.title}
           variant="fadeUp"
-          className="group flex flex-col rounded-2xl border border-white/10 bg-white/[0.02] p-5 transition-colors hover:border-emerald-400/30"
+          className="group flex flex-col rounded-2xl border border-white/10 bg-white/[0.02] p-5 transition-colors hover:border-emerald-200/30"
         >
-          <div className="mb-4 grid h-10 w-10 place-items-center rounded-xl border border-emerald-400/20 bg-emerald-400/5 text-emerald-300">
+          <div className="mb-4 grid h-10 w-10 place-items-center rounded-xl border border-emerald-200/20 bg-emerald-200/5 text-emerald-100">
             {tool.icon}
           </div>
           <h3 className="text-sm font-semibold text-white">{tool.title}</h3>
           <p className="mt-1 flex-1 text-xs text-white/60">{tool.body}</p>
           <a
             href="#"
-            className="mt-3 inline-flex items-center gap-1 rounded-md border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-medium text-white transition-colors group-hover:border-emerald-400/30 group-hover:bg-emerald-400/5"
+            className="mt-3 inline-flex items-center gap-1 rounded-md border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-medium text-white transition-colors group-hover:border-emerald-200/30 group-hover:bg-emerald-200/5"
           >
             {tool.cta} <ArrowRight />
           </a>
@@ -351,13 +351,13 @@ function ToolsGrid({ tools }: { tools: ReturnType<typeof toTool>[] }) {
       ))}
       <MotionItem
         variant="fadeUp"
-        className="flex flex-col items-center justify-center rounded-2xl border border-emerald-400/20 bg-emerald-400/5 p-5 text-center"
+        className="flex flex-col items-center justify-center rounded-2xl border border-emerald-200/20 bg-emerald-200/5 p-5 text-center"
       >
         <p className="text-sm font-semibold text-white">Everything you need, in one place.</p>
         <p className="mt-1 text-xs text-white/60">Save time, ensure accuracy, and drive real impact.</p>
         <a
           href="#"
-          className="mt-3 inline-flex items-center gap-1 rounded-md bg-lime-300 px-3 py-1.5 text-xs font-semibold text-black transition-colors hover:bg-lime-200"
+          className="mt-3 inline-flex items-center gap-1 rounded-md bg-lime-100 px-3 py-1.5 text-xs font-semibold text-black transition-colors hover:bg-lime-100"
         >
           Explore All Resources <ArrowRight />
         </a>
@@ -371,7 +371,7 @@ function NewsletterBanner() {
     <section className="border-y border-white/5 bg-white/[0.02] py-12">
       <div className="mx-auto grid max-w-7xl items-center gap-6 px-6 md:grid-cols-2">
         <div className="flex items-start gap-3">
-          <div className="grid h-10 w-10 place-items-center rounded-md bg-emerald-400/15 text-emerald-300">
+          <div className="grid h-10 w-10 place-items-center rounded-md bg-emerald-200/15 text-emerald-100">
             <GroupIcon />
           </div>
           <div>
@@ -383,7 +383,7 @@ function NewsletterBanner() {
           <input
             type="email"
             placeholder="Enter your email"
-            className="flex-1 rounded-full border border-white/10 bg-white/5 px-4 py-2.5 text-sm text-white placeholder:text-white/40 focus:border-emerald-400/50 focus:outline-none"
+            className="flex-1 rounded-full border border-white/10 bg-white/5 px-4 py-2.5 text-sm text-white placeholder:text-white/40 focus:border-emerald-200/50 focus:outline-none"
           />
           <MotionButton type="submit" size="md" iconAfter={<ArrowRight />}>
             Subscribe

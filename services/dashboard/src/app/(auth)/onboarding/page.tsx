@@ -82,7 +82,7 @@ export default function OnboardingPage() {
                 className={
                   "flex items-start gap-3 rounded-lg border p-3 transition-colors " +
                   (active
-                    ? "border-emerald-400/40 bg-emerald-400/5"
+                    ? "border-emerald-200/40 bg-emerald-200/5"
                     : done
                       ? "border-white/10 bg-white/[0.02]"
                       : "border-transparent bg-transparent")
@@ -92,9 +92,9 @@ export default function OnboardingPage() {
                   className={
                     "mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-full text-xs font-bold " +
                     (done
-                      ? "bg-emerald-400 text-black"
+                      ? "bg-emerald-200 text-black"
                       : active
-                        ? "bg-emerald-400 text-black"
+                        ? "bg-emerald-200 text-black"
                         : "border border-white/20 bg-white/5 text-white/40")
                   }
                 >
@@ -135,7 +135,7 @@ export default function OnboardingPage() {
             <span className="mb-1.5 block text-xs font-medium text-white/70">Industry</span>
             <select
               name="industry"
-              className="w-full rounded-md border border-white/10 bg-white/[0.04] px-3 py-2.5 text-sm text-white focus:border-emerald-400/60 focus:outline-none focus:ring-1 focus:ring-emerald-400/30"
+              className="w-full rounded-md border border-white/10 bg-white/[0.04] px-3 py-2.5 text-sm text-white focus:border-emerald-200/60 focus:outline-none focus:ring-1 focus:ring-emerald-200/30"
               defaultValue=""
             >
               <option value="" disabled>Select industry</option>
@@ -150,7 +150,7 @@ export default function OnboardingPage() {
             <span className="mb-1.5 block text-xs font-medium text-white/70">Country / Region</span>
             <select
               name="country"
-              className="w-full rounded-md border border-white/10 bg-white/[0.04] px-3 py-2.5 text-sm text-white focus:border-emerald-400/60 focus:outline-none focus:ring-1 focus:ring-emerald-400/30"
+              className="w-full rounded-md border border-white/10 bg-white/[0.04] px-3 py-2.5 text-sm text-white focus:border-emerald-200/60 focus:outline-none focus:ring-1 focus:ring-emerald-200/30"
               defaultValue=""
             >
               <option value="" disabled>Select country or region</option>
@@ -165,7 +165,7 @@ export default function OnboardingPage() {
             <span className="mb-1.5 block text-xs font-medium text-white/70">Organization size</span>
             <select
               name="size"
-              className="w-full rounded-md border border-white/10 bg-white/[0.04] px-3 py-2.5 text-sm text-white focus:border-emerald-400/60 focus:outline-none focus:ring-1 focus:ring-emerald-400/30"
+              className="w-full rounded-md border border-white/10 bg-white/[0.04] px-3 py-2.5 text-sm text-white focus:border-emerald-200/60 focus:outline-none focus:ring-1 focus:ring-emerald-200/30"
               defaultValue=""
             >
               <option value="" disabled>Select organization size</option>
@@ -187,7 +187,7 @@ export default function OnboardingPage() {
               name="ops"
               rows={4}
               placeholder="Describe your core operations (e.g. manufacturing, logistics, retail...)"
-              className="w-full rounded-md border border-white/10 bg-white/[0.04] px-3 py-2.5 text-sm text-white placeholder:text-white/35 focus:border-emerald-400/60 focus:outline-none focus:ring-1 focus:ring-emerald-400/30"
+              className="w-full rounded-md border border-white/10 bg-white/[0.04] px-3 py-2.5 text-sm text-white placeholder:text-white/35 focus:border-emerald-200/60 focus:outline-none focus:ring-1 focus:ring-emerald-200/30"
             />
           </label>
           <label className="block">
@@ -203,7 +203,7 @@ export default function OnboardingPage() {
             <span className="mb-1.5 block text-xs font-medium text-white/70">Reporting framework</span>
             <select
               name="framework"
-              className="w-full rounded-md border border-white/10 bg-white/[0.04] px-3 py-2.5 text-sm text-white focus:border-emerald-400/60 focus:outline-none focus:ring-1 focus:ring-emerald-400/30"
+              className="w-full rounded-md border border-white/10 bg-white/[0.04] px-3 py-2.5 text-sm text-white focus:border-emerald-200/60 focus:outline-none focus:ring-1 focus:ring-emerald-200/30"
               defaultValue=""
             >
               <option value="" disabled>Select framework</option>
@@ -229,11 +229,11 @@ export default function OnboardingPage() {
           ].map((g) => (
             <label
               key={g.id}
-              className="flex cursor-pointer items-start gap-3 rounded-md border border-white/10 bg-white/[0.03] p-3 hover:border-emerald-400/40"
+              className="flex cursor-pointer items-start gap-3 rounded-md border border-white/10 bg-white/[0.03] p-3 hover:border-emerald-200/40"
             >
               <input
                 type="checkbox"
-                className="mt-0.5 h-4 w-4 rounded border-white/20 bg-white/5 text-emerald-400 focus:ring-emerald-400/30"
+                className="mt-0.5 h-4 w-4 rounded border-white/20 bg-white/5 text-emerald-200 focus:ring-emerald-200/30"
               />
               <div>
                 <p className="text-sm font-semibold text-white">{g.title}</p>
@@ -264,7 +264,7 @@ export default function OnboardingPage() {
               </div>
               <button
                 type="button"
-                className="rounded-md border border-emerald-400/30 bg-emerald-400/5 px-3 py-1 text-[11px] font-medium text-emerald-300 hover:bg-emerald-400/10"
+                className="rounded-md border border-emerald-200/30 bg-emerald-200/5 px-3 py-1 text-[11px] font-medium text-emerald-100 hover:bg-emerald-200/10"
               >
                 {i.status === "Available" ? "Connect" : "Learn more"}
               </button>
@@ -288,7 +288,7 @@ export default function OnboardingPage() {
             <span className="mb-1.5 block text-xs font-medium text-white/70">Role</span>
             <select
               name="role"
-              className="w-full rounded-md border border-white/10 bg-white/[0.04] px-3 py-2.5 text-sm text-white focus:border-emerald-400/60 focus:outline-none focus:ring-1 focus:ring-emerald-400/30"
+              className="w-full rounded-md border border-white/10 bg-white/[0.04] px-3 py-2.5 text-sm text-white focus:border-emerald-200/60 focus:outline-none focus:ring-1 focus:ring-emerald-200/30"
               defaultValue="viewer"
             >
               <option value="admin"   className="bg-[#0a1410]">Admin</option>
@@ -314,7 +314,7 @@ export default function OnboardingPage() {
       {step === 6 && (
         <div className="space-y-4">
           <p className="text-sm text-white/65">
-            Here&apos;s a quick summary of your setup. You can always update these later in settings.
+            Here's a quick summary of your setup. You can always update these later in settings.
           </p>
           {[
             { label: "Organization",   value: "EcoLens Technologies Ltd." },

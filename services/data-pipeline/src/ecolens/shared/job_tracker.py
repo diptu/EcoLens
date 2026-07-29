@@ -10,7 +10,7 @@ Each call site owns its own `JobTracker()` instance (rather than one
 shared global) so e.g. a flood of ingestion jobs can't evict forecasting
 jobs' history, and each domain's router shapes `JobStatus.result`/`.meta`
 into whatever response fields make sense for it (ingestion returns
-`upserted`; forecasting returns a `TrainResult` summary) -- this module
+`written`; forecasting returns a `TrainResult` summary) -- this module
 only owns the generic running/completed/failed bookkeeping, not any
 domain-specific response shape.
 

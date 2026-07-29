@@ -32,7 +32,7 @@ export function CategoryCard({ items, className }: CategoryCardProps) {
         <MotionItem
           key={cat.title}
           variant="fadeUp"
-          className="group rounded-2xl border border-white/10 bg-white/[0.02] p-5 transition-colors hover:border-emerald-400/30"
+          className="group rounded-2xl border border-white/10 bg-white/[0.02] p-5 transition-colors hover:border-emerald-200/30"
         >
           <m.div
             variants={cardHover}
@@ -44,7 +44,7 @@ export function CategoryCard({ items, className }: CategoryCardProps) {
             <m.div
               whileHover={{ scale: 1.1, rotate: 4 }}
               transition={{ type: "spring", stiffness: 300, damping: 15 }}
-              className="grid h-12 w-12 place-items-center rounded-xl border border-emerald-400/20 bg-emerald-400/5 text-emerald-300"
+              className="grid h-12 w-12 place-items-center rounded-xl border border-emerald-200/20 bg-emerald-200/5 text-emerald-100"
             >
               {cat.icon}
             </m.div>
@@ -52,7 +52,7 @@ export function CategoryCard({ items, className }: CategoryCardProps) {
             <p className="mt-1 text-xs text-white/60">{cat.body}</p>
             <a
               href={cat.href}
-              className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-lime-300 transition-colors hover:text-lime-200"
+              className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-lime-100 transition-colors hover:text-lime-100"
             >
               {cat.resourceCount}+ Resources <ArrowRight />
             </a>

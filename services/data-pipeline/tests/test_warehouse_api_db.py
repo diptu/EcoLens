@@ -1,4 +1,4 @@
-"""Tests for ecolens.warehouse.api.db.ConnectionPool.
+"""Tests for ecolens.warehouse.db.connection.ConnectionPool.
 
 Uses a fake asyncpg-shaped pool/connection (from conftest.py) so these
 never touch a real PostgreSQL server.
@@ -10,8 +10,8 @@ import pytest
 from fastapi import HTTPException
 
 from conftest import FakeAsyncpgConn, FakeAsyncpgPool
-from ecolens.warehouse.api.db import ConnectionPool, check_health
-from ecolens.warehouse.api.settings import WarehouseApiSettings
+from ecolens.warehouse.db.connection import ConnectionPool, check_health
+from ecolens.warehouse.core.api_settings import WarehouseApiSettings
 
 
 @pytest.fixture
@@ -104,7 +104,7 @@ class TestConnected:
 
 @pytest.mark.asyncio
 async def test_check_health_degrades_when_create_pool_fails(monkeypatch):
-    import ecolens.warehouse.api.db as db_module
+    import ecolens.warehouse.db.connection as db_module
 
     async def failing_create_pool(*args, **kwargs):
         raise OSError("connection refused")

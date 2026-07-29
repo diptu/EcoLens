@@ -1,10 +1,10 @@
-"""Tests for ecolens.forecasting.training.losses (ECO-112)."""
+"""Tests for ecolens.forecasting.service.training.losses (ECO-112)."""
 
 from __future__ import annotations
 
 import torch
 
-from ecolens.forecasting.training.losses import DemandForecastLoss, pinball_loss
+from ecolens.forecasting.service.training.losses import DemandForecastLoss, pinball_loss
 
 
 class TestPinballLoss:

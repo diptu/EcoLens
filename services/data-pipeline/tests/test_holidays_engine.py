@@ -1,4 +1,4 @@
-"""End-to-end (mocked HTTP) tests for ecolens.ingestion.sources.holidays.engine.HolidayFetcher."""
+"""End-to-end (mocked HTTP) tests for ecolens.ingestion.service.holidays.engine.HolidayFetcher."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import httpx
 import pytest
 import respx
 
-from ecolens.ingestion.sources.holidays.engine import HolidayFetcher
+from ecolens.ingestion.service.holidays.engine import HolidayFetcher
 
 DATASTORE_URL_REGEX = r"https://data\.gov\.au/data/api/3/action/datastore_search.*"
 

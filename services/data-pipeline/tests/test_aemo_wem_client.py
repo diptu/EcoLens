@@ -1,4 +1,4 @@
-"""Tests for ecolens.ingestion.sources.aemo_wem.client.AEMOWEMClient."""
+"""Tests for ecolens.ingestion.service.aemo_wem.client.AEMOWEMClient."""
 
 from __future__ import annotations
 
@@ -12,9 +12,9 @@ import respx
 
 from conftest import FakeRedis
 
-from ecolens.ingestion.circuit_breaker import CircuitBreaker
-from ecolens.ingestion.sources.aemo_wem.client import AEMOWEMClient
-from ecolens.ingestion.storage.settings import MongoSettings
+from ecolens.ingestion.core.circuit_breaker import CircuitBreaker
+from ecolens.ingestion.service.aemo_wem.client import AEMOWEMClient
+from ecolens.ingestion.core.settings import IngestionSettings
 
 BASE = "https://data.wa.aemo.com.au/public/market-data/wemde"
 
@@ -221,7 +221,7 @@ class TestRetryAndCircuitBreaker:
         respx.get(f"{BASE}/facilityScada/current/SCADA_2026-07-19.json").mock(
             return_value=httpx.Response(500)
         )
-        settings = MongoSettings(ingest_max_retries=1)
+        settings = IngestionSettings(ingest_max_retries=1)
         breaker = CircuitBreaker("aemo_wem", FakeRedis(), settings=settings)
         client = AEMOWEMClient(settings=settings, circuit_breaker=breaker)
 
@@ -234,7 +234,7 @@ class TestRetryAndCircuitBreaker:
 
     @pytest.mark.asyncio
     async def test_skips_all_calls_when_breaker_open(self):
-        settings = MongoSettings(ingest_circuit_breaker_threshold=1)
+        settings = IngestionSettings(ingest_circuit_breaker_threshold=1)
         breaker = CircuitBreaker("aemo_wem", FakeRedis(), settings=settings)
         await breaker.record_failure()  # threshold=1 -> already open
 
@@ -247,7 +247,7 @@ class TestRetryAndCircuitBreaker:
                 called = True
                 return httpx.Response(200, json={})
 
-        from ecolens.ingestion.circuit_breaker import CircuitBreakerOpen
+        from ecolens.ingestion.core.circuit_breaker import CircuitBreakerOpen
 
         with pytest.raises(CircuitBreakerOpen):
             await client.fetch_day_data(_TrackingClient(), date(2026, 7, 19))  # type: ignore[arg-type]

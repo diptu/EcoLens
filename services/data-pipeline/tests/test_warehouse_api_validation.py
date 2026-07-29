@@ -1,4 +1,4 @@
-"""Tests for ecolens.warehouse.api.validation."""
+"""Tests for ecolens.warehouse.core.validation."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from fastapi import HTTPException
 
-from ecolens.warehouse.api.settings import WarehouseApiSettings
-from ecolens.warehouse.api.validation import (
+from ecolens.warehouse.core.api_settings import WarehouseApiSettings
+from ecolens.warehouse.core.validation import (
     validate_range,
     validate_region,
     validate_year,

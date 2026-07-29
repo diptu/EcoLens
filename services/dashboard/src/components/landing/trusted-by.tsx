@@ -33,7 +33,7 @@ export function TrustedBy() {
           <h2 className="max-w-xs text-2xl font-semibold leading-snug text-white md:text-3xl">
             Trusted by{" "}
             <span className="text-white/60">organizations</span> committed to
-            a <span className="text-lime-300">sustainable future</span>
+            a <span className="text-lime-100">sustainable future</span>
           </h2>
         </AnimatedSection>
 

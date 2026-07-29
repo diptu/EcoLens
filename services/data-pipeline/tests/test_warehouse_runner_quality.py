@@ -1,4 +1,4 @@
-"""Tests for ecolens.warehouse.runner.quality.DataQualityValidator.
+"""Tests for ecolens.warehouse.service.quality.DataQualityValidator.
 
 Uses the shared FakeAsyncpgConn/FakeAsyncpgPool doubles (conftest.py)
 so these never touch a real PostgreSQL server. `_check_freshness` /
@@ -15,8 +15,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from conftest import FakeAsyncpgConn, FakeAsyncpgPool
-from ecolens.warehouse.runner.quality import DataQualityValidator
-from ecolens.warehouse.runner.settings import WarehouseRunnerSettings
+from ecolens.warehouse.service.quality import DataQualityValidator
+from ecolens.warehouse.core.runner_settings import WarehouseRunnerSettings
 
 NOW = datetime.now(timezone.utc)
 
@@ -48,12 +48,15 @@ class TestCheckFreshness:
 
     @pytest.mark.asyncio
     async def test_stale_table_reported(self, validator: DataQualityValidator):
-        stale = NOW - timedelta(hours=5)
+        # AEMO-derived tables use a 30h threshold (NEMWeb only publishes
+        # each day's file ~4am the following day -- see quality.py's
+        # FRESHNESS_CHECKS comment), so this needs to clear 30h, not 45min.
+        stale = NOW - timedelta(hours=31)
         conn = FakeAsyncpgConn(
             fetchrow_results=[
                 {"latest": NOW, "n": 100},
                 {"latest": NOW, "n": 100},
-                {"latest": stale, "n": 100},  # ml_features_demand_v1 -- 45min threshold
+                {"latest": stale, "n": 100},  # ml_features_demand_v1 -- 30h threshold
                 {"latest": NOW, "n": 100},
             ]
         )

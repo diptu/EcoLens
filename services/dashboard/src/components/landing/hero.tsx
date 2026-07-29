@@ -52,9 +52,9 @@ export function Hero() {
                 </span>
               ))}
             </span>
-            <span className="mt-1 block bg-gradient-to-r from-lime-300 via-emerald-300 to-lime-300 bg-clip-text text-transparent css-word-3">
+            <span className="mt-1 block bg-gradient-to-r from-lime-100 via-emerald-100 to-lime-100 bg-clip-text text-transparent css-word-3">
               {HEADLINE_HIGHLIGHT}
-              <LeafSparkle className="ml-1 inline h-8 w-8 align-baseline text-lime-300" />
+              <LeafSparkle className="ml-1 inline h-8 w-8 align-baseline text-lime-100" />
             </span>
           </h1>
 
@@ -95,12 +95,12 @@ export function Hero() {
             className="absolute inset-0 will-change-transform hero-orbit"
             aria-hidden="true"
           >
-            <FloatingLeaf className="absolute left-[8%] top-[12%] h-6 w-6 text-lime-300" />
-            <FloatingLeaf className="absolute right-[6%] top-[28%] h-8 w-8 rotate-45 text-emerald-300" />
-            <FloatingLeaf className="absolute bottom-[14%] left-[18%] h-5 w-5 -rotate-12 text-lime-200" />
-            <FloatingLeaf className="absolute bottom-[28%] right-[12%] h-7 w-7 rotate-90 text-emerald-400" />
-            <FloatingLeaf className="absolute left-[42%] top-[4%] h-4 w-4 text-lime-300" />
-            <FloatingOrbit className="absolute right-[16%] top-[6%] h-7 w-7 text-emerald-300">
+            <FloatingLeaf className="absolute left-[8%] top-[12%] h-6 w-6 text-lime-100" />
+            <FloatingLeaf className="absolute right-[6%] top-[28%] h-8 w-8 rotate-45 text-emerald-100" />
+            <FloatingLeaf className="absolute bottom-[14%] left-[18%] h-5 w-5 -rotate-12 text-lime-100" />
+            <FloatingLeaf className="absolute bottom-[28%] right-[12%] h-7 w-7 rotate-90 text-emerald-200" />
+            <FloatingLeaf className="absolute left-[42%] top-[4%] h-4 w-4 text-lime-100" />
+            <FloatingOrbit className="absolute right-[16%] top-[6%] h-7 w-7 text-emerald-100">
               <RecycleIcon />
             </FloatingOrbit>
             <FloatingOrbit className="absolute bottom-[6%] left-[8%] h-6 w-6 text-rose-400">
@@ -122,10 +122,10 @@ function Badge({ children }: { children: React.ReactNode }) {
   return (
     <m.span
       variants={fadeUp}
-      className="inline-flex items-center gap-2 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-3 py-1 text-xs font-medium tracking-wider text-emerald-300"
+      className="inline-flex items-center gap-2 rounded-full border border-emerald-200/30 bg-emerald-200/10 px-3 py-1 text-xs font-medium tracking-wider text-emerald-100"
     >
-      <span className="grid h-4 w-4 place-items-center rounded-full bg-emerald-400/20">
-        <SparkleIcon className="h-2.5 w-2.5 text-emerald-300" />
+      <span className="grid h-4 w-4 place-items-center rounded-full bg-emerald-200/20">
+        <SparkleIcon className="h-2.5 w-2.5 text-emerald-100" />
       </span>
       {String(children).toUpperCase()}
     </m.span>

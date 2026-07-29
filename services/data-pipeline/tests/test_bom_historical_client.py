@@ -1,4 +1,4 @@
-"""Tests for ecolens.ingestion.sources.bom.historical_client.OpenMeteoClient."""
+"""Tests for ecolens.ingestion.service.bom.historical_client.OpenMeteoClient."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ import httpx
 import pytest
 import respx
 
-from ecolens.ingestion.sources.bom.historical_client import OpenMeteoClient
-from ecolens.ingestion.sources.bom.schema import DEFAULT_BOM_STATIONS
+from ecolens.ingestion.service.bom.historical_client import OpenMeteoClient
+from ecolens.ingestion.schema.bom import DEFAULT_BOM_STATIONS
 
 URL_REGEX = r"https://archive-api\.open-meteo\.com/v1/archive.*"
 

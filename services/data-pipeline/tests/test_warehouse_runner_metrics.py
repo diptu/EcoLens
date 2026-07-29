@@ -1,13 +1,13 @@
-"""Tests for ecolens.warehouse.runner.metrics.MetricsEmitter."""
+"""Tests for ecolens.warehouse.service.metrics.MetricsEmitter."""
 
 from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
 
-from ecolens.warehouse.runner.metrics import MetricsEmitter
-from ecolens.warehouse.runner.models import RunResult, StageResult
-from ecolens.warehouse.runner.settings import WarehouseRunnerSettings
+from ecolens.warehouse.service.metrics import MetricsEmitter
+from ecolens.warehouse.model.run_result import RunResult, StageResult
+from ecolens.warehouse.core.runner_settings import WarehouseRunnerSettings
 
 
 def _make_run_result(*, success: bool = True) -> RunResult:

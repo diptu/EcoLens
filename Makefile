@@ -186,29 +186,61 @@ restore-duckdb: ## Restore a DuckDB snapshot written by `make backup-duckdb`. Us
 		cd services/data-pipeline && $(UV) run --active python scripts/restore_duckdb.py --snapshot-name $(SNAPSHOT) --target $(if $(TARGET),$(TARGET),restored_$(SNAPSHOT).duckdb); \
 	fi
 
+.PHONY: migrate-anomaly-columns
+migrate-anomaly-columns: ## One-off: adds anomaly_score/anomaly_flags/anomaly_explanation to every existing DuckDB source table (root TODO.md's Anomaly Detection section). Idempotent -- safe to re-run. Run once before the anomaly-scoring code ships against a pre-existing store.
+	cd services/data-pipeline && $(UV) run --active python scripts/migrate_add_anomaly_columns.py $(if $(PATH_OVERRIDE),--path $(PATH_OVERRIDE),)
+
+.PHONY: train-anomaly-models
+train-anomaly-models: ## Retrain every (source, metric) IsolationForest anomaly model from recent DuckDB history (root TODO.md's Anomaly Detection v2). Daily cadence (see scripts/cron_train_anomaly_models.sh) -- not registered through MLflow, see isolation_forest.py's own docstring for why.
+	cd services/data-pipeline && $(UV) run --active python scripts/train_anomaly_isolation_forest.py
+
 # ── Forecasting Model (train/tune/evaluate/promote in data-pipeline; ──────
 # ── forecast-api never trains, it only loads+serves whatever is aliased ───
 # ── "production" in the MLflow Registry -- see services/forecast-api/ ─────
 # ── strategy.md §2 and root TODO.md ECO-108..119.) ─────────────────────────
 .PHONY: model-train
 model-train: ## Full train -> evaluate -> promote-if-better cycle (weekly cron). Registers a new version and promotes it iff it beats the current "production" alias. Trains on a live Colab T4 GPU bridge if NTFY_TOPIC is set (see scripts/colab_server.py) and a kernel is published, else local CPU/CUDA. Usage: make model-train [NO_COLAB=1].
-	cd services/data-pipeline && $(UV) run --active python -m ecolens.forecasting.cli train $(if $(NO_COLAB),--no-colab,)
+	cd services/data-pipeline && $(UV) run --active python -m ecolens.forecasting.core.cli train $(if $(NO_COLAB),--no-colab,)
+
+.PHONY: model-train-tft
+model-train-tft: ## Full TFT train -> evaluate -> promote-if-better cycle, registered under its own MLflow experiment/model name (independent "production" alias from the LSTM's). Local CPU/CUDA only -- no Colab GPU bridge for TFT yet.
+	cd services/data-pipeline && $(UV) run --active python -m ecolens.forecasting.core.cli train-tft
+
+.PHONY: model-train-timesfm
+model-train-timesfm: ## Train TimesFM's calibration head -> evaluate -> promote-if-better, registered under its own MLflow experiment/model name. TimesFM itself (Google's pretrained checkpoint) stays frozen -- only the small head trains. First run downloads the ~2GB checkpoint from Hugging Face Hub (cached after that).
+	cd services/data-pipeline && $(UV) run --active python -m ecolens.forecasting.core.cli train-timesfm
+
+.PHONY: model-train-fuel-ensemble
+model-train-fuel-ensemble: ## Train the 16-fuel LightGBM ensemble -> evaluate (mean per-fuel MAE) -> promote-if-better, registered under its own MLflow experiment/model name (root TODO.md's Normalization Constraint Layer).
+	cd services/data-pipeline && $(UV) run --active python -m ecolens.forecasting.core.cli train-fuel-ensemble
 
 .PHONY: model-tune
 model-tune: ## Optuna hyperparameter search (occasional, manual). Usage: make model-tune [N_TRIALS=20].
-	cd services/data-pipeline && $(UV) run --active python -m ecolens.forecasting.cli tune $(if $(N_TRIALS),--n-trials $(N_TRIALS),)
+	cd services/data-pipeline && $(UV) run --active python -m ecolens.forecasting.core.cli tune $(if $(N_TRIALS),--n-trials $(N_TRIALS),)
 
 .PHONY: model-evaluate
 model-evaluate: ## Re-evaluate the current "production"-aliased model against fresh data (MAPE/RMSE/coverage), no retrain.
-	cd services/data-pipeline && $(UV) run --active python -m ecolens.forecasting.cli evaluate
+	cd services/data-pipeline && $(UV) run --active python -m ecolens.forecasting.core.cli evaluate
 
 .PHONY: model-status
 model-status: ## Print the current production model's version/last-trained/last-eval snapshot (health.get_health_snapshot).
-	cd services/data-pipeline && $(UV) run --active python -m ecolens.forecasting.cli status
+	cd services/data-pipeline && $(UV) run --active python -m ecolens.forecasting.core.cli status
 
 .PHONY: model-online-finetune
-model-online-finetune: ## Lightweight fine-tune of the current production model on the newest window (more frequent cron than model-train; still gated by promote_if_better).
-	cd services/data-pipeline && $(UV) run --active python -m ecolens.forecasting.cli online-finetune
+model-online-finetune: ## Lightweight fine-tune of the current production model on the buffer accumulated since its own last_trained_at (more frequent cron than model-train; still gated by promote_if_better).
+	cd services/data-pipeline && $(UV) run --active python -m ecolens.forecasting.core.cli online-finetune
+
+.PHONY: model-online-finetune-tft
+model-online-finetune-tft: ## Lightweight fine-tune of the current production TFT (static covariate encoder frozen, only VSN/attention/decoder adapt) on the buffer since its own last_trained_at.
+	cd services/data-pipeline && $(UV) run --active python -m ecolens.forecasting.core.cli online-finetune-tft
+
+.PHONY: model-online-finetune-timesfm
+model-online-finetune-timesfm: ## Lightweight fine-tune of the current production TimesFM calibration head (frozen pretrained backbone) on the buffer since its own last_trained_at.
+	cd services/data-pipeline && $(UV) run --active python -m ecolens.forecasting.core.cli online-finetune-timesfm
+
+.PHONY: feature-selection
+feature-selection: ## Re-run Feature Selection Steps 1/2/3/4 (structural hygiene, MI ranking, PACF, LightGBM multicollinearity pruning) against the live ml_features_demand_v1 mart.
+	cd services/data-pipeline && $(UV) run --active python -m ecolens.forecasting.core.cli feature-selection
 
 .PHONY: model-benchmark
 model-benchmark: ## Benchmark forecast-api's CPU inference optimization (ECO-P03: quantized vs fp32 latency/RSS). Usage: make model-benchmark [ITERATIONS=200] [HIDDEN_SIZE=128] [NUM_LAYERS=2].
@@ -254,18 +286,22 @@ DBT_RUN           := cd $(DBT_PROJECT_DIR) && $(UV) run --active --project $(DAT
 
 .PHONY: warehouse
 warehouse: ## Run the warehouse pipeline: raw sync + dbt build + quality + aggregates. Usage: make warehouse [MODE=incremental|full|validate] [SELECT="tag:marts"] [EXCLUDE="tag:dev"].
-	cd services/data-pipeline && $(UV) run --active python -m ecolens.warehouse.runner.runner \
+	cd services/data-pipeline && $(UV) run --active python -m ecolens.warehouse.core.runner_entrypoint \
 		$(if $(filter full,$(MODE)),--full,$(if $(filter validate,$(MODE)),--validate-only,--incremental)) \
 		$(if $(SELECT),--select $(SELECT),) \
 		$(if $(EXCLUDE),--exclude $(EXCLUDE),)
 
 .PHONY: warehouse-full
-warehouse-full: ## Full warehouse refresh (weekly cron): resyncs all raw history + dbt --full-refresh.
-	cd services/data-pipeline && $(UV) run --active python -m ecolens.warehouse.runner.runner --full
+warehouse-full: ## Full warehouse refresh (manual/as-needed): resyncs all raw history + dbt --full-refresh. Not on a schedule -- run this yourself when genuinely needed (schema change, corrupted incremental state).
+	cd services/data-pipeline && $(UV) run --active python -m ecolens.warehouse.core.runner_entrypoint --full
+
+.PHONY: warehouse-consumer
+warehouse-consumer: ## Run the event-driven warehouse consumer: listens on RabbitMQ for ingestion's "data written" events and triggers debounced incremental warehouse runs -- the event-driven replacement for the old warehouse cron. Long-running; see scripts/warehouse_consumer_supervisor.sh for host supervision.
+	cd services/data-pipeline && $(UV) run --active python -m ecolens.warehouse.core.event_consumer_entrypoint
 
 .PHONY: warehouse-validate
 warehouse-validate: ## Check source freshness + warehouse state without running dbt.
-	cd services/data-pipeline && $(UV) run --active python -m ecolens.warehouse.runner.runner --validate-only
+	cd services/data-pipeline && $(UV) run --active python -m ecolens.warehouse.core.runner_entrypoint --validate-only
 
 .PHONY: warehouse-bootstrap
 warehouse-bootstrap: ## Bootstrap raw.* Postgres tables (idempotent create_raw_schema macro) without running the full pipeline. Usage: make warehouse-bootstrap [DBT_TARGET=dev|staging|prod].

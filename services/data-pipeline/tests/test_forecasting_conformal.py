@@ -1,11 +1,11 @@
-"""Tests for ecolens.forecasting.evaluation.conformal (ECO-114)."""
+"""Tests for ecolens.forecasting.service.evaluation.conformal (ECO-114)."""
 
 from __future__ import annotations
 
 import numpy as np
 import pytest
 
-from ecolens.forecasting.evaluation.conformal import (
+from ecolens.forecasting.service.evaluation.conformal import (
     empirical_coverage,
     fit_conformal_calibration,
 )
@@ -81,7 +81,9 @@ class TestFitConformalCalibration:
     def test_round_trip_dict(self):
         p10, p90, y = _synthetic_quantiles(200, 4, seed=6)
         calibration = fit_conformal_calibration(p10, p90, y, alpha=0.1)
-        from ecolens.forecasting.evaluation.conformal import ConformalCalibration
+        from ecolens.forecasting.service.evaluation.conformal import (
+            ConformalCalibration,
+        )
 
         restored = ConformalCalibration.from_dict(calibration.to_dict())
         assert np.allclose(restored.q_hat, calibration.q_hat)

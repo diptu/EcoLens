@@ -10,6 +10,26 @@ dependencies = [
     "gunicorn>=23.0.0",
     "mlflow-skinny>=2.18.0",
     "numpy>=2.5.1",
+    # mlflow-skinny deliberately excludes pandas, but its own
+    # mlflow.pytorch submodule (forecasting/loader.py) imports it
+    # unconditionally -- without this explicit dep, importing loader.py
+    # raises ModuleNotFoundError the moment mlflow.pytorch loads.
+    "pandas>=2.2.0",
+    # mlflow-skinny also deliberately excludes the SQLAlchemy-backed
+    # tracking/registry store -- without these, MlflowClient(tracking_uri=...)
+    # can only resolve 'file'/'http'/'https' schemes, and a local
+    # 'sqlite:///...' MLFLOW_TRACKING_URI (this service's dev-mode default,
+    # sharing data-pipeline's own local MLflow store) fails at startup
+    # with "UnsupportedModelRegistryStoreURIException: ... unsupported URI
+    # 'sqlite:...'" before ever attempting a connection. This only ever
+    # went unnoticed when running inside the monorepo's shared workspace
+    # venv, where data-pipeline's own optuna dependency happens to pull
+    # sqlalchemy/alembic in transitively -- forecast-api is independently
+    # deployable (its own Dockerfile/gunicorn process, own lockfile) and
+    # can't rely on a sibling service's unrelated dependency being
+    # incidentally co-installed.
+    "sqlalchemy>=2.0.0",
+    "alembic>=1.13.0",
     "prometheus-client>=0.21.0",
     "pydantic>=2.13.4",
     "pydantic-settings>=2.7.0",

@@ -1,4 +1,4 @@
-"""Tests for ecolens.warehouse.runner.api -- the /warehouse/run control
+"""Tests for ecolens.warehouse.api.runner_router -- the /warehouse/run control
 surface.
 
 `trigger_warehouse_run` fires a real `WarehouseRunner.run()` in the
@@ -18,8 +18,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from ecolens.warehouse.runner import api as api_module
-from ecolens.warehouse.runner.settings import get_warehouse_runner_settings
+import ecolens.warehouse.api.runner_router as api_module
+from ecolens.warehouse.core.runner_settings import get_warehouse_runner_settings
 
 
 @pytest.fixture
@@ -194,3 +194,76 @@ class TestLastRun:
         response = client.get("/warehouse/last-run")
         assert response.status_code == 200
         assert response.json()["success"] is True
+
+
+class TestRecentRuns:
+    def test_empty_list_when_no_runs_recorded_yet(self, client):
+        response = client.get("/warehouse/runs")
+        assert response.status_code == 200
+        assert response.json() == []
+
+    def test_returns_runs_newest_last_matching_file_order(self, client):
+        settings = get_warehouse_runner_settings()
+        settings.log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = settings.log_dir / "warehouse-runs.jsonl"
+        log_file.write_text(
+            "\n".join(
+                json.dumps({"success": True, "duration_seconds": float(i)})
+                for i in range(5)
+            )
+            + "\n"
+        )
+
+        response = client.get("/warehouse/runs")
+        assert response.status_code == 200
+        body = response.json()
+        assert [r["duration_seconds"] for r in body] == [0.0, 1.0, 2.0, 3.0, 4.0]
+
+    def test_limit_returns_only_the_most_recent_n(self, client):
+        settings = get_warehouse_runner_settings()
+        settings.log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = settings.log_dir / "warehouse-runs.jsonl"
+        log_file.write_text(
+            "\n".join(
+                json.dumps({"success": True, "duration_seconds": float(i)})
+                for i in range(5)
+            )
+            + "\n"
+        )
+
+        response = client.get("/warehouse/runs", params={"limit": 2})
+        assert response.status_code == 200
+        body = response.json()
+        assert [r["duration_seconds"] for r in body] == [3.0, 4.0]
+
+    def test_limit_out_of_range_422s(self, client):
+        response = client.get("/warehouse/runs", params={"limit": 0})
+        assert response.status_code == 422
+
+
+class TestConsumerStatus:
+    def test_404s_when_consumer_has_never_reported(self, client):
+        response = client.get("/warehouse/consumer-status")
+        assert response.status_code == 404
+
+    def test_returns_the_persisted_status(self, client):
+        settings = get_warehouse_runner_settings()
+        settings.log_dir.mkdir(parents=True, exist_ok=True)
+        status_file = settings.log_dir / "warehouse_consumer_status.json"
+        status_file.write_text(
+            json.dumps(
+                {
+                    "listening_since": "2026-07-27T21:00:00+00:00",
+                    "last_event": {"source": "bom", "rows": 5},
+                    "last_run": {"success": True},
+                    "run_in_progress": False,
+                }
+            )
+        )
+
+        response = client.get("/warehouse/consumer-status")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["last_event"]["source"] == "bom"
+        assert body["last_run"]["success"] is True
+        assert body["run_in_progress"] is False

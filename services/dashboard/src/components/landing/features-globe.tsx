@@ -90,7 +90,7 @@ export function FeaturesGlobe() {
 
           <h2 className="mt-6 text-4xl font-bold leading-[1.1] tracking-tight text-white md:text-5xl">
             From Data to{" "}
-            <span className="bg-gradient-to-r from-lime-300 to-emerald-300 bg-clip-text text-transparent">
+            <span className="bg-gradient-to-r from-lime-100 to-emerald-100 bg-clip-text text-transparent">
               Decarbonization
             </span>
           </h2>
@@ -120,7 +120,7 @@ export function FeaturesGlobe() {
           >
             {/* CSS-only "Earth" — concentric gradients, no external image */}
             <div
-              className="h-full w-full rounded-full ring-1 ring-inset ring-emerald-300/30 will-change-transform"
+              className="h-full w-full rounded-full ring-1 ring-inset ring-emerald-100/30 will-change-transform"
               style={{
                 background:
                   "radial-gradient(circle at 30% 30%, rgba(132,204,22,0.4) 0%, transparent 35%), radial-gradient(circle at 70% 60%, rgba(16,185,129,0.5) 0%, transparent 45%), radial-gradient(circle at 50% 50%, rgba(56,189,248,0.25) 0%, transparent 60%), #0a1410",
@@ -153,10 +153,10 @@ export function FeaturesGlobe() {
               >
                 <m.div
                   variants={cardHover}
-                  className="group rounded-2xl border border-white/10 bg-[#0a1410]/80 p-4 backdrop-blur-md transition-colors hover:border-emerald-400/30"
+                  className="group rounded-2xl border border-white/10 bg-[#0a1410]/80 p-4 backdrop-blur-md transition-colors hover:border-emerald-200/30"
                 >
                   <div className="flex items-center gap-2">
-                    <span className="grid h-7 w-7 place-items-center rounded-md bg-emerald-400/15 text-emerald-300">
+                    <span className="grid h-7 w-7 place-items-center rounded-md bg-emerald-200/15 text-emerald-100">
                       {feature.icon}
                     </span>
                     <h3 className="text-sm font-semibold text-white">{feature.title}</h3>
@@ -180,7 +180,7 @@ function Badge({ children }: { children: React.ReactNode }) {
   return (
     <m.span
       variants={fadeUp}
-      className="inline-flex items-center gap-2 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-3 py-1 text-xs font-medium tracking-wider text-emerald-300"
+      className="inline-flex items-center gap-2 rounded-full border border-emerald-200/30 bg-emerald-200/10 px-3 py-1 text-xs font-medium tracking-wider text-emerald-100"
     >
       <FlameIcon className="h-3 w-3" />
       {String(children).toUpperCase()}
@@ -191,10 +191,10 @@ function Badge({ children }: { children: React.ReactNode }) {
 function OrbitRings() {
   return (
     <div className="absolute inset-0 pointer-events-none" aria-hidden="true">
-      <div className="absolute inset-[10%] rounded-full border border-dashed border-emerald-300/15" />
-      <div className="absolute inset-[20%] rounded-full border border-dashed border-emerald-300/10" />
-      <div className="absolute top-[12%] left-1/2 h-2 w-2 -translate-x-1/2 rounded-full bg-emerald-300 shadow-[0_0_12px_rgba(16,185,129,0.7)]" />
-      <div className="absolute bottom-[18%] right-[12%] h-2 w-2 rounded-full bg-lime-300 shadow-[0_0_12px_rgba(132,204,22,0.7)]" />
+      <div className="absolute inset-[10%] rounded-full border border-dashed border-emerald-100/15" />
+      <div className="absolute inset-[20%] rounded-full border border-dashed border-emerald-100/10" />
+      <div className="absolute top-[12%] left-1/2 h-2 w-2 -translate-x-1/2 rounded-full bg-emerald-100 shadow-[0_0_12px_rgba(16,185,129,0.7)]" />
+      <div className="absolute bottom-[18%] right-[12%] h-2 w-2 rounded-full bg-lime-100 shadow-[0_0_12px_rgba(132,204,22,0.7)]" />
     </div>
   );
 }

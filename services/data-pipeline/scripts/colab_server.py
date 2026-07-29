@@ -2,7 +2,7 @@
 colab_server.py
 ================
 Run this inside Google Colab to expose a GPU-backed Jupyter server
-through a public tunnel that `ecolens.forecasting.training.colab_dispatch`
+through a public tunnel that `ecolens.forecasting.service.training.colab_dispatch`
 (back on your laptop) connects to for GPU-accelerated `make model-train`.
 
 How to use:
@@ -54,7 +54,7 @@ PORT = 8888
 # guessable/enumerable by design: anyone who learns this topic name while
 # this cell is running could fetch the token and get arbitrary code
 # execution on this kernel. Must match NTFY_TOPIC on the laptop side (both
-# ecolens.forecasting.training.colab_dispatch and scripts/run_remote.py
+# ecolens.forecasting.service.training.colab_dispatch and scripts/run_remote.py
 # read it from the same env var) — set your own random value via the
 # NTFY_TOPIC environment variable (a Colab secret of the same name works
 # too) rather than relying on a value committed to source control.

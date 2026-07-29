@@ -191,3 +191,10 @@ body {
 .nav-enter {
   animation: nav-enter 0.5s cubic-bezier(0.16, 1, 0.3, 1) 0s 1 both;
 }
+
+/* Fade-in keyframe for animated entries that don't need framer-motion
+   (e.g. when used as a child of a <ul> or to keep <li> event handlers). */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateX(-8px); }
+  to   { opacity: 1; transform: translateX(0); }
+}

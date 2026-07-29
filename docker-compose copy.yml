@@ -51,6 +51,30 @@ services:
       timeout: 3s
       retries: 10
 
+  # ── Event bus ─────────────────────────────────────────────────────────────
+  # Ingestion publishes a "data written" event here (see
+  # ecolens.shared.events.rabbitmq.publish_data_ingested, called from
+  # duckdb_store.write_historical) as soon as new/updated rows land in
+  # DuckDB; ecolens.warehouse.service.event_consumer consumes it and
+  # triggers an incremental WarehouseRunner run -- replaces the old
+  # every-30-min warehouse cron with a push model instead of polling.
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    <<: *common-env
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
+    ports:
+      - "5672:5672"    # AMQP
+      - "15672:15672"  # management UI
+    volumes:
+      - rabbitmqdata:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   # ── Object storage ────────────────────────────────────────────────────────
   minio:
     image: minio/minio:RELEASE.2024-08-29T01-40-52Z
@@ -195,6 +219,7 @@ services:
 volumes:
   pgdata:
   redisdata:
+  rabbitmqdata:
   miniodata:
   promdata:
   grafana:

@@ -1,4 +1,4 @@
-"""Tests for ecolens.forecasting.serving.forecast (ECO-117)."""
+"""Tests for ecolens.forecasting.service.serving (ECO-117)."""
 
 from __future__ import annotations
 
@@ -6,10 +6,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from ecolens.forecasting.evaluation.conformal import ConformalCalibration
-from ecolens.forecasting.features import FEATURE_COLUMNS, FeatureScaler
-from ecolens.forecasting.models.lstm import DemandLSTM
-from ecolens.forecasting.serving.forecast import batch_forecast, build_window
+from ecolens.forecasting.service.evaluation.conformal import ConformalCalibration
+from ecolens.forecasting.schema.features import FEATURE_COLUMNS, FeatureScaler
+from ecolens.forecasting.model.lstm import DemandLSTM
+from ecolens.forecasting.service.serving import batch_forecast, build_window
 
 
 def _scaler() -> FeatureScaler:

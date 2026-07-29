@@ -6,7 +6,7 @@ import httpx
 import pytest
 import respx
 
-from ecolens.ingestion.sources.openelectricity import (
+from ecolens.ingestion.service.openelectricity import (
     OpenElectricityFacilityFetcher,
     OpenElectricityFetcher,
 )
@@ -116,7 +116,7 @@ async def test_fetch_survives_one_metric_failing(monkeypatch):
 @pytest.mark.asyncio
 @respx.mock
 async def test_fetch_skips_metrics_unsupported_by_network(monkeypatch):
-    from ecolens.ingestion.sources.openelectricity import engine as engine_module
+    from ecolens.ingestion.service.openelectricity import engine as engine_module
 
     monkeypatch.setattr(
         engine_module,
@@ -140,7 +140,7 @@ async def test_fetch_skips_metrics_unsupported_by_network(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_fetch_facilities_survives_one_network_failing(monkeypatch):
-    from ecolens.ingestion.sources.openelectricity.client import OpenElectricityClient
+    from ecolens.ingestion.service.openelectricity.client import OpenElectricityClient
 
     async def flaky_fetch(self, client, network):
         if network == "NEM":

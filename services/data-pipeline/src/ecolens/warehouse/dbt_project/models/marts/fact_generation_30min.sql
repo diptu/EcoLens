@@ -30,5 +30,8 @@ select
     interconnector_imports_mw,
     interconnector_exports_mw,
     net_import_mw,
-    data_quality_status
+    data_quality_status,
+    anomaly_score,
+    anomaly_flags,
+    anomaly_explanation
 from {{ ref("fact_demand_30min") }}

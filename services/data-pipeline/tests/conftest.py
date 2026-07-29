@@ -5,9 +5,31 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _no_real_rabbitmq_publish(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never let a test touch a real broker.
+
+    `duckdb_store.write_historical` -- called directly or indirectly by
+    a large fraction of this suite -- fires a best-effort RabbitMQ
+    publish on every successful write. Without a broker running it
+    fails fast (harmless, swallowed by design), but that's an
+    environment assumption this suite shouldn't depend on: some
+    sandboxes silently drop outbound connections instead of refusing
+    them, which would hang every such test for the full connect
+    timeout instead of failing fast. Tests that specifically want to
+    assert publish behavior monkeypatch this back themselves.
+    """
+    monkeypatch.setattr(
+        "ecolens.ingestion.db.duckdb_store.publish_data_ingested",
+        lambda *a, **kw: None,
+    )
+
 
 class FakeConnectionPool:
-    """Duck-typed stand-in for `ecolens.warehouse.api.db.ConnectionPool`.
+    """Duck-typed stand-in for `ecolens.warehouse.db.connection.ConnectionPool`.
 
     Used by query-helper and route tests so they never need a real
     PostgreSQL connection. Records every call for assertions and
@@ -177,8 +199,9 @@ class _FakeMongoDb:
 class FakePgConnection:
     """Duck-typed stand-in for a psycopg2 connection."""
 
-    def __init__(self, *, raises: Exception | None = None) -> None:
+    def __init__(self, *, raises: Exception | None = None, rowcount: int = 0) -> None:
         self._raises = raises
+        self._rowcount = rowcount
         self.autocommit_set = False
         self.closed = False
         self.executed: list[str] = []
@@ -196,11 +219,13 @@ class FakePgConnection:
 class _FakePgCursor:
     def __init__(self, conn: FakePgConnection) -> None:
         self._conn = conn
+        self.rowcount = 0
 
     def execute(self, query: str, *args: Any) -> None:
         if self._conn._raises:
             raise self._conn._raises
         self._conn.executed.append(query)
+        self.rowcount = self._conn._rowcount
 
     def close(self) -> None:
         pass

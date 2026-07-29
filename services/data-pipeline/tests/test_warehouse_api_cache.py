@@ -1,4 +1,4 @@
-"""Tests for ecolens.warehouse.api.cache.Cache.
+"""Tests for ecolens.warehouse.db.cache.Cache.
 
 Uses a fake redis-shaped client so these never touch a real Redis
 server.
@@ -10,8 +10,8 @@ from typing import Any
 
 import pytest
 
-from ecolens.warehouse.api.cache import Cache
-from ecolens.warehouse.api.settings import WarehouseApiSettings
+from ecolens.warehouse.db.cache import Cache
+from ecolens.warehouse.core.api_settings import WarehouseApiSettings
 
 
 class _FakeRedisClient:
@@ -63,7 +63,7 @@ class TestEnabled:
 
     @pytest.mark.asyncio
     async def test_connect_failure_disables_cache(self, monkeypatch):
-        import ecolens.warehouse.api.cache as cache_module
+        import ecolens.warehouse.db.cache as cache_module
 
         monkeypatch.setattr(
             cache_module.aioredis,
@@ -77,7 +77,7 @@ class TestEnabled:
 
     @pytest.mark.asyncio
     async def test_get_set_round_trip(self, monkeypatch):
-        import ecolens.warehouse.api.cache as cache_module
+        import ecolens.warehouse.db.cache as cache_module
 
         fake_client = _FakeRedisClient()
         monkeypatch.setattr(
@@ -93,7 +93,7 @@ class TestEnabled:
 
     @pytest.mark.asyncio
     async def test_get_missing_key_returns_none(self, monkeypatch):
-        import ecolens.warehouse.api.cache as cache_module
+        import ecolens.warehouse.db.cache as cache_module
 
         fake_client = _FakeRedisClient()
         monkeypatch.setattr(
@@ -105,7 +105,7 @@ class TestEnabled:
 
     @pytest.mark.asyncio
     async def test_disconnect_closes_client(self, monkeypatch):
-        import ecolens.warehouse.api.cache as cache_module
+        import ecolens.warehouse.db.cache as cache_module
 
         fake_client = _FakeRedisClient()
         monkeypatch.setattr(

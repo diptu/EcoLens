@@ -34,12 +34,12 @@ from datetime import date, datetime, timedelta, timezone
 import httpx
 import pandera.errors
 
-from ecolens.ingestion.sources.bom import HistoricalFetcher
-from ecolens.ingestion.sources.bom.schema import (
+from ecolens.ingestion.service.bom import HistoricalFetcher
+from ecolens.ingestion.schema.bom import (
     ERA5_LAG_DAYS,
     HISTORICAL_TIMEOUT_SECONDS,
 )
-from ecolens.ingestion.validators.bom import validate as validate_docs
+from ecolens.ingestion.schema.validators.bom import validate as validate_docs
 from ecolens.shared.observability.logging import get_logger
 
 log = get_logger("backfill_bom_historical")

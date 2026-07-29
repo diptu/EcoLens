@@ -137,52 +137,141 @@ network; the data-pipeline worker is on the `internal` network only and is
 never reachable from the public internet. All three share a small platform
 of infra dependencies (Postgres, Redis, MinIO, MLflow, observability).
 
-```
-                ┌────────────────────────────────────────────────────┐
+```txt
+                      ┌────────────────────────────────────────────────────┐
                 │                       USERS                         │
                 └─────────────────────────┬──────────────────────────┘
-                                          │ HTTPS
+                                          │ HTTPS  (Nginx :443)
                                           ▼
                             ┌──────────────────────────┐
                             │  ③  dashboard  (Next.js) │
-                            │  :3000  • public         │
-                            │  BFF routes → forecast-api│
+                            │  :3000   • public         │
+                            │  BFF routes → all APIs    │
                             └─────────────┬────────────┘
-                                          │ /v1/* JSON
+                                          │  /v1/* JSON
                                           ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                                                                         │
-│  ① forecast-api   (FastAPI)              ② data-pipeline  (Prefect)    │
-│  :8000  • public / dev-only              headless  • internal only      │
-│  • /v1/forecast, /v1/emissions,          • ingest AEMO / BoM / OE       │
-│    /v1/footprint, /v1/healthz            • dbt build (raw → marts)      │
-│  • loads LSTM from MLflow on boot        • train PyTorch LSTM          │
-│  • Redis cache, Postgres read             • register model in MLflow    │
+│  ① forecast-api  (FastAPI)         ② data-pipeline  (Prefect)          │
+│  :8000   • public                   headless   • internal                 │
+│  • /v1/forecast, emissions,        • ingest AEMO / BoM / OE             │
+│    footprint, healthz              • stage → DuckDB  (local)            │
+│  • LSTM + TFT + TimesFM            • anomaly detection                  │
+│  • P10 / P50 / P90 quantiles         (rule + ML with explanation)       │
+│  • conformal calibration           • publish → RabbitMQ event           │
+│  • seasonal-naïve fallback         • consume event → load raw.* →       │
+│  • Redis cache, Postgres read        dbt (DuckDB engine) → Postgres     │
+│                                    • train LSTM/TFT, register in MLflow │
 │                                                                         │
-└────────────┬──────────────────┬───────────────────┬────────────────────┘
-             │                  │                   │
-             ▼                  ▼                   ▼
-       ┌──────────┐       ┌──────────┐        ┌──────────────┐
-       │ postgres │       │  redis   │        │  dbt   │
-       │(data)    │       │  (cache) │        │  (transform)  │
-       └────┬─────┘       └──────────┘        └────┬─────┘
-            │                                      │
-            └────────────────┬─────────────────────┘
-                             ▼
-                       ┌──────────┐
-                       │  mlflow  │  ← model artifacts, params, metrics
-                       │ (track)  │  ← forecast-api watches this; pipeline writes it
-                       └──────────┘
+│  ④ iam-service  (FastAPI)          ⑤ notification-service  (FastAPI)   │
+│  :8001   • public                   :8002   • internal                   │
+│  • /v1/auth/{login,refresh,…}      • /v1/notify/{email,webhook}         │
+│  • /v1/users, /v1/orgs             • SMTP + SendGrid backend            │
+│  • JWT (RS256) + bcrypt            • webhooks (Slack / Teams)           │
+│  • RBAC (admin / analyst / viewer) • Redis-backed queue + retry          │
+│                                                                         │
+│  ⑥ reporting-service  (FastAPI + Worker)        [ STANDALONE BOUNDED CTX ]
+│  :8003   • internal                                                       │
+│  ┌────────────────────────────────────────────────────────────────────┐  │
+│  │ API layer        │  /v1/reports/generate  (POST, 202)              │  │
+│  │                  │  /v1/reports/{id}       (GET metadata)           │  │
+│  │                  │  /v1/reports/{id}/download  (GET → X-Accel)     │  │
+│  │                  │  /v1/reports/schedules   (CRUD)                  │  │
+│  │                  │  /v1/reports/templates   (GET)                    │  │
+│  │                  └────────────────────────────────────────────────┘  │
+│  │                                                                     │
+│  │ Worker loop      │  APScheduler pulls from Redis queue              │
+│  │                  │  renders template → writes file → saves metadata │
+│  │                  └────────────────────────────────────────────────┘  │
+│  │                                                                     │
+│  │ Renderers        │  PDF  : Jinja2 + WeasyPrint (HTML→PDF)           │
+│  │                  │  XLSX : openpyxl                                  │
+│  │                  │  CSV  : Python csv stdlib                        │
+│  │                  └────────────────────────────────────────────────┘  │
+│  │                                                                     │
+│  │ Template engine  │  /templates/ghg.j2, esg.j2, cdp.j2, custom.j2   │
+│  │                  │  shared partials: header.j2, footer.j2, css.j2  │
+│  │                  └────────────────────────────────────────────────┘  │
+│  │                                                                     │
+│  │ Data fetcher     │  queries Postgres marts via asyncpg              │
+│  │                  │  (reads from data-pipeline's curated schemas)     │
+│  │                  └────────────────────────────────────────────────┘  │
+│  │                                                                     │
+│  │ Signed-URL gen   │  PyJWT, 5-min TTL, scoped to one report          │
+│  │                  └────────────────────────────────────────────────┘  │
+│  └────────────────────────────────────────────────────────────────────┘  │
+│                                                                         │
+└────────────────────────────────────┬────────────────────────────────────┘
+                                     │
+                ┌────────────────────┼────────────────────┐
+                │                    │                    │
+                ▼                    ▼                    ▼
+     ┌──────────────┐        ┌──────────────┐      ┌──────────────┐
+     │   reports    │        │   reports    │      │   reports    │
+     │   metadata   │        │  job queue   │      │  file store  │
+     │  (postgres)  │        │   (redis)    │      │ (local FS)   │
+     │              │        │              │      │              │
+     │ ecolens_     │        │ ZSET:        │      │ /var/lib/    │
+     │ reports:     │        │  reports:    │      │ ecoLens/     │
+     │  • reports   │        │  pending     │      │ reports/     │
+     │  • schedules │        │  running     │      │  2024/       │
+     │  • templates │        │  done        │      │   10/        │
+     │  • renders   │        │              │      │    rep-*.pdf │
+     └──────────────┘        └──────────────┘      └──────────────┘
+                                                           │
+                                                           │  X-Accel-Redirect
+                                                           ▼
+                                                    ┌──────────────┐
+                                                    │   Nginx      │
+                                                    │  (serves     │
+                                                    │  files only  │
+                                                    │  after JWT   │
+                                                    │  validates)  │
+                                                    └──────────────┘
 
+────────────────────── shared platform infra ──────────────────────────────
+                                                                         │
+     ┌──────────┐       ┌──────────┐        ┌──────────┐    ┌──────────┐ │
+     │ postgres │       │  redis   │        │  DuckDB  │    │ RabbitMQ │ │
+     │(NeonDB)  │       │ (cache + │        │  (local  │    │ (events) │ │
+     │ raw.* +  │       │  queue)  │        │ staging +│    │          │ │
+     │ curated  │       │          │        │ dbt exec)│    │          │ │
+     │ marts    │       │          │        │          │    │          │ │
+     └────┬─────┘       └──────────┘        └──────────┘    └──────────┘ │
+          │                                                             │
+          └────────────────┬────────────────────────────────────────────┘
+                           ▼
+                     ┌──────────┐
+                     │  dbt     │  ← runs in DuckDB, writes to Postgres
+                     │(transform│
+                     │ + test)  │
+                     └────┬─────┘
+                          │
+                          ▼
+                    ┌──────────┐
+                    │  mlflow  │  ← model artifacts, params, metrics
+                    │ (track)  │  ← forecast-api watches; pipeline writes
+                    └──────────┘
+
+  Platform infra  (NOT services — no app code, no release cadence):
+    postgres (NeonDB) · redis · duckdb (embedded) · rabbitmq · mlflow
+    · prometheus · grafana · loki
+
+  Filesystem  (no service — just a directory on the host):
+    /var/lib/ecoLens/reports/   ← reporting-service writes here
+                                  served via Nginx X-Accel-Redirect
   Platform infra (NOT services — no app code, no release cadence):
     postgres · redis · minio · mlflow · prometheus · grafana · loki
 ```
+| # | Service | Port | Tier | Owns | Talks to | Status |
+|---|---|---|---|---|---|---|
+| 1 | `forecast-api` | 8000 | edge | LSTM + TFT + TimesFM serving, P10/P50/P90 quantiles, conformal calibration, seasonal-naïve fallback, Redis cache, `/v1/*` contract | `postgres`, `redis`, `mlflow` | ✅ built |
+| 2 | `data-pipeline` | — | worker | AEMO/BoM/OE ingest → DuckDB staging → anomaly detection (rule + ML) → RabbitMQ event → dbt (DuckDB engine) → Postgres curated → train LSTM/TFT → calibrate TimesFM → register in MLflow | `postgres`, `redis`, `duckdb`, `rabbitmq`, `mlflow`, external APIs, `notification-service` | ✅ built |
+| 3 | `dashboard` | 3000 | edge | Next.js UI, BFF routes, charts, modals, role-aware nav, all 15 dashboard pages | `forecast-api`, `iam-service`, `data-pipeline`, `reporting-service` | ✅ built |
+| 4 | `iam-service` | 8001 | edge | JWT (RS256) auth, users, orgs, RBAC (admin / analyst / viewer), audit log, password reset, email verify | `postgres`, `redis`, `notification-service` | 🚧 planned |
+| 5 | `notification-service` | 8002 | internal | email (SMTP / SendGrid), webhooks (Slack / Teams / PagerDuty), Redis-backed queue + retry + DLQ | `redis`, `smtp`/`sendgrid`, `slack/teams webhooks` | ⏳ to build |
+| 6 | `reporting-service` | 8003 | internal | PDF (Jinja2 + WeasyPrint), Excel (openpyxl), CSV, async job queue, signed short-lived download URLs, local FS storage, template registry | `postgres` (curated marts), `redis` (queue), `nginx` (X-Accel-Redirect), `notification-service` (on completion) | ⏳ to build |
 
-| # | Service | Port | Tier | Owns | Talks to |
-|---|---|---|---|---|---|
-| 1 | **`forecast-api`** | 8000 | edge | model serving, `/v1/*` contract, Redis cache, Postgres reads | `postgres`, `redis`, `mlflow` |
-| 2 | **`data-pipeline`** | — | worker | AEMO/BoM/OE ingest, dbt, training, MLflow registration | `postgres`, `redis`, `minio`, `mlflow`, external APIs |
-| 3 | **`dashboard`** | 3000 | edge | Next.js UI, BFF routes | `forecast-api` only |
 
 **Key boundary rules:**
 

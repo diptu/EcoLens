@@ -77,7 +77,7 @@ export function FeatureGrid({
             <MotionItem
               key={item.title}
               variant="fadeUp"
-              className="group relative overflow-hidden rounded-2xl border border-white/10 bg-white/[0.02] p-6 transition-colors hover:border-emerald-400/30"
+              className="group relative overflow-hidden rounded-2xl border border-white/10 bg-white/[0.02] p-6 transition-colors hover:border-emerald-200/30"
             >
               <div className="flex items-center gap-2">
                 <m.span
@@ -85,7 +85,7 @@ export function FeatureGrid({
                   initial="rest"
                   whileHover="hover"
                   animate="rest"
-                  className="grid h-9 w-9 place-items-center rounded-md border border-emerald-400/20 bg-emerald-400/10 text-emerald-300"
+                  className="grid h-9 w-9 place-items-center rounded-md border border-emerald-200/20 bg-emerald-200/10 text-emerald-100"
                 >
                   {item.icon}
                 </m.span>
@@ -121,9 +121,9 @@ function CenterBadge({ children }: { children: React.ReactNode }) {
   return (
     <m.span
       variants={fadeUp}
-      className="inline-flex items-center gap-2 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-3 py-1 text-xs font-medium tracking-wider text-emerald-300"
+      className="inline-flex items-center gap-2 rounded-full border border-emerald-200/30 bg-emerald-200/10 px-3 py-1 text-xs font-medium tracking-wider text-emerald-100"
     >
-      <span className="grid h-4 w-4 place-items-center rounded-full bg-emerald-400/20">
+      <span className="grid h-4 w-4 place-items-center rounded-full bg-emerald-200/20">
         <svg viewBox="0 0 8 8" fill="currentColor" className="h-2.5 w-2.5">
           <path d="M4 0L4.6 3.4L8 4L4.6 4.6L4 8L3.4 4.6L0 4L3.4 3.4Z" />
         </svg>
@@ -140,7 +140,7 @@ function CheckIcon() {
       height="16"
       viewBox="0 0 16 16"
       fill="none"
-      className="mt-0.5 shrink-0 text-emerald-400"
+      className="mt-0.5 shrink-0 text-emerald-200"
     >
       <circle cx="8" cy="8" r="7" stroke="currentColor" strokeOpacity="0.3" strokeWidth="1.4" />
       <path
@@ -232,7 +232,7 @@ export function ChartVisual() {
             </div>
             <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-white/5">
               <div
-                className="h-full rounded-full bg-gradient-to-r from-lime-300 to-emerald-400"
+                className="h-full rounded-full bg-gradient-to-r from-lime-100 to-emerald-200"
                 style={{ width: `${row.w * 100}%` }}
               />
             </div>
@@ -271,7 +271,7 @@ export function DonutVisual({ percent = 72 }: { percent?: number }) {
       </svg>
       <div className="absolute inset-0 flex flex-col items-center justify-center">
         <span className="text-2xl font-bold text-white">{percent}%</span>
-        <span className="text-[10px] text-emerald-300">On Track</span>
+        <span className="text-[10px] text-emerald-100">On Track</span>
       </div>
     </div>
   );
@@ -285,8 +285,8 @@ export function ReportVisual() {
         className="absolute right-2 top-2 h-full w-full rounded-md border border-white/10 bg-white/[0.04]"
         style={{ background: "linear-gradient(135deg, rgba(16,185,129,0.1), rgba(0,0,0,0))" }}
       />
-      <div className="relative h-full w-full rounded-md border border-emerald-400/20 bg-[#0a1410] p-3">
-        <p className="text-[10px] uppercase tracking-wider text-emerald-300">ESG Report</p>
+      <div className="relative h-full w-full rounded-md border border-emerald-200/20 bg-[#0a1410] p-3">
+        <p className="text-[10px] uppercase tracking-wider text-emerald-100">ESG Report</p>
         <div className="mt-2 space-y-1">
           <div className="h-1 w-3/4 rounded bg-white/10" />
           <div className="h-1 w-2/3 rounded bg-white/10" />

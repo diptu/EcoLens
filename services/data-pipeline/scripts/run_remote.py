@@ -4,7 +4,7 @@ run_remote.py
 Ad-hoc runner for the Colab GPU bridge — mainly useful for a quick sanity
 check (e.g. confirming `torch.cuda.is_available()` on the remote kernel)
 before trusting it with a real `make model-train` run. For that real run,
-`ecolens.forecasting.training.colab_dispatch` handles everything (bundling
+`ecolens.forecasting.service.training.colab_dispatch` handles everything (bundling
 the `ecolens` package + the training dataset) automatically — you don't
 need this script for normal use.
 

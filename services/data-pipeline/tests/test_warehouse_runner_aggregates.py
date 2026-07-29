@@ -1,12 +1,12 @@
-"""Tests for ecolens.warehouse.runner.aggregates.AggregateRefresher."""
+"""Tests for ecolens.warehouse.service.aggregates.AggregateRefresher."""
 
 from __future__ import annotations
 
 import pytest
 
 from conftest import FakeAsyncpgConn, FakeAsyncpgPool
-from ecolens.warehouse.runner.aggregates import VIEWS, AggregateRefresher
-from ecolens.warehouse.runner.settings import WarehouseRunnerSettings
+from ecolens.warehouse.service.aggregates import VIEWS, AggregateRefresher
+from ecolens.warehouse.core.runner_settings import WarehouseRunnerSettings
 
 
 @pytest.fixture

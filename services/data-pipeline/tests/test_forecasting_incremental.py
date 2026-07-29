@@ -1,4 +1,4 @@
-"""Tests for ecolens.forecasting.training.incremental (year-by-year
+"""Tests for ecolens.forecasting.service.training.incremental (year-by-year
 chunked training). Real MLflow (SQLite + local artifact dir under
 tmp_path, same pattern as test_forecasting_registry.py) and real
 train_model()/build_windowed_dataset() -- only `TrainingSetLoader.fetch`
@@ -16,10 +16,10 @@ import pandas as pd
 import pytest
 
 from ecolens.config import Settings
-from ecolens.forecasting.data import TrainingSetLoader
-from ecolens.forecasting.features import FEATURE_COLUMNS
-from ecolens.forecasting.mlops.registry import ModelRegistry
-from ecolens.forecasting.training.incremental import run_incremental_chunk
+from ecolens.forecasting.repository.training_data import TrainingSetLoader
+from ecolens.forecasting.schema.features import FEATURE_COLUMNS
+from ecolens.forecasting.service.mlops.registry import ModelRegistry
+from ecolens.forecasting.service.training.incremental import run_incremental_chunk
 
 
 def _learnable_snapshot(*, n: int = 300, seed: int = 0) -> pd.DataFrame:

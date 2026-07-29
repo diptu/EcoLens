@@ -1,4 +1,4 @@
-"""Tests for ecolens.ingestion.circuit_breaker."""
+"""Tests for ecolens.ingestion.core.circuit_breaker."""
 
 from __future__ import annotations
 
@@ -6,12 +6,12 @@ import pytest
 
 from conftest import FakeRedis
 
-from ecolens.ingestion.circuit_breaker import (
+from ecolens.ingestion.core.circuit_breaker import (
     CircuitBreaker,
     CircuitBreakerOpen,
     retry_with_backoff,
 )
-from ecolens.ingestion.storage.settings import MongoSettings
+from ecolens.ingestion.core.settings import IngestionSettings
 
 
 async def _no_sleep(*_args: object, **_kwargs: object) -> None:
@@ -91,20 +91,20 @@ class TestRetryWithBackoff:
 
 
 @pytest.fixture
-def settings() -> MongoSettings:
-    return MongoSettings(
+def settings() -> IngestionSettings:
+    return IngestionSettings(
         ingest_circuit_breaker_threshold=3, ingest_circuit_breaker_timeout_seconds=60
     )
 
 
 class TestCircuitBreaker:
     @pytest.mark.asyncio
-    async def test_closed_by_default(self, settings: MongoSettings):
+    async def test_closed_by_default(self, settings: IngestionSettings):
         breaker = CircuitBreaker("test_source", FakeRedis(), settings=settings)
         await breaker.before_call()  # no raise
 
     @pytest.mark.asyncio
-    async def test_opens_after_threshold_failures(self, settings: MongoSettings):
+    async def test_opens_after_threshold_failures(self, settings: IngestionSettings):
         breaker = CircuitBreaker("test_source", FakeRedis(), settings=settings)
         for _ in range(settings.ingest_circuit_breaker_threshold):
             await breaker.record_failure()
@@ -112,14 +112,14 @@ class TestCircuitBreaker:
             await breaker.before_call()
 
     @pytest.mark.asyncio
-    async def test_stays_closed_below_threshold(self, settings: MongoSettings):
+    async def test_stays_closed_below_threshold(self, settings: IngestionSettings):
         breaker = CircuitBreaker("test_source", FakeRedis(), settings=settings)
         for _ in range(settings.ingest_circuit_breaker_threshold - 1):
             await breaker.record_failure()
         await breaker.before_call()  # no raise
 
     @pytest.mark.asyncio
-    async def test_success_resets_failure_count(self, settings: MongoSettings):
+    async def test_success_resets_failure_count(self, settings: IngestionSettings):
         breaker = CircuitBreaker("test_source", FakeRedis(), settings=settings)
         await breaker.record_failure()
         await breaker.record_failure()
@@ -129,7 +129,7 @@ class TestCircuitBreaker:
 
     @pytest.mark.asyncio
     async def test_half_open_after_timeout_elapses(
-        self, settings: MongoSettings, monkeypatch
+        self, settings: IngestionSettings, monkeypatch
     ):
         redis = FakeRedis()
         breaker = CircuitBreaker("test_source", redis, settings=settings)
@@ -143,13 +143,13 @@ class TestCircuitBreaker:
 
         real_time = time_module.time
         monkeypatch.setattr(
-            "ecolens.ingestion.circuit_breaker.time.time",
+            "ecolens.ingestion.core.circuit_breaker.time.time",
             lambda: real_time() + settings.ingest_circuit_breaker_timeout_seconds + 1,
         )
         await breaker.before_call()  # half-open: no raise
 
     @pytest.mark.asyncio
-    async def test_call_records_success(self, settings: MongoSettings):
+    async def test_call_records_success(self, settings: IngestionSettings):
         breaker = CircuitBreaker("test_source", FakeRedis(), settings=settings)
         await breaker.record_failure()
 
@@ -161,7 +161,7 @@ class TestCircuitBreaker:
         await breaker.before_call()  # failure count was reset by the success
 
     @pytest.mark.asyncio
-    async def test_call_records_failure_and_reraises(self, settings: MongoSettings):
+    async def test_call_records_failure_and_reraises(self, settings: IngestionSettings):
         breaker = CircuitBreaker("test_source", FakeRedis(), settings=settings)
 
         async def fn():
@@ -172,7 +172,7 @@ class TestCircuitBreaker:
 
     @pytest.mark.asyncio
     async def test_call_raises_circuit_breaker_open_without_calling_fn(
-        self, settings: MongoSettings
+        self, settings: IngestionSettings
     ):
         breaker = CircuitBreaker("test_source", FakeRedis(), settings=settings)
         for _ in range(settings.ingest_circuit_breaker_threshold):

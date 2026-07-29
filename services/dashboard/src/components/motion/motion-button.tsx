@@ -23,20 +23,20 @@ export interface MotionButtonProps extends Omit<HTMLMotionProps<"button">, "chil
 const baseClasses =
   "relative inline-flex items-center justify-center gap-2 font-semibold rounded-full " +
   "transition-colors duration-200 ease-out focus:outline-none focus-visible:ring-2 " +
-  "focus-visible:ring-emerald-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#050a08] " +
+  "focus-visible:ring-emerald-200 focus-visible:ring-offset-2 focus-visible:ring-offset-[#050a08] " +
   "disabled:opacity-50 disabled:pointer-events-none select-none";
 
 const variantClasses: Record<ButtonVariant, string> = {
   primary:
-    "bg-lime-300 text-black hover:bg-lime-200 active:bg-lime-400 " +
+    "bg-lime-100 text-black hover:bg-lime-100 active:bg-lime-200 " +
     "shadow-[0_0_24px_-4px_rgba(132,204,22,0.45)]",
   secondary:
     "bg-white/5 backdrop-blur-md text-white border border-white/10 " +
     "hover:bg-white/10 hover:border-white/20",
   ghost: "bg-transparent text-white hover:bg-white/5",
   outline:
-    "bg-transparent text-white border border-emerald-400/40 " +
-    "hover:bg-emerald-400/10 hover:border-emerald-400/60",
+    "bg-transparent text-white border border-emerald-200/40 " +
+    "hover:bg-emerald-200/10 hover:border-emerald-200/60",
 };
 
 const sizeClasses: Record<ButtonSize, string> = {
@@ -78,7 +78,7 @@ export const MotionButton = forwardRef<HTMLButtonElement, MotionButtonProps>(
               variant === "primary"
                 ? "bg-black/15"
                 : variant === "outline"
-                  ? "bg-emerald-400/20"
+                  ? "bg-emerald-200/20"
                   : "bg-white/10",
             )}
           >

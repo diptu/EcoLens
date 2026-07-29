@@ -1,200 +1,170 @@
-# PreProcessing
+# API:
 
-> Turns the 5 raw sources into one 30-min feature table. See
-> `HYBRID_ML_PIPELINE_AND_MODEL_TRAINING_SPEC.md` for the full design.
-> Prototyped in `services/data-pipeline/notebooks/data-pipeline.ipynb`
-> against the local DuckDB store; now implemented for real as dbt
-> models in `services/data-pipeline/src/ecolens/warehouse/dbt_project/`.
+## Data-Pipeline Service
+#	Endpoint	Method	Purpose
+1	/v1/data-sources	GET	List all 9 data sources (with health, cron, enabled)
+2	/v1/data-sources/{id}	GET / PATCH	Get one / edit cron, cadence, enable/disable
+3	/v1/data-sources/{id}/run	POST	Trigger an immediate fetch for this source
+4	/v1/data-sources/{id}/backfill	POST	Backfill a date range for this source
+5	/v1/data-sources/{id}/health	GET	Health metrics for one source (success rate, p95 latency)
+6	/v1/data-sources/{id}/history	GET	Fetch history (last 100 runs for this source)
+7	/v1/ingestion/pipelines	GET	List all 8 ingestion pipelines (with status)
+8	/v1/ingestion/runs	GET	List recent ingest runs (filter by pipeline, status)
+9	/v1/ingestion/runs/{id}	GET	Get one run (with duration, records, errors)
+10	/v1/ingestion/failed	GET	List failed jobs
+11	/v1/ingestion/retry-queue	GET	List items in retry queue
+12	/v1/ingestion/scheduler	GET	Scheduler status (next runs, last runs)
+13	/v1/ingestion/{id}/pause	POST	Pause a pipeline
+14	/v1/ingestion/{id}/resume	POST	Resume a paused pipeline
+15	/v1/data-quality/summary	GET	Overall DQ summary
+16	/v1/data-quality/issues	GET	List open DQ issues
+17	/v1/data-quality/outliers	GET	List statistical outliers (z-score > 3)
+18	/v1/data-quality/schema	GET	Schema drift report
+19	/v1/data-quality/recheck/{source}	POST	Re-run DQ tests for one source
+20	/v1/emissions/calculate	POST	Main GHG calculator (Scope 1+2+3)
+21	/v1/emissions/factors	GET	List 14 emission factors
+22	/v1/emissions/by-source	GET	Emissions aggregated by source
+23	/v1/emissions/by-scope	GET	Emissions aggregated by GHG scope
+24	/v1/emissions/intensity	GET	Current carbon intensity (gCO₂e/kWh)
+25	/v1/emissions/trend	GET	Emissions trend (time series)
+26	/v1/emissions/methodology	GET	Methodology content
+27	/v1/emissions/intensity-over-time	POST	Compute intensity for a custom period
+28	/v1/forecast/{region}	GET	Latest forecast for a region
+29	/v1/forecast/latest	GET	Latest forecast across all regions
+30	/v1/forecast/accuracy	GET	Forecast accuracy metrics
+31	/v1/analytics/executive-kpis	GET	6 KPIs for Executive Dashboard
+32	/v1/analytics/emissions-by-source	GET	Emissions by source
+33	/v1/analytics/emissions-trend	GET	Emissions trend (with P10/P90 band)
+34	/v1/analytics/emissions-trend/daily	GET	Daily emissions trend
+35	/v1/analytics/forecast-preview	GET	Next 4h forecast preview
+36	/v1/analytics/emissions-snapshot	GET	Last 24h emissions snapshot
+37	/v1/analytics/operations	GET	Operations Dashboard summary
+38	/v1/analytics/scope	GET	Energy Analytics → Scope breakdown
+39	/v1/analytics/industry	GET	Energy Analytics → industry comparison
+40	/v1/analytics/regional	GET	Energy Analytics → regional comparison
+41	/v1/analytics/intensity	GET	Energy Analytics → intensity over time
+42	/v1/analytics/cost-vs-emissions	GET	Energy Analytics → cost vs emissions
+43	/v1/analytics/opportunities	GET	Energy Analytics → reduction opportunities
+44	/v1/reports/fire-schedule/{schedule_id}	POST	Trigger a scheduled report
+45	/v1/reports/library	GET	List all reports
+46	/v1/models	GET	List all models in MLflow
+47	/v1/models/{id}	GET	Get one model (with all versions)
+48	/v1/models/{id}/promote	POST	Promote a model version to production
+49	/v1/models/{id}/archive	POST	Archive a model version
+50	/v1/models/{id}/metrics	GET	Metrics for a model version
+51	/v1/training/experiments	GET	List MLflow experiments
+52	/v1/training/runs	GET / POST	List / trigger a training run
+53	/v1/training/runs/{id}/logs	GET	Get logs for a training run
+54	/v1/operational-tasks	GET	List operational tasks
+55	/v1/operational-tasks/queue	GET	List pending tasks
+56	/v1/operational-tasks/history	GET	List completed/rejected tasks
+57	/v1/operational-tasks/{id}/approve	POST	Approve a task
+58	/v1/operational-tasks/{id}/reject	POST	Reject a task
+59	/v1/system-health/summary	GET	Overall system health
+60	/v1/system-health/services	GET	Per-service health
+61	/v1/system-health/disk	GET	Disk usage per volume
+62	/v1/system-health/uptime	GET	Uptime per service
+63	/v1/system-health/errors	GET	Recent errors (last 24h)
+64	/v1/system-health/restart/{service}	POST	Restart a service (admin only)
+65	/v1/anomalies	GET	List anomalies
+66	/v1/anomalies/{id}	GET	Get one anomaly (with explanation)
+67	/v1/anomalies/{id}/acknowledge	POST	Acknowledge an anomaly
+68	/v1/anomalies/{id}/resolve	POST	Resolve an anomaly
+69	/v1/anomalies/rules	GET / PATCH	List / update anomaly rules
+70	/v1/warehouse/tables	GET	List all warehouse tables
+71	/v1/warehouse/tables/{name}/schema	GET	Get schema for one table
+72	/v1/warehouse/query	POST	Read-only SQL query (row limit + safety)
+73	/v1/warehouse/runs	GET	List dbt run history
+74	/v1/warehouse/run	POST	Trigger a dbt run (async)
+75	/healthz + /readyz	GET	Liveness + readiness probes
+76	/metrics + /version	GET	Prometheus + service version
 
-- [x] **Build the 30-min master timeline, starting 2025-08-01.** Done —
-  `int_energy_filled_30min` builds a `dim_region` × `generate_series`
-  spine, one row per region per half-hour slot, forward-filled so
-  there are no gaps for `LAG()`/rolling windows to trip over.
-- [x] **Downsample AEMO's 5-min dispatch data onto the spine.** Done in
-  `int_energy_unified_30min` — averages NEM's 5-min per-region rows and
-  WEM's own 30-min rows onto the grid. Found and fixed a real bug while
-  verifying this: NEM's per-region rows only ever carry demand/price,
-  never the fuel-tech mix (that only lives on AEMO's separate
-  network-level `"NEM"` row) — left un-broadcast, every NEM region's
-  `renewable_generation_mw` was silently reading 0 instead of real
-  generation data. New `stg_aemo_nem_fueltech` model broadcasts that
-  network row onto all 5 sub-regions now.
-- [x] **Map BoM's 30-min observations straight across.** Already done
-  in `int_energy_with_weather` — no interpolation needed, BoM's already
-  on-grain.
-- [x] **Broadcast the daily public-holiday flag across all 48 slots
-  that day.** Already done, same model's holiday join.
-- [x] **Sync only the final, curated feature table to NeonDB.** Done —
-  the dbt models write straight into Postgres/NeonDB, so there's no
-  separate DuckDB-export step to build, and the `raw.*` syncer
-  (`ecolens.ingestion.storage.postgres.RawSyncer`, run via
-  `scripts/sync_raw.py --full`) turned out to already exist; it just
-  hadn't been run against this NeonDB instance yet. Full historical
-  backfill (~1.03M rows across all 5 sources) run for real, then
-  `dbt build` against it: `ml.ml_features_demand_v1` now holds 103,158
-  real rows (verified correct against real ingested data, not seeded
-  synthetic rows). Marts also now split across pre-provisioned
-  `staging`/`intermediate`/`analytics`/`ml` schemas
-  (`generate_schema_name.sql` + per-layer `+schema:` config) instead of
-  landing in `public`.
-- [ ] **Guardrail: never silently zero-fill missing values.** Still not
-  a general policy — `fact_demand_30min`'s `renewable_generation_mw`
-  still does `coalesce(hydro_mw, 0) + ...`; it's just no longer being
-  fed NULLs by the bug above. Worth a real look at whether that
-  `coalesce` should propagate NULL instead of masking it with 0.
-- [x] **Guardrail: fall back to OpenElectricity when AEMO is missing.**
-  Wired into `int_energy_unified_30min` — covers WEM (direct region
-  match) and NEM's broadcast fuel-tech mix (same network-level grain).
-  Known gap, not a bug: OpenElectricity never reports NEM below the
-  whole-network level, so there's still no fallback for a missing
-  NSW1/QLD1/VIC1/SA1/TAS1 *market* (demand/price) row specifically.
-
-
-# Feature selection
-
-> The 5-step statistical gauntlet every candidate feature has to survive
-> before it's allowed into the model — each step should be scriptable
-> and re-runnable, not a one-off notebook exercise. Steps 1–4
-> prototyped in `services/data-pipeline/notebooks/data-pipeline.ipynb`
-> against the real `feature_table_30min` (103k rows, 2025-08-01 →
-> present); see the last item below for the gap that's still open.
-
-- [x] **Step 1 — Structural hygiene.** Zero-variance and fully-null
-  checks run clean against real data — no `nuclear_mw`/`geothermal_mw`
-  to begin with (Australia's fuel mix never populated those columns,
-  so there was nothing to prune there), and `ingest_run_id`-style
-  metadata was already excluded upstream in PreProcessing rather than
-  something this step has to catch itself.
-- [x] **Step 2 — Mutual Information ranking against `demand_mw`.** Done
-  via `sklearn.feature_selection.mutual_info_regression`, dropping the
-  bottom 17.5% (midpoint of the spec's 15–20%) — on the real data
-  that's `wind_speed_kmh`, `cloud_cover_pct`, `rain_since_9am_mm`,
-  `is_public_holiday`, `wind_gust_kmh`.
-- [x] **Step 3 — PACF-driven lag selection.** Done via
-  `statsmodels.tsa.stattools.pacf` on NSW1's demand series — confirmed
-  all 4 of the spec's proposed lags (1, 2, 48, 336) are genuinely
-  statistically significant, out of 131 significant lags found up to
-  lag 340.
-- [x] **Step 4 — TreeSHAP + LightGBM multicollinearity pruning.** Fit a
-  LightGBM model, then for any feature pair correlated above 0.9, drop
-  whichever has the lower LightGBM importance. On real data this is
-  exactly what caught `total_generation_mw` (r=0.98 with
-  `coal_black_mw` — the "redundant macro aggregate" the spec calls out
-  by name), plus `apparent_temp_c` and `wind_gust_kmh`. Using
-  LightGBM's own gain importance in place of true TreeSHAP: the `shap`
-  package won't build on this machine (Python 3.12, no compatible
-  wheel/sdist) — swap it in if that gets resolved later.
-- [ ] **Step 5 — TFT variable-selection gating.** Blocked, not done —
-  there's no TFT anywhere in this repo yet to read VSN weights from
-  (see "Predictive model" below, "Stand up the TFT"). The notebook
-  cell documents this explicitly rather than silently skipping it.
-- [ ] **Extract Steps 1–4 out of the notebook into a reusable,
-  re-runnable module.** Right now they're still exactly the "one-off
-  notebook exercise" this section's own intro warns against — the
-  logic is proven correct against real data, it just isn't callable
-  from anywhere but that notebook yet.
-
-
-# Feature Engineering
-
-> Prototyped in `services/data-pipeline/notebooks/data-pipeline.ipynb`
-> against the real `selected_feature_table_30min` (103,614 rows) from
-> the Feature selection section above. Same open gap as that section:
-> proven correct, not yet extracted into a reusable module.
-
-- [x] **Generate demand lag features at 1, 2, 48, and 336 steps** (30
-  min, 1 hour, 1 day, and 1 week back, at the 30-min grain). Grouped by
-  `region` before shifting — verified explicitly (not just assumed)
-  that no region's first row picks up a lag value leaked from the
-  previous region in sort order.
-- [x] **Generate rolling-window stats: mean, median, max, min, std.**
-  Trailing 336-slot (7-day) window, computed on the lag-1-shifted
-  series so the current slot never leaks into its own rolling feature
-  — same convention the production `ml_features_demand_v1` dbt mart
-  already uses (`rows between 336 preceding and 1 preceding`). Spot-
-  checked one region/row's rolling mean against a manual `.mean()` over
-  the exact same window, not just "did it run without error."
-- [x] **Drop the raw, un-engineered columns once their derived
-  lag/rolling features exist** — don't feed the model both forms.
-  Concretely: `demand_mw` itself is excluded from the feature matrix
-  (`X_engineered`) and kept only as the separate target (`y_engineered`)
-  — keeping it in `X` alongside its own lags would be leakage, not
-  redundancy.
-- [ ] **Stale doc note found while reviewing `ml_features_demand_v1.sql`
-  for comparison (not fixed here, flagging it):** its `total_generation_mw`
-  comment still says "~53% null, AEMO NEM doesn't emit it" — that was
-  true before this session's PreProcessing fix (`int_energy_unified_30min`
-  now broadcasts AEMO NEM's own network-level fuel mix, including
-  `total_generation_mw`, onto all 5 sub-regions), so the comment is now
-  wrong about current behavior. Worth a real pass over that mart once
-  the `raw.*` syncer (see PreProcessing) lands and it can actually be
-  re-run against live data to confirm the new null rate.
+  ## IAM service
+#	Endpoint	Method	Purpose
+1	/v1/auth/signup	POST	Create account + send verify-email
+2	/v1/auth/verify-email	POST	Confirm email with token from email
+3	/v1/auth/login	POST	Email + password → JWT pair
+4	/v1/auth/refresh	POST	Rotate access token using refresh
+5	/v1/auth/logout	POST	Revoke current refresh token
+6	/v1/auth/logout-all	POST	Revoke all sessions for user
+7	/v1/auth/forgot-password	POST	Send reset email
+8	/v1/auth/reset-password	POST	Set new password with token
+9	/v1/auth/me	GET	Current user + attributes
+10	/v1/auth/mfa/{setup,verify,disable}	POST	TOTP enrollment / verify / disable (3 actions)
+11	/v1/users	GET / POST	List / create users
+12	/v1/users/{id}	GET / PATCH / DELETE	Manage one user
+13	/v1/users/{id}/attributes	GET / PATCH	Get / set custom attributes
+14	/v1/users/{id}/disable	POST	Disable a user (keep data, block login)
+15	/v1/users/{id}/enable	POST	Re-enable a disabled user
+16	/v1/orgs	GET / POST	List / create orgs (super-admin)
+17	/v1/orgs/{id}	GET / PATCH / DELETE	Manage one org
+18	/v1/orgs/{id}/members	GET / POST	List / add members
+19	/v1/orgs/{id}/members/{user_id}	DELETE	Remove a member
+20	/v1/attributes/schemas	GET / POST	List / create attribute schemas
+21	/v1/attributes/schemas/{name}	GET / PATCH / DELETE	Manage one schema
+22	/v1/policies	GET / POST	List / create policies
+23	/v1/policies/{id}	GET / PATCH / DELETE	Manage one policy
+24	/v1/policies/{id}/test	POST	Test a policy against sample request
+25	/v1/policies/import	POST	Bulk import policies from JSON / YAML
+26	/v1/authorize	POST	ABAC decision engine (core, called by every other service)
+27	/v1/audit	GET	List audit entries (with filters)
+28	/v1/audit/{id}	GET	Get one audit entry (full request/response snapshot)
+29	/v1/audit/export	GET	Export audit log as CSV / JSON
+30	/v1/sessions	GET / DELETE	List my active sessions / revoke all (except current)
+31	/v1/sessions/{id}	DELETE	Revoke a specific session
+32	/v1/tokens/introspect	POST	Check if a token is valid (RFC 7662)
+33	/v1/tokens/revoke	POST	Revoke a token by jti
+34	/healthz	GET	Liveness probe
+35	/readyz	GET	Readiness probe
+36	/metrics + /version	GET	Prometheus + service version
 
 
-# Predictive model
+## 1.7 Notification service — full endpoint list
 
-- [ ] **Stand up the LSTM.** Full backbone, full head, baseline LR
-  `1e-3`.
-- [ ] **Stand up the TFT.** VSN + attention + decoder backbone, with an
-  adaptive head.
-- [ ] **Stand up TimesFM.** Frozen transformer backbone, head-only
-  training.
-- [ ] **Wire the monthly retrain schedule.** Auto-trigger on the 1st of
-  every month at 00:00 AEST, plus a manual trigger through the admin
-  API for out-of-cycle runs.
-
-
-# Fine tuning
-
-- [ ] **LSTM monthly fine-tune.** LR `5e-5 → 1e-4`, 2–5 epochs, both
-  backbone and head trainable.
-- [ ] **TFT monthly fine-tune.** LR `1e-5`, 2–3 epochs, static
-  embeddings (`region`, `network_code`) frozen — only VSN/attention/
-  decoder adapt.
-- [ ] **TimesFM monthly fine-tune.** Very small LR, 1–2 epochs,
-  transformer backbone stays frozen, only the head trains.
-- [ ] **Feed each run from the new 30-min data buffer** accumulated
-  since the previous fine-tune, not the full historical set.
+| # | Endpoint | Method | Purpose |
+|---|---|---|---|
+| 1 | `/v1/notify/email` | POST | Send one email |
+| 2 | `/v1/notify/webhook` | POST | Send one webhook |
+| 3 | `/v1/notify/batch` | POST | Send up to 100 mixed notifications |
+| 4 | `/v1/notify` | GET | List with filters |
+| 5 | `/v1/notify/{id}` | GET | Get one with full delivery history |
+| 6 | `/v1/notify/{id}/retry` | POST | Re-queue failed/DLQ |
+| 7 | `/v1/notify/{id}` | DELETE | Cancel/delete |
+| 8 | `/v1/notify/dlq` | GET | List DLQ |
+| 9 | `/v1/notify/dlq/replay-all` | POST | Replay all DLQ |
+| 10 | `/v1/notify/stats` | GET | Delivery stats |
+| 11 | `/v1/notify/templates` | GET / POST | List / create |
+| 12 | `/v1/notify/templates/{id}` | GET / PATCH / DELETE | Manage one |
+| 13 | `/v1/notify/templates/{id}/preview` | POST | Render preview |
+| 14 | `/healthz` | GET | Liveness |
+| 15 | `/readyz` | GET | Readiness |
+| 16 | `/metrics` + `/version` | GET | Ops |
 
 
-# Validation
+## 2.9 Reporting service — full endpoint list 
 
-- [ ] **Hold out the last 3–5 days of data, untouched by fine-tuning,**
-  as the promotion gate for every candidate model.
-- [ ] **Score candidates on MAE + RMSE against `demand_mw`.**
-- [ ] **Enforce the promote/rollback guardrail:** a candidate only
-  replaces production if its holdout MAE is ≤ production's MAE;
-  otherwise it's rejected automatically and production keeps serving —
-  no manual rollback step needed.
-
-
-# Normalization Constraint Layer:
-
-- [ ] **Build the per-fuel rescaling layer for `source_breakdown_mw`.**
-  16 fuel types come out of the per-fuel LightGBM ensemble
-  independently; rescale them so they sum back to
-  `total_demand_mw.p50` instead of trusting each fuel model's raw
-  output in isolation.
-
-
-# Deterministic Carbon Accounting
-
-- [ ] **Compute carbon metrics deterministically — no ML in this
-  path.** `predicted_total_carbon_kgco2e`, emissions intensity, and
-  renewable proportion should all be derived straight from the fuel
-  mix using IPCC AR5 and AEMO NGES emission factors, not predicted by
-  a model.
-
-
-# API & Registry Serving
-
-- [ ] **Serve the four JSON blocks as one decoupled response:**
-  `total_demand_mw` (p10/p50/p90 from TFT/LSTM/TimesFM),
-  `source_breakdown_mw` (post-normalization, 16 fuel types),
-  `carbon_metrics` (deterministic), and `weather_context` (live BoM
-  temp/humidity/wind for explainability — current conditions only, not
-  a forecast).
-- [ ] **Register and promote every model through the MLflow registry**
-  (`/var/lib/ecolens/mlflow.db`), gated by the Validation section's
-  promote/rollback decision — nothing reaches serving without going
-  through that gate.
+| # | Endpoint | Method | Purpose |
+|---|---|---|---|
+| 1 | `/v1/reports/generate` | POST | Queue a new report |
+| 2 | `/v1/reports` | GET | List with filters + pagination |
+| 3 | `/v1/reports/{id}` | GET | Get metadata |
+| 4 | `/v1/reports/{id}` | DELETE | Delete + remove file |
+| 5 | `/v1/reports/{id}/duplicate` | POST | Copy a report |
+| 6 | `/v1/reports/{id}/preview` | POST | Generate low-res preview |
+| 7 | `/v1/reports/{id}/download-url` | POST | Get signed URL (5 min TTL) |
+| 8 | `/v1/reports/{id}/download` | GET | Stream file via X-Accel-Redirect |
+| 9 | `/v1/reports/schedules` | GET / POST | List / create |
+| 10 | `/v1/reports/schedules/{id}` | GET / PATCH / DELETE | Manage one |
+| 11 | `/v1/reports/schedules/{id}/run-now` | POST | Trigger immediate run |
+| 12 | `/v1/reports/schedules/{id}/history` | GET | Reports from this schedule |
+| 13 | `/v1/reports/templates` | GET / POST | List / create |
+| 14 | `/v1/reports/templates/{id}` | GET / PATCH / DELETE | Manage one |
+| 15 | `/v1/reports/templates/{id}/preview` | POST | Render preview |
+| 16 | `/v1/reports/jobs` | GET | List render jobs |
+| 17 | `/v1/reports/jobs/{id}` | GET | One job with progress log |
+| 18 | `/v1/reports/jobs/{id}/cancel` | POST | Cancel running job |
+| 19 | `/v1/reports/stats` | GET | Stats |
+| 20 | `/healthz` | GET | Liveness |
+| 21 | `/readyz` | GET | Readiness |
+| 22 | `/metrics` | GET | Prometheus |
+| 23 | `/version` | GET | Version info |

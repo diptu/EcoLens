@@ -23,8 +23,8 @@ from datetime import date
 
 import httpx
 
-from ecolens.ingestion.sources.aemo_wem import AEMOWEMFetcher
-from ecolens.ingestion.storage import duckdb_store
+from ecolens.ingestion.service.aemo_wem import AEMOWEMFetcher
+from ecolens.ingestion.db import duckdb_store
 from ecolens.shared.observability.logging import get_logger
 
 log = get_logger("trigger_ingest_aemo_wem")

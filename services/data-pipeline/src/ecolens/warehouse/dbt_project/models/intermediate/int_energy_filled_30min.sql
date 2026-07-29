@@ -30,6 +30,18 @@
 -- 'imputed'` so consumers can weight or inspect it without having to
 -- rediscover which rows are real.
 --
+-- Root TODO.md's "Anomaly Detection" section: `anomaly_score`/
+-- `anomaly_flags`/`anomaly_explanation` are deliberately plain
+-- pass-through here, *not* run through the LOCF fill below alongside
+-- `ml_fill_columns()` -- a gap-filled row has no real observation
+-- behind it, so forward-filling some earlier real row's anomaly
+-- explanation onto it would misrepresent a fabricated row as having a
+-- specific, real anomaly finding. A gap-filled row gets `anomaly_score
+-- = null` (via the same left join that already leaves every other
+-- non-fill column null for it), same "additive information about a
+-- real observation, never fabricated" principle `is_gap_filled` itself
+-- protects.
+--
 -- Materialized as a full table, not incremental: LOCF is a
 -- whole-series computation per region, so an incremental delete+insert
 -- over a lookback window would risk seeding the fill from a partial
@@ -73,7 +85,10 @@ joined as (
         {% endfor %}
         (h.date is not null) as is_holiday,
         coalesce(e.data_quality_status, 'imputed') as data_quality_status,
-        (e.region is null) as is_gap_filled
+        (e.region is null) as is_gap_filled,
+        e.anomaly_score,
+        e.anomaly_flags,
+        e.anomaly_explanation
     from spine s
     left join energy_final e
         on e.region = s.region
@@ -117,6 +132,9 @@ filled as (
         is_holiday,
         is_gap_filled,
         data_quality_status,
+        anomaly_score,
+        anomaly_flags,
+        anomaly_explanation,
         {% for col in ml_fill_columns() %}
         coalesce(
             first_value({{ col }}) over (

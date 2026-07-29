@@ -92,14 +92,14 @@ export function IndustryGrid({
                   }}
                 />
                 <div className="absolute inset-0 flex flex-col justify-end p-5">
-                  <div className="mb-3 grid h-9 w-9 place-items-center rounded-md bg-emerald-400/15 text-emerald-300">
+                  <div className="mb-3 grid h-9 w-9 place-items-center rounded-md bg-emerald-200/15 text-emerald-100">
                     <LeafIcon />
                   </div>
                   <h3 className="text-base font-semibold text-white">{item.title}</h3>
                   <p className="mt-1 text-xs leading-relaxed text-white/70">{item.body}</p>
                   <a
                     href={item.href}
-                    className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-lime-300 transition-colors hover:text-lime-200"
+                    className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-lime-100 transition-colors hover:text-lime-100"
                   >
                     Learn more <ArrowRight />
                   </a>
@@ -112,10 +112,10 @@ export function IndustryGrid({
         {bottomCta && (
           <MotionItem
             variant="fadeUp"
-            className="mt-8 flex flex-col items-center justify-between gap-4 rounded-2xl border border-emerald-400/20 bg-emerald-400/5 p-6 md:flex-row"
+            className="mt-8 flex flex-col items-center justify-between gap-4 rounded-2xl border border-emerald-200/20 bg-emerald-200/5 p-6 md:flex-row"
           >
             <div className="flex items-center gap-3">
-              <span className="grid h-9 w-9 place-items-center rounded-md bg-emerald-400/15 text-emerald-300">
+              <span className="grid h-9 w-9 place-items-center rounded-md bg-emerald-200/15 text-emerald-100">
                 <LeafIcon />
               </span>
               <div>
@@ -125,7 +125,7 @@ export function IndustryGrid({
             </div>
             <a
               href={bottomCta.href}
-              className="inline-flex items-center gap-2 rounded-full border border-emerald-400/40 bg-emerald-400/5 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-emerald-400/10"
+              className="inline-flex items-center gap-2 rounded-full border border-emerald-200/40 bg-emerald-200/5 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-emerald-200/10"
             >
               {bottomCta.label} <ArrowRight />
             </a>
@@ -140,9 +140,9 @@ function CenterBadge({ children }: { children: React.ReactNode }) {
   return (
     <m.span
       variants={fadeUp}
-      className="inline-flex items-center gap-2 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-3 py-1 text-xs font-medium tracking-wider text-emerald-300"
+      className="inline-flex items-center gap-2 rounded-full border border-emerald-200/30 bg-emerald-200/10 px-3 py-1 text-xs font-medium tracking-wider text-emerald-100"
     >
-      <span className="grid h-4 w-4 place-items-center rounded-full bg-emerald-400/20">
+      <span className="grid h-4 w-4 place-items-center rounded-full bg-emerald-200/20">
         <svg viewBox="0 0 8 8" fill="currentColor" className="h-2.5 w-2.5">
           <path d="M4 0L4.6 3.4L8 4L4.6 4.6L4 8L3.4 4.6L0 4L3.4 3.4Z" />
         </svg>

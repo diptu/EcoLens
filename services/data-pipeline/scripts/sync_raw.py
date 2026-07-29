@@ -16,9 +16,9 @@ Run directly:
 import argparse
 import asyncio
 
-from ecolens.ingestion.storage.postgres import RawSyncer, default_lookback
+from ecolens.ingestion.repository.raw_sync import RawSyncer, default_lookback
 from ecolens.shared.observability.logging import get_logger
-from ecolens.warehouse.runner.settings import get_warehouse_runner_settings
+from ecolens.warehouse.core.runner_settings import get_warehouse_runner_settings
 
 log = get_logger("sync_raw")
 

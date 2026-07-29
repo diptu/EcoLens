@@ -1,11 +1,11 @@
-"""Tests for ecolens.forecasting.mlops.drift (ECO-116)."""
+"""Tests for ecolens.forecasting.service.mlops.drift (ECO-116)."""
 
 from __future__ import annotations
 
 import numpy as np
 
 from ecolens.config import Settings
-from ecolens.forecasting.mlops.drift import (
+from ecolens.forecasting.service.mlops.drift import (
     feature_drift,
     population_stability_index,
     residual_drift,

@@ -1,11 +1,11 @@
-"""Unit tests for ecolens.ingestion.sources.aemo_wem.transformers."""
+"""Unit tests for ecolens.ingestion.service.aemo_wem.transformers."""
 
 from __future__ import annotations
 
 import pandas as pd
 import pytest
 
-from ecolens.ingestion.sources.aemo_wem.transformers import (
+from ecolens.ingestion.service.aemo_wem.transformers import (
     aggregate_facilities_to_fueltechs,
     apply_data_quality_fixes,
     apply_fuel_map,

@@ -28,9 +28,9 @@ from datetime import date
 import httpx
 import pandera.errors
 
-from ecolens.ingestion.sources.holidays import HolidayFetcher
-from ecolens.ingestion.storage import duckdb_store
-from ecolens.ingestion.validators.holidays import validate as validate_docs
+from ecolens.ingestion.service.holidays import HolidayFetcher
+from ecolens.ingestion.db import duckdb_store
+from ecolens.ingestion.schema.validators.holidays import validate as validate_docs
 from ecolens.shared.observability.logging import get_logger
 
 log = get_logger("trigger_ingest_holidays")

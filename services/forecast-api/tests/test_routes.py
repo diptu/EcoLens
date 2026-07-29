@@ -17,13 +17,16 @@ from contextlib import contextmanager
 from datetime import datetime
 
 import numpy as np
+import pandas as pd
+import pytest
 from fastapi.testclient import TestClient
-
 from conftest import FakeCache, FakeConnectionPool
 from ecolens_forecast_api.app import create_app
 from ecolens_forecast_api.forecasting.features import FEATURE_COLUMNS, FeatureScaler
+from ecolens_forecast_api.forecasting.fuel_loader import LoadedFuelEnsemble
 from ecolens_forecast_api.forecasting.loader import LoadedModel
 from ecolens_forecast_api.forecasting.model import DemandLSTM
+from ecolens_forecast_api.forecasting.normalization import FUEL_COLUMNS
 from ecolens_forecast_api.settings import ForecastApiSettings
 
 BASE_TS = "2026-07-21T12:00:00+00:00"
@@ -65,11 +68,32 @@ def _fake_loaded_model(version: str = "1") -> LoadedModel:
     )
 
 
+class _FakeFuelPyfuncModel:
+    """Duck-typed stand-in for `mlflow.pyfunc.PyFuncModel` -- returns a
+    fixed, deterministic per-fuel mix regardless of input, same spirit as
+    `_fake_loaded_model`'s untrained-but-shape-correct `DemandLSTM` above.
+    """
+
+    def predict(self, X: pd.DataFrame) -> pd.DataFrame:
+        return pd.DataFrame(
+            {fuel: [float(i + 1)] for i, fuel in enumerate(FUEL_COLUMNS)}
+        )
+
+
+def _fake_loaded_fuel_ensemble(version: str = "1") -> LoadedFuelEnsemble:
+    return LoadedFuelEnsemble(
+        model=_FakeFuelPyfuncModel(),
+        version=version,
+        run_id="fuel-r1",  # type: ignore[arg-type]
+    )
+
+
 @contextmanager
 def client_with_pool(
     fake_pool: FakeConnectionPool | None = None,
     fake_cache: FakeCache | None = None,
     loaded_model: LoadedModel | None = None,
+    loaded_fuel_ensemble: LoadedFuelEnsemble | None = None,
     **settings_kwargs,
 ):
     # Route tests fake the model/pool via `loaded_model`/`fake_pool` below
@@ -98,6 +122,8 @@ def client_with_pool(
             app.state.cache = fake_cache
         if loaded_model is not None:
             app.state.reloader.state.current = loaded_model
+        if loaded_fuel_ensemble is not None:
+            app.state.fuel_ensemble = loaded_fuel_ensemble
         yield c
 
 
@@ -248,3 +274,198 @@ class TestApiKey:
         with client_with_pool(pool, FakeCache(), api_key="secret") as client:
             r = client.get("/v1/forecast/NSW1", params={"api_key": "secret"})
         assert r.status_code == 200
+
+
+class TestForecastNational:
+    """root TODO.md's Dashboard/Executive Tier 1: a portfolio/national
+    aggregate over `/v1/forecast/{region}`'s own per-region logic --
+    `FakeConnectionPool` returns the same row for every query regardless
+    of region, so every one of the 6 regions produces an identical
+    per-region forecast here; summing across them is still a real test
+    of the aggregation math (6x a known single-region value), just not
+    of cross-region variation.
+    """
+
+    def test_route_ordering_does_not_shadow_national_as_a_region(self):
+        # Regression guard: /v1/forecast/{region} is declared after
+        # /v1/forecast/national in routes.py specifically so this
+        # doesn't 400 as an invalid region named "national".
+        pool = FakeConnectionPool(fetchrow_result=_feature_row())
+        with client_with_pool(pool, FakeCache()) as client:
+            r = client.get("/v1/forecast/national")
+        assert r.status_code == 200
+        assert r.json()["region"] == "NATIONAL"
+
+    def test_sums_p50_across_all_regions(self):
+        pool = FakeConnectionPool(fetchrow_result=_feature_row())
+        with client_with_pool(pool, FakeCache()) as client:
+            r = client.get("/v1/forecast/national")
+        body = r.json()
+        num_regions = 6  # NSW1/QLD1/VIC1/SA1/TAS1/WEM, settings.valid_regions default
+        assert body["steps"][-1]["p50"] == 5000.0 * num_regions
+
+    def test_weather_context_is_none(self):
+        pool = FakeConnectionPool(fetchrow_result=_feature_row())
+        with client_with_pool(pool, FakeCache()) as client:
+            r = client.get("/v1/forecast/national")
+        assert r.json()["weather_context"] is None
+
+    def test_horizon_query_param_applies(self):
+        pool = FakeConnectionPool(fetchrow_result=_feature_row())
+        with client_with_pool(pool, FakeCache()) as client:
+            r = client.get("/v1/forecast/national", params={"horizon": 5})
+        assert len(r.json()["steps"]) == 5
+
+    def test_404_when_no_region_has_data(self):
+        pool = FakeConnectionPool(fetchrow_result=None)
+        with client_with_pool(pool, FakeCache()) as client:
+            r = client.get("/v1/forecast/national")
+        assert r.status_code == 404
+
+    def test_source_breakdown_sums_across_regions_when_fuel_ensemble_loaded(self):
+        # fetch_result feeds the baseline path's supplemental weather/
+        # full-feature-row fetch (see routes.py's _forecast_for_region) --
+        # without it, full_feature_row stays None and the fuel ensemble
+        # never gets a chance to run, same as
+        # TestSourceBreakdownAndCarbonMetrics's own baseline-path test.
+        pool = FakeConnectionPool(
+            fetchrow_result=_feature_row(), fetch_result=_recent_rows(1)
+        )
+        fuel_ensemble = _fake_loaded_fuel_ensemble()
+        with client_with_pool(
+            pool, FakeCache(), loaded_fuel_ensemble=fuel_ensemble
+        ) as client:
+            r = client.get("/v1/forecast/national")
+        steps = r.json()["steps"]
+        assert all(step["source_breakdown_mw"] is not None for step in steps)
+        assert all(step["carbon_metrics"] is not None for step in steps)
+        # Rescaled to sum to that step's own (already-national) p50.
+        for step in steps:
+            total = sum(step["source_breakdown_mw"].values())
+            assert total == pytest.approx(step["p50"], rel=1e-3)
+
+    def test_cache_hit_skips_the_pool(self):
+        cached_response = {
+            "region": "NATIONAL",
+            "generated_at": BASE_TS,
+            "as_of": BASE_TS,
+            "model": "seasonal_naive_v1",
+            "interval_minutes": 30,
+            "steps": [],
+            "weather_context": None,
+        }
+        cache = FakeCache(enabled=True)
+        cache._store["forecast:national:48"] = cached_response
+        with client_with_pool(None, cache) as client:
+            r = client.get("/v1/forecast/national")
+        assert r.status_code == 200
+        assert r.json()["steps"] == []
+
+
+class TestWeatherContext:
+    """root TODO.md's "API & Registry Serving": populated whenever a
+    feature row was read at all, independent of which forecaster/fuel
+    ensemble is loaded.
+    """
+
+    def test_populated_on_the_lstm_path(self):
+        rows = _recent_rows(48)
+        rows[-1]["temp_c"] = 22.5
+        rows[-1]["humidity_pct"] = 60.0
+        rows[-1]["wind_speed_kmh"] = 15.0
+        pool = FakeConnectionPool(fetch_result=rows)
+        loaded = _fake_loaded_model(version="7")
+        with client_with_pool(pool, FakeCache(), loaded_model=loaded) as client:
+            r = client.get("/v1/forecast/NSW1")
+        assert r.json()["weather_context"] == {
+            "temp_c": 22.5,
+            "humidity_pct": 60.0,
+            "wind_speed_kmh": 15.0,
+        }
+
+    def test_populated_on_the_baseline_path_via_supplemental_fetch(self):
+        weather_row = _recent_rows(1)
+        weather_row[0]["temp_c"] = 18.0
+        weather_row[0]["humidity_pct"] = 55.0
+        weather_row[0]["wind_speed_kmh"] = 10.0
+        pool = FakeConnectionPool(
+            fetchrow_result=_feature_row(), fetch_result=weather_row
+        )
+        with client_with_pool(pool, FakeCache()) as client:
+            r = client.get("/v1/forecast/NSW1")
+        assert r.json()["model"] == "seasonal_naive_v1"
+        assert r.json()["weather_context"] == {
+            "temp_c": 18.0,
+            "humidity_pct": 55.0,
+            "wind_speed_kmh": 10.0,
+        }
+
+    def test_none_when_no_feature_row_available(self):
+        # Baseline path with an empty supplemental fetch (fetch_result
+        # defaults to []) -- weather_context has nothing to read.
+        pool = FakeConnectionPool(fetchrow_result=_feature_row())
+        with client_with_pool(pool, FakeCache()) as client:
+            r = client.get("/v1/forecast/NSW1")
+        assert r.json()["weather_context"] is None
+
+
+class TestSourceBreakdownAndCarbonMetrics:
+    """root TODO.md's "API & Registry Serving": source_breakdown_mw/
+    carbon_metrics per step, gracefully None when the fuel ensemble isn't
+    loaded -- same degradation contract as total_demand_mw's own
+    LSTM/baseline split.
+    """
+
+    def test_none_when_fuel_ensemble_not_loaded(self):
+        pool = FakeConnectionPool(fetchrow_result=_feature_row())
+        with client_with_pool(pool, FakeCache()) as client:
+            r = client.get("/v1/forecast/NSW1")
+        steps = r.json()["steps"]
+        assert all(step["source_breakdown_mw"] is None for step in steps)
+        assert all(step["carbon_metrics"] is None for step in steps)
+
+    def test_populated_when_fuel_ensemble_loaded_on_lstm_path(self):
+        rows = _recent_rows(48)
+        pool = FakeConnectionPool(fetch_result=rows)
+        loaded = _fake_loaded_model(version="7")
+        fuel_ensemble = _fake_loaded_fuel_ensemble()
+        with client_with_pool(
+            pool, FakeCache(), loaded_model=loaded, loaded_fuel_ensemble=fuel_ensemble
+        ) as client:
+            r = client.get("/v1/forecast/NSW1")
+        steps = r.json()["steps"]
+        assert all(step["source_breakdown_mw"] is not None for step in steps)
+        assert all(step["carbon_metrics"] is not None for step in steps)
+        # Rescaled to sum to that step's own p50 demand.
+        for step in steps:
+            total = sum(step["source_breakdown_mw"].values())
+            assert total == pytest.approx(step["p50"], rel=1e-3)
+
+    def test_populated_when_fuel_ensemble_loaded_on_baseline_path(self):
+        weather_row = _recent_rows(1)
+        pool = FakeConnectionPool(
+            fetchrow_result=_feature_row(), fetch_result=weather_row
+        )
+        fuel_ensemble = _fake_loaded_fuel_ensemble()
+        with client_with_pool(
+            pool, FakeCache(), loaded_fuel_ensemble=fuel_ensemble
+        ) as client:
+            r = client.get("/v1/forecast/NSW1")
+        assert r.json()["model"] == "seasonal_naive_v1"
+        steps = r.json()["steps"]
+        assert all(step["source_breakdown_mw"] is not None for step in steps)
+
+    def test_carbon_metrics_shape(self):
+        pool = FakeConnectionPool(fetch_result=_recent_rows(48))
+        loaded = _fake_loaded_model(version="7")
+        fuel_ensemble = _fake_loaded_fuel_ensemble()
+        with client_with_pool(
+            pool, FakeCache(), loaded_model=loaded, loaded_fuel_ensemble=fuel_ensemble
+        ) as client:
+            r = client.get("/v1/forecast/NSW1")
+        carbon = r.json()["steps"][0]["carbon_metrics"]
+        assert set(carbon) == {
+            "predicted_total_carbon_kgco2e",
+            "emissions_intensity_kgco2e_per_mwh",
+            "renewable_proportion",
+        }

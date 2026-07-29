@@ -48,7 +48,7 @@ function DashboardMockup() {
       <div className="overflow-hidden rounded-2xl border border-white/10 bg-[#0a1410] shadow-[0_30px_80px_-30px_rgba(132,204,22,0.45)]">
         {/* Top bar */}
         <div className="flex items-center gap-2 border-b border-white/5 px-4 py-3">
-          <span className="grid h-6 w-6 place-items-center rounded-md bg-emerald-400/15 text-emerald-300 text-[10px] font-bold">E</span>
+          <span className="grid h-6 w-6 place-items-center rounded-md bg-emerald-200/15 text-emerald-100 text-[10px] font-bold">E</span>
           <span className="text-xs font-semibold text-white">EcoLens</span>
           <span className="text-xs text-white/50">· Overview</span>
           <span className="ml-auto rounded-md border border-white/10 bg-white/5 px-2 py-0.5 text-[10px] text-white/60">This Month ▾</span>
@@ -69,10 +69,10 @@ function DashboardMockup() {
               <div
                 key={item.label}
                 className={`flex items-center gap-1.5 rounded-md px-2 py-1.5 ${
-                  item.active ? "bg-emerald-400/10 text-emerald-300" : "text-white/60"
+                  item.active ? "bg-emerald-200/10 text-emerald-100" : "text-white/60"
                 }`}
               >
-                <span className={`h-1.5 w-1.5 rounded-full ${item.active ? "bg-emerald-400" : "bg-white/30"}`} />
+                <span className={`h-1.5 w-1.5 rounded-full ${item.active ? "bg-emerald-200" : "bg-white/30"}`} />
                 <span>{item.label}</span>
               </div>
             ))}
@@ -82,10 +82,10 @@ function DashboardMockup() {
             {/* KPI row */}
             <div className="grid grid-cols-4 gap-2">
               {[
-                { label: "Total Emissions", value: "2,453", sub: "tCO₂e", change: "↓ 18% vs last month", color: "text-emerald-400" },
-                { label: "Emission Intensity", value: "0.42", sub: "tCO₂e / $ revenue", change: "↓ 12% vs last month", color: "text-emerald-400" },
-                { label: "Total Reduction", value: "28%", sub: "vs baseline", change: "↑ 28% vs baseline", color: "text-emerald-400" },
-                { label: "Goals Achieved", value: "3/7", sub: "On Track", change: "", color: "text-lime-300" },
+                { label: "Total Emissions", value: "2,453", sub: "tCO₂e", change: "↓ 18% vs last month", color: "text-emerald-200" },
+                { label: "Emission Intensity", value: "0.42", sub: "tCO₂e / $ revenue", change: "↓ 12% vs last month", color: "text-emerald-200" },
+                { label: "Total Reduction", value: "28%", sub: "vs baseline", change: "↑ 28% vs baseline", color: "text-emerald-200" },
+                { label: "Goals Achieved", value: "3/7", sub: "On Track", change: "", color: "text-lime-100" },
               ].map((kpi) => (
                 <div key={kpi.label} className="rounded-md border border-white/5 bg-white/[0.02] p-2">
                   <p className="text-[8px] uppercase tracking-wider text-white/40">{kpi.label}</p>
@@ -101,7 +101,7 @@ function DashboardMockup() {
                 <p className="text-[8px] uppercase tracking-wider text-white/40">Emissions Over Time</p>
                 <div className="mt-1 flex items-center gap-2 text-[8px] text-white/60">
                   <span className="flex items-center gap-1">
-                    <span className="h-0.5 w-2 bg-lime-300" /> Current Year
+                    <span className="h-0.5 w-2 bg-lime-100" /> Current Year
                   </span>
                   <span className="flex items-center gap-1">
                     <span className="h-0.5 w-2 border-b border-dashed border-white/40" /> Baseline
@@ -146,8 +146,8 @@ function DashboardMockup() {
                   </div>
                   <div className="space-y-0.5 text-[9px]">
                     {[
-                      { color: "bg-lime-300", label: "Electricity", pct: "40%" },
-                      { color: "bg-emerald-400", label: "Transportation", pct: "25%" },
+                      { color: "bg-lime-100", label: "Electricity", pct: "40%" },
+                      { color: "bg-emerald-200", label: "Transportation", pct: "25%" },
                       { color: "bg-sky-400", label: "Stationary Fuel", pct: "15%" },
                       { color: "bg-purple-400", label: "Waste", pct: "10%" },
                       { color: "bg-white/40", label: "Others", pct: "10%" },
@@ -221,7 +221,7 @@ export default function ProductPage() {
           <StaggerContainer className="grid grid-cols-1 gap-5 sm:grid-cols-3" staggerDelay={0.08}>
             {PRODUCT_PILL_FEATURES.map((f) => (
               <MotionItem key={f.title} variant="fadeUp" className="flex items-start gap-3">
-                <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full border border-emerald-400/20 bg-emerald-400/5 text-emerald-300">
+                <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full border border-emerald-200/20 bg-emerald-200/5 text-emerald-100">
                   {ICON_MAP[f.icon]}
                 </span>
                 <div>
@@ -240,7 +240,7 @@ export default function ProductPage() {
         badge="Powerful Features"
         heading={
           <>
-            Everything you need to drive <span className="text-lime-300">real impact</span>
+            Everything you need to drive <span className="text-lime-100">real impact</span>
           </>
         }
         items={FEATURES}
@@ -250,7 +250,7 @@ export default function ProductPage() {
         badge="How it Works"
         heading={
           <>
-            From Data to Impact in <span className="text-lime-300">4 Simple Steps</span>
+            From Data to Impact in <span className="text-lime-100">4 Simple Steps</span>
           </>
         }
         steps={STEPS}
@@ -259,7 +259,7 @@ export default function ProductPage() {
       <CtaBanner
         badge="Ready to Build a Better Tomorrow"
         heading="Ready to make"
-        highlight={<span className="block bg-gradient-to-r from-lime-300 to-emerald-300 bg-clip-text text-transparent">sustainability your competitive advantage?</span>}
+        highlight={<span className="block bg-gradient-to-r from-lime-100 to-emerald-100 bg-clip-text text-transparent">sustainability your competitive advantage?</span>}
         body="Join thousands of organizations using EcoLens to build a cleaner, greener tomorrow."
         primary={{ label: "Get Started Free" }}
         secondary={{ label: "Book a Demo" }}

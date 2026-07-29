@@ -1,4 +1,4 @@
-"""Tests for ecolens.forecasting.training.search_space (ECO-113).
+"""Tests for ecolens.forecasting.service.training.search_space (ECO-113).
 
 `suggest_settings`/`apply_best_params` are exercised against a real
 `optuna.Study` (one trial), not a hand-rolled fake `Trial` -- the
@@ -14,7 +14,7 @@ import optuna
 import pytest
 
 from ecolens.config import Settings
-from ecolens.forecasting.training.search_space import (
+from ecolens.forecasting.service.training.search_space import (
     DEFAULT_SEARCH_SPACE,
     ParamSpec,
     SearchSpace,

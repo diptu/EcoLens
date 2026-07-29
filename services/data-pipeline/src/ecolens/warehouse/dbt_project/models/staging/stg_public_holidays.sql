@@ -19,7 +19,10 @@ renamed as (
         observed_date::date as observed_date,
         source,
         ingest_run_id,
-        fetched_at::timestamptz as fetched_at
+        fetched_at::timestamptz as fetched_at,
+        anomaly_score::double precision as anomaly_score,
+        anomaly_flags,
+        anomaly_explanation
     from source
     where date is not null
       and region is not null

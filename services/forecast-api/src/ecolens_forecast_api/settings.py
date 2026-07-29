@@ -62,6 +62,15 @@ class ForecastApiSettings(BaseSettings):
         default=None,
         description="If set, require a matching X-API-Key/api_key on every request.",
     )
+    # services/dashboard's dev origin, so its browser-side fetches (the
+    # live forecast card, admin/forecast) aren't CORS-blocked -- same
+    # pattern as data-pipeline's Settings.api_cors_origins. :8000 is
+    # `pnpm serve`'s static-export preview, which is what the
+    # dashboard's own e2e suite (playwright.config.ts's default
+    # baseURL) actually targets.
+    cors_origins: list[str] = Field(
+        default_factory=lambda: ["http://localhost:3000", "http://localhost:8000"]
+    )
     # Gunicorn worker count for production (see gunicorn_conf.py, ECO-F01).
     # None -> gunicorn_conf.py derives it from CPU count ((2 * cores) + 1,
     # capped) instead of a fixed number, since that scales sanely across
@@ -102,6 +111,14 @@ class ForecastApiSettings(BaseSettings):
     # this alias to a new version in the registry is the hot-swap signal
     # this service's reload loop (ECO-F04) polls for.
     model_alias: str = "production"
+    # Root TODO.md's "API & Registry Serving" section: the per-fuel
+    # LightGBM ensemble's own registered-model name, independent of the
+    # LSTM's -- must match data-pipeline
+    # Settings.mlflow_registered_model_name_fuel_ensemble. Loaded once at
+    # startup (forecasting/fuel_loader.py), not on the LSTM's poll-loop
+    # cadence -- see that module's docstring for why a v1 without
+    # hot-reload is a deliberate, documented scope cut here.
+    mlflow_registered_model_name_fuel_ensemble: str = "ecolens_fuel_ensemble"
     model_reload_interval_seconds: int = Field(
         default=60,
         ge=5,

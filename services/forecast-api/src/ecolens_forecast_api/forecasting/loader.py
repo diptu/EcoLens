@@ -11,7 +11,7 @@ Uses `mlflow.pytorch.load_state_dict`/`mlflow.artifacts.load_dict`, not
 `mlflow.pytorch.load_model` -- the latter would try to unpickle a
 `DemandLSTM` instance, which requires the *exact* class importable at
 the *exact* module path it was pickled from (`data-pipeline`'s
-`ecolens.forecasting.models.lstm`). This service has its own structural
+`ecolens.forecasting.model.lstm`). This service has its own structural
 duplicate (`forecasting/model.py`) instead, precisely so it doesn't
 need to depend on `data-pipeline`'s package -- see that file's
 docstring.

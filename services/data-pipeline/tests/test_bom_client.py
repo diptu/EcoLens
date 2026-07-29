@@ -1,4 +1,4 @@
-"""Tests for ecolens.ingestion.sources.bom.client.BomClient."""
+"""Tests for ecolens.ingestion.service.bom.client.BomClient."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import httpx
 import pytest
 import respx
 
-from ecolens.ingestion.sources.bom.client import BomClient
+from ecolens.ingestion.service.bom.client import BomClient
 
 
 def _v1_payload(

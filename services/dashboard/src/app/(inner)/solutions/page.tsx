@@ -24,7 +24,7 @@ import { CtaBanner } from "@/components/sections/cta-banner";
 import { IndustryGrid } from "@/components/sections/industry-grid";
 import { StatGrid } from "@/components/sections/stat-grid";
 import { StaggerContainer, MotionItem } from "@/components/motion/motion-section";
-import { fadeUp, staggerContainer } from "@/lib/animations";
+import { fadeUp, cardHover, staggerContainer } from "@/lib/animations";
 import { m } from "framer-motion";
 
 /* ─────────────────  Globe with industry icons (CSS-only)  ───────────────── */
@@ -39,8 +39,8 @@ function GlobeWithIndustryIcons() {
         }}
       />
       <div className="relative h-full w-full">
-        <div className="absolute left-1/2 top-1/2 h-32 w-32 -translate-x-1/2 -translate-y-1/2 rounded-full bg-gradient-to-br from-emerald-400/30 via-sky-400/20 to-lime-300/30">
-          <div className="absolute inset-3 rounded-full border border-emerald-400/30" />
+        <div className="absolute left-1/2 top-1/2 h-32 w-32 -translate-x-1/2 -translate-y-1/2 rounded-full bg-gradient-to-br from-emerald-200/30 via-sky-400/20 to-lime-100/30">
+          <div className="absolute inset-3 rounded-full border border-emerald-200/30" />
           <div className="absolute inset-6 rounded-full border border-sky-400/20" />
           <div className="grid h-full w-full place-items-center">
             <span className="text-3xl font-bold text-white/80">E</span>
@@ -59,7 +59,7 @@ function GlobeWithIndustryIcons() {
               style={{ top: item.top, left: item.left, transform: `translate(${item.translate})` }}
             >
               <div className="flex flex-col items-center gap-1">
-                <div className="grid h-14 w-14 place-items-center rounded-full border border-emerald-400/30 bg-emerald-400/10 text-emerald-300 shadow-[0_0_30px_rgba(132,204,22,0.4)]">
+                <div className="grid h-14 w-14 place-items-center rounded-full border border-emerald-200/30 bg-emerald-200/10 text-emerald-100 shadow-[0_0_30px_rgba(132,204,22,0.4)]">
                   {item.icon}
                 </div>
                 <span className="rounded-md bg-black/60 px-2 py-0.5 text-[10px] font-medium text-white backdrop-blur">
@@ -116,9 +116,9 @@ export default function SolutionsPage() {
             <MotionItem variant="fadeIn" className="mt-6">
               <m.span
                 variants={fadeUp}
-                className="inline-flex items-center gap-2 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-3 py-1 text-xs font-medium tracking-wider text-emerald-300"
+                className="inline-flex items-center gap-2 rounded-full border border-emerald-200/30 bg-emerald-200/10 px-3 py-1 text-xs font-medium tracking-wider text-emerald-100"
               >
-                <span className="grid h-4 w-4 place-items-center rounded-full bg-emerald-400/20">
+                <span className="grid h-4 w-4 place-items-center rounded-full bg-emerald-200/20">
                   <svg viewBox="0 0 8 8" fill="currentColor" className="h-2.5 w-2.5">
                     <path d="M4 0L4.6 3.4L8 4L4.6 4.6L4 8L3.4 4.6L0 4L3.4 3.4Z" />
                   </svg>
@@ -128,7 +128,7 @@ export default function SolutionsPage() {
             </MotionItem>
             <h1 className="mt-4 text-4xl font-extrabold leading-[1.1] tracking-tight text-white md:text-5xl lg:text-6xl">
               Smarter Solutions
-              <span className="ml-2 block bg-gradient-to-r from-lime-300 via-emerald-300 to-lime-300 bg-clip-text text-transparent">
+              <span className="ml-2 block bg-gradient-to-r from-lime-100 via-emerald-100 to-lime-100 bg-clip-text text-transparent">
                 for a Sustainable Future
               </span>
             </h1>
@@ -140,7 +140,7 @@ export default function SolutionsPage() {
             <StaggerContainer className="mt-8 grid grid-cols-1 gap-5 sm:grid-cols-3" staggerDelay={0.08}>
               {PILL_FEATURES.map((f) => (
                 <MotionItem key={f.title} variant="fadeUp" className="flex items-start gap-3">
-                  <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full border border-emerald-400/20 bg-emerald-400/5 text-emerald-300">
+                  <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full border border-emerald-200/20 bg-emerald-200/5 text-emerald-100">
                     <CheckIcon />
                   </span>
                   <div>
@@ -163,9 +163,9 @@ export default function SolutionsPage() {
           <div className="mb-8 text-center">
             <m.span
               variants={fadeUp}
-              className="inline-flex items-center gap-2 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-3 py-1 text-xs font-medium tracking-wider text-emerald-300"
+              className="inline-flex items-center gap-2 rounded-full border border-emerald-200/30 bg-emerald-200/10 px-3 py-1 text-xs font-medium tracking-wider text-emerald-100"
             >
-              <span className="grid h-4 w-4 place-items-center rounded-full bg-emerald-400/20">
+              <span className="grid h-4 w-4 place-items-center rounded-full bg-emerald-200/20">
                 <svg viewBox="0 0 8 8" fill="currentColor" className="h-2.5 w-2.5">
                   <path d="M4 0L4.6 3.4L8 4L4.6 4.6L4 8L3.4 4.6L0 4L3.4 3.4Z" />
                 </svg>
@@ -173,7 +173,7 @@ export default function SolutionsPage() {
               INDUSTRIES WE SERVE
             </m.span>
             <h2 className="mt-4 text-2xl font-bold text-white md:text-3xl">
-              Solutions Tailored to <span className="text-lime-300">Your Industry</span>
+              Solutions Tailored to <span className="text-lime-100">Your Industry</span>
             </h2>
             <p className="mx-auto mt-2 max-w-xl text-sm text-white/60">
               Every industry has unique challenges. We build solutions to match.
@@ -192,9 +192,9 @@ export default function SolutionsPage() {
           <div className="mb-8 text-center">
             <m.span
               variants={fadeUp}
-              className="inline-flex items-center gap-2 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-3 py-1 text-xs font-medium tracking-wider text-emerald-300"
+              className="inline-flex items-center gap-2 rounded-full border border-emerald-200/30 bg-emerald-200/10 px-3 py-1 text-xs font-medium tracking-wider text-emerald-100"
             >
-              <span className="grid h-4 w-4 place-items-center rounded-full bg-emerald-400/20">
+              <span className="grid h-4 w-4 place-items-center rounded-full bg-emerald-200/20">
                 <svg viewBox="0 0 8 8" fill="currentColor" className="h-2.5 w-2.5">
                   <path d="M4 0L4.6 3.4L8 4L4.6 4.6L4 8L3.4 4.6L0 4L3.4 3.4Z" />
                 </svg>
@@ -202,7 +202,7 @@ export default function SolutionsPage() {
               OUR PLATFORM. YOUR ADVANTAGE
             </m.span>
             <h2 className="mt-4 text-2xl font-bold text-white md:text-3xl">
-              One Platform. <span className="text-lime-300">Endless Possibilities</span>
+              One Platform. <span className="text-lime-100">Endless Possibilities</span>
             </h2>
             <p className="mx-auto mt-2 max-w-xl text-sm text-white/60">
               Everything you need to power your sustainability journey.
@@ -219,17 +219,17 @@ export default function SolutionsPage() {
               <m.div
                 key={f.title}
                 variants={fadeUp}
-                whileHover={{ y: -4, scale: 1.015 }}
-                className="group flex flex-col rounded-2xl border border-white/10 bg-white/[0.02] p-6 transition-colors hover:border-emerald-400/30"
+                whileHover={cardHover}
+                className="group flex flex-col rounded-2xl border border-white/10 bg-white/[0.02] p-6 transition-colors hover:border-emerald-200/30"
               >
-                <div className="mb-4 grid h-12 w-12 place-items-center rounded-xl border border-emerald-400/20 bg-emerald-400/5 text-emerald-300">
+                <div className="mb-4 grid h-12 w-12 place-items-center rounded-xl border border-emerald-200/20 bg-emerald-200/5 text-emerald-100">
                   {ICON[f.icon]}
                 </div>
                 <h3 className="text-lg font-semibold text-white">{f.title}</h3>
                 <p className="mt-1 flex-1 text-sm text-white/60">{f.body}</p>
                 <a
                   href="#"
-                  className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-emerald-300 opacity-0 transition-opacity group-hover:opacity-100"
+                  className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-emerald-100 opacity-0 transition-opacity group-hover:opacity-100"
                 >
                   Explore {f.title} <ArrowRight />
                 </a>
@@ -243,7 +243,7 @@ export default function SolutionsPage() {
       <section className="py-14">
         <div className="mx-auto max-w-7xl px-6 text-center">
           <h2 className="text-2xl font-bold text-white md:text-3xl">
-            Real Impact. <span className="text-lime-300">Measurable Results.</span>
+            Real Impact. <span className="text-lime-100">Measurable Results.</span>
           </h2>
           <p className="mx-auto mt-2 max-w-xl text-sm text-white/60">
             Built on outcomes that matter — measurable reductions, verified by independent partners.
@@ -261,7 +261,7 @@ export default function SolutionsPage() {
       <CtaBanner
         badge="Let's Build a Better Tomorrow"
         heading="Your goals."
-        highlight={<span className="block bg-gradient-to-r from-lime-300 to-emerald-300 bg-clip-text text-transparent">Our solutions. A better planet for all.</span>}
+        highlight={<span className="block bg-gradient-to-r from-lime-100 to-emerald-100 bg-clip-text text-transparent">Our solutions. A better planet for all.</span>}
         body="EcoLens is a carbon intelligence platform that empowers businesses to drive real impact at scale."
         primary={{ label: "Get Started" }}
         secondary={{ label: "Book a Demo" }}

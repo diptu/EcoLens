@@ -27,8 +27,8 @@ from datetime import date, datetime
 
 import httpx
 
-from ecolens.ingestion.sources.aemo_nem import AEMONEMFetcher
-from ecolens.ingestion.storage import duckdb_store
+from ecolens.ingestion.service.aemo_nem import AEMONEMFetcher
+from ecolens.ingestion.db import duckdb_store
 from ecolens.shared.observability.logging import get_logger
 
 log = get_logger("trigger_ingest_aemo_nem")

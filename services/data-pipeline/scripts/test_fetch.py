@@ -1,7 +1,7 @@
 import pytest
 import respx
 import httpx
-from ecolens.ingestion.sources.openelectricity import OpenElectricityFetcher
+from ecolens.ingestion.service.openelectricity import OpenElectricityFetcher
 from ecolens.config import get_settings
 
 # Fixed value per real API metric name (as sent in the `metrics` query

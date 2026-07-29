@@ -67,11 +67,11 @@ export function StatsBar() {
               <m.div
                 whileHover={{ rotate: 8, scale: 1.05 }}
                 transition={{ type: "spring", stiffness: 300, damping: 15 }}
-                className="grid h-9 w-9 place-items-center rounded-full bg-emerald-400/10 text-emerald-300"
+                className="grid h-9 w-9 place-items-center rounded-full bg-emerald-200/10 text-emerald-100"
               >
                 {stat.icon}
               </m.div>
-              <div className="text-3xl font-bold text-lime-300 md:text-4xl">
+              <div className="text-3xl font-bold text-lime-100 md:text-4xl">
                 <MotionCounter
                   value={stat.value}
                   prefix={stat.prefix}

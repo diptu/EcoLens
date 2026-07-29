@@ -1,12 +1,11 @@
 /**
  * /login — Sign in form.
  * Two-panel layout: forest image + tagline on the left, form on the right.
+ *
+ * The interactive part is in <LoginForm /> (a client component);
+ * this page is the server-rendered shell.
  */
-import {
-  AuthLayout,
-  AuthHeader,
-  AuthFooter,
-} from "@/components/auth/auth-layout";
+import { AuthLayout, AuthHeader } from "@/components/auth/auth-layout";
 import { LoginForm } from "@/components/auth/login-form";
 
 export const metadata = {
@@ -22,10 +21,7 @@ export default function LoginPage() {
       subTagline="Sign in to continue to your account and manage your sustainability impact."
     >
       <AuthHeader title="Login" breadcrumb={{ label: "/login", href: "/login" }} />
-
       <LoginForm />
-
-      <AuthFooter text="Don&apos;t have an account?" linkLabel="Sign up" linkHref="/signup" />
     </AuthLayout>
   );
 }

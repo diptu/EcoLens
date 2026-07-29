@@ -18,7 +18,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from ecolens.config import get_settings
-from ecolens.forecasting import api as api_module
+import ecolens.forecasting.api.routes as api_module
 
 
 @pytest.fixture
@@ -167,9 +167,9 @@ class TestModelStatus:
         assert body["production_version"] is None
 
     def test_reports_registered_production_model(self, client):
-        from ecolens.forecasting.features import FEATURE_COLUMNS
-        from ecolens.forecasting.mlops.registry import ModelRegistry
-        from ecolens.forecasting.models.lstm import DemandLSTM
+        from ecolens.forecasting.schema.features import FEATURE_COLUMNS
+        from ecolens.forecasting.service.mlops.registry import ModelRegistry
+        from ecolens.forecasting.model.lstm import DemandLSTM
 
         settings = get_settings()
         mlflow.set_experiment(settings.mlflow_experiment_name)

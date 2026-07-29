@@ -98,7 +98,7 @@ export function PageHero({
             {highlight ? (
               <>
                 {title}
-                <span className="ml-2 bg-gradient-to-r from-lime-300 via-emerald-300 to-lime-300 bg-clip-text text-transparent">
+                <span className="ml-2 bg-gradient-to-r from-lime-100 via-emerald-100 to-lime-100 bg-clip-text text-transparent">
                   {highlight}
                 </span>
               </>
@@ -134,9 +134,9 @@ function Badge({ children }: { children: React.ReactNode }) {
   return (
     <m.span
       variants={fadeUp}
-      className="inline-flex items-center gap-2 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-3 py-1 text-xs font-medium tracking-wider text-emerald-300"
+      className="inline-flex items-center gap-2 rounded-full border border-emerald-200/30 bg-emerald-200/10 px-3 py-1 text-xs font-medium tracking-wider text-emerald-100"
     >
-      <span className="grid h-4 w-4 place-items-center rounded-full bg-emerald-400/20">
+      <span className="grid h-4 w-4 place-items-center rounded-full bg-emerald-200/20">
         <svg viewBox="0 0 8 8" fill="currentColor" className="h-2.5 w-2.5">
           <path d="M4 0L4.6 3.4L8 4L4.6 4.6L4 8L3.4 4.6L0 4L3.4 3.4Z" />
         </svg>

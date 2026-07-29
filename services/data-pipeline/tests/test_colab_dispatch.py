@@ -1,4 +1,4 @@
-"""Tests for ecolens.forecasting.training.colab_dispatch.
+"""Tests for ecolens.forecasting.service.training.colab_dispatch.
 
 The deep end-to-end path (a real Colab kernel over a real websocket)
 is out of scope for a unit test -- these cover every piece that's
@@ -18,8 +18,8 @@ import pandas as pd
 import pytest
 import torch
 
-from ecolens.forecasting.features import FeatureScaler, Split, WindowedDataset
-from ecolens.forecasting.training import colab_dispatch as cd
+from ecolens.forecasting.schema.features import FeatureScaler, Split, WindowedDataset
+from ecolens.forecasting.service.training import colab_dispatch as cd
 
 
 def _make_split(n: int, n_features: int = 3) -> Split:

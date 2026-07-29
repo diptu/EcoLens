@@ -35,7 +35,7 @@ export function KpiCard({
     ? trend.direction === "flat"
       ? "text-white/50"
       : trendGood
-        ? "text-emerald-400"
+        ? "text-emerald-200"
         : "text-rose-400"
     : "text-white/50";
 
@@ -44,7 +44,7 @@ export function KpiCard({
       <div className="flex items-center justify-between">
         <p className="text-xs font-medium text-white/60">{label}</p>
         {icon && (
-          <span className="grid h-7 w-7 place-items-center rounded-full bg-emerald-400/10 text-emerald-300">
+          <span className="grid h-7 w-7 place-items-center rounded-full bg-emerald-200/10 text-emerald-100">
             {icon}
           </span>
         )}

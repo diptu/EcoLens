@@ -99,7 +99,7 @@ concurrently using `asyncio.TaskGroup`.
 ## DuckDB Upsert
 
 ```python
-# ecolens.ingestion.storage.duckdb_store.write_historical
+# ecolens.ingestion.db.duckdb_store.write_historical
 def write_historical(
     source: str,
     docs: list[dict],
@@ -128,7 +128,7 @@ def write_historical(
 
 ## DuckDB → PostgreSQL Syncer
 
-The syncer (`ecolens.ingestion.storage.postgres.RawSyncer`) converts raw
+The syncer (`ecolens.ingestion.repository.raw_sync.RawSyncer`) converts raw
 DuckDB rows into structured PostgreSQL `raw.*` tables.
 
 ```python

@@ -1,10 +1,10 @@
-"""Tests for ecolens.warehouse.runner.settings.WarehouseRunnerSettings."""
+"""Tests for ecolens.warehouse.core.runner_settings.WarehouseRunnerSettings."""
 
 from __future__ import annotations
 
 from datetime import timedelta
 
-from ecolens.warehouse.runner.settings import (
+from ecolens.warehouse.core.runner_settings import (
     WarehouseRunnerSettings,
     get_warehouse_runner_settings,
 )
@@ -30,7 +30,7 @@ class TestDefaults:
 
     def test_freshness_thresholds(self):
         settings = WarehouseRunnerSettings()
-        assert settings.freshness_threshold_aemo == timedelta(minutes=45)
+        assert settings.freshness_threshold_aemo == timedelta(hours=30)
         assert settings.freshness_threshold_bom == timedelta(hours=2)
         assert settings.freshness_threshold_holidays == timedelta(days=7)
 

@@ -1,4 +1,4 @@
-"""Tests for ecolens.forecasting.training.train (ECO-112).
+"""Tests for ecolens.forecasting.service.training.train (ECO-112).
 
 All of these use `log_to_mlflow=False` -- MLflow logging itself is
 covered by `test_forecasting_registry.py`'s integration tests against a
@@ -14,9 +14,10 @@ import pytest
 import torch
 
 from ecolens.config import Settings
-from ecolens.forecasting.features import FEATURE_COLUMNS, build_windowed_dataset
-from ecolens.forecasting.training.losses import DemandForecastLoss
-from ecolens.forecasting.training.train import train_model
+from ecolens.forecasting.schema.features import FEATURE_COLUMNS
+from ecolens.forecasting.service.windowing import build_windowed_dataset
+from ecolens.forecasting.service.training.losses import DemandForecastLoss
+from ecolens.forecasting.service.training.train import train_model
 
 
 def _learnable_snapshot(*, n: int = 400, seed: int = 0) -> pd.DataFrame:

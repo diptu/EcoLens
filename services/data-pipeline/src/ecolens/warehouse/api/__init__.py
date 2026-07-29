@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from ecolens.warehouse.db.connection import ConnectionPool, check_health
+from ecolens.warehouse.core.api_settings import (
+    WarehouseApiSettings,
+    get_warehouse_api_settings,
+)
+
 from .api import app
 from .app import create_app
-from .db import ConnectionPool, check_health
-from .settings import WarehouseApiSettings, get_warehouse_api_settings
 
 __all__ = [
     "app",

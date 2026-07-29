@@ -1,11 +1,11 @@
-"""Tests for ecolens.warehouse.runner.dbt_runner.DbtRunner."""
+"""Tests for ecolens.warehouse.service.dbt_runner.DbtRunner."""
 
 from __future__ import annotations
 
 import shutil
 
-from ecolens.warehouse.runner.dbt_runner import DbtRunner
-from ecolens.warehouse.runner.settings import WarehouseRunnerSettings
+from ecolens.warehouse.service.dbt_runner import DbtRunner
+from ecolens.warehouse.core.runner_settings import WarehouseRunnerSettings
 
 
 class TestParseRowCount:

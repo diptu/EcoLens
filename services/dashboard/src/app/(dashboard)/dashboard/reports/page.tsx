@@ -53,7 +53,7 @@ export default function ReportsPage() {
             Generate, manage, and export sustainability reports with confidence.<br />Compliant. Transparent. Audit-ready.
           </p>
         </div>
-        <button className="inline-flex items-center gap-2 rounded-md bg-lime-300 px-3 py-1.5 text-xs font-semibold text-black hover:bg-lime-200">
+        <button className="inline-flex items-center gap-2 rounded-md bg-lime-100 px-3 py-1.5 text-xs font-semibold text-black hover:bg-lime-100">
           <Plus className="h-3.5 w-3.5" /> New Report <ChevronDown className="h-3 w-3" />
         </button>
       </div>
@@ -71,17 +71,17 @@ export default function ReportsPage() {
           className="lg:col-span-2"
           title="Report Types"
           subtitle="Choose a report framework or create a custom report tailored to your needs."
-          actions={<button className="text-xs text-emerald-300 hover:text-emerald-200">View all frameworks →</button>}
+          actions={<button className="text-xs text-emerald-100 hover:text-emerald-100">View all frameworks →</button>}
         >
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-2">
             {REPORT_TYPES.map((t) => (
-              <div key={t.id} className="rounded-xl border border-white/5 bg-white/[0.02] p-4 transition-colors hover:border-emerald-400/30">
+              <div key={t.id} className="rounded-xl border border-white/5 bg-white/[0.02] p-4 transition-colors hover:border-emerald-200/30">
                 <div className="flex items-start gap-3">
-                  <span className="grid h-9 w-9 shrink-0 place-items-center rounded-md bg-emerald-400/10 text-lg">{TYPE_ICON[t.id]}</span>
+                  <span className="grid h-9 w-9 shrink-0 place-items-center rounded-md bg-emerald-200/10 text-lg">{TYPE_ICON[t.id]}</span>
                   <div className="min-w-0">
                     <p className="text-sm font-semibold text-white">{t.name}</p>
                     <p className="mt-1 text-xs text-white/60">{t.sub}</p>
-                    <button className="mt-2 inline-flex items-center gap-1 rounded-md border border-emerald-400/30 bg-emerald-400/5 px-3 py-1 text-[10px] font-medium text-emerald-300 hover:bg-emerald-400/10">
+                    <button className="mt-2 inline-flex items-center gap-1 rounded-md border border-emerald-200/30 bg-emerald-200/5 px-3 py-1 text-[10px] font-medium text-emerald-100 hover:bg-emerald-200/10">
                       {t.cta} →
                     </button>
                   </div>
@@ -132,7 +132,7 @@ export default function ReportsPage() {
                 >
                   <span className="grid h-8 w-8 place-items-center rounded-md text-base" style={{ backgroundColor: row.color + "20" }}>{row.icon}</span>
                   <span className="flex-1 text-sm text-white">{row.label}</span>
-                  <span className="text-emerald-300">→</span>
+                  <span className="text-emerald-100">→</span>
                 </button>
               ))}
             </div>
@@ -145,7 +145,7 @@ export default function ReportsPage() {
         <Card
           className="lg:col-span-2"
           title="Recent Reports"
-          actions={<button className="text-xs text-emerald-300 hover:text-emerald-200">View all reports →</button>}
+          actions={<button className="text-xs text-emerald-100 hover:text-emerald-100">View all reports →</button>}
           noPadding
         >
           <div className="grid grid-cols-6 gap-2 border-b border-white/5 px-5 py-2.5 text-[10px] font-medium uppercase tracking-wider text-white/40">
@@ -158,7 +158,7 @@ export default function ReportsPage() {
           <div className="divide-y divide-white/5">
             {RECENT_REPORTS.map((row) => (
               <div key={row.id} className="grid grid-cols-6 items-center gap-3 px-5 py-3 hover:bg-white/[0.02]">
-                <NameCell icon={<FileText className="h-4 w-4 text-emerald-300" />} name={row.name} sub={row.sub} />
+                <NameCell icon={<FileText className="h-4 w-4 text-emerald-100" />} name={row.name} sub={row.sub} />
                 <Pill color="lime">{row.framework}</Pill>
                 <div>
                   <p className="text-sm text-white">{row.period}</p>
@@ -174,7 +174,7 @@ export default function ReportsPage() {
                   <button className="rounded-md border border-rose-400/30 bg-rose-400/5 p-1 text-rose-300 hover:bg-rose-400/10">
                     <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M3 2h6M4 2V1h4v1M5 4v6M7 4v6M2 2h8l-1 8H3L2 2z" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" /></svg>
                   </button>
-                  <button className="rounded-md border border-emerald-400/30 bg-emerald-400/5 p-1 text-emerald-300 hover:bg-emerald-400/10">
+                  <button className="rounded-md border border-emerald-200/30 bg-emerald-200/5 p-1 text-emerald-100 hover:bg-emerald-200/10">
                     <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M3 6h6M3 8h6M3 4h6" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" /></svg>
                   </button>
                   <ActionsMenu />
@@ -187,7 +187,7 @@ export default function ReportsPage() {
             <div className="flex items-center gap-1">
               <button className="grid h-7 w-7 place-items-center rounded border border-white/10 bg-white/5 text-white/60 hover:text-white">‹</button>
               {["1", "2", "3", "4"].map((p) => (
-                <button key={p} className={`grid h-7 w-7 place-items-center rounded border ${p === "1" ? "border-lime-300 bg-lime-300 text-black" : "border-white/10 bg-white/5 text-white/60"}`}>{p}</button>
+                <button key={p} className={`grid h-7 w-7 place-items-center rounded border ${p === "1" ? "border-lime-100 bg-lime-100 text-black" : "border-white/10 bg-white/5 text-white/60"}`}>{p}</button>
               ))}
               <button className="grid h-7 w-7 place-items-center rounded border border-white/10 bg-white/5 text-white/60 hover:text-white">›</button>
             </div>
@@ -198,7 +198,7 @@ export default function ReportsPage() {
           <div className="space-y-4">
             {RECENT_REPORTS.slice(0, 3).map((r) => (
               <div key={r.id} className="flex items-start gap-3">
-                <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-emerald-400/10 text-emerald-300">📄</span>
+                <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-emerald-200/10 text-emerald-100">📄</span>
                 <div>
                   <p className="text-sm font-semibold text-white">{r.name}</p>
                   <p className="text-[10px] text-white/50">{r.framework === "ESG" ? "Generated by Diptu Alam" : r.framework === "GHG Protocol" ? "Downloaded by Diptu Alam" : "Exported as PDF by Diptu Alam"}</p>
@@ -207,7 +207,7 @@ export default function ReportsPage() {
               </div>
             ))}
           </div>
-          <button className="mt-4 text-xs text-emerald-300 hover:text-emerald-200">View full audit log →</button>
+          <button className="mt-4 text-xs text-emerald-100 hover:text-emerald-100">View full audit log →</button>
         </Card>
       </div>
 
@@ -225,9 +225,9 @@ export default function ReportsPage() {
             color="rgba(132,204,22,0.95)"
           />
           <div className="mt-2 flex items-center gap-2 text-[10px] text-white/50">
-            <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-lime-300" /> Reports Generated</span>
+            <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-lime-100" /> Reports Generated</span>
           </div>
-          <button className="mt-3 text-xs text-emerald-300 hover:text-emerald-200">View analytics →</button>
+          <button className="mt-3 text-xs text-emerald-100 hover:text-emerald-100">View analytics →</button>
         </Card>
 
         <Card title="Popular Metrics in Reports" actions={
@@ -241,24 +241,24 @@ export default function ReportsPage() {
                 <span className="text-base">🌿</span>
                 <p className="flex-1 text-xs text-white/70">{m.label}</p>
                 <div className="h-1.5 w-32 overflow-hidden rounded-full bg-white/5">
-                  <div className="h-full rounded-full bg-lime-300" style={{ width: `${(m.value / 28) * 100}%` }} />
+                  <div className="h-full rounded-full bg-lime-100" style={{ width: `${(m.value / 28) * 100}%` }} />
                 </div>
                 <span className="w-8 text-right text-sm font-medium text-white">{m.value}</span>
               </div>
             ))}
           </div>
-          <button className="mt-3 text-xs text-emerald-300 hover:text-emerald-200">View all metrics →</button>
+          <button className="mt-3 text-xs text-emerald-100 hover:text-emerald-100">View all metrics →</button>
         </Card>
       </div>
 
       {/* Need a custom report? */}
       <div className="flex items-center gap-3 rounded-xl border border-white/5 bg-white/[0.02] p-4">
-        <span className="grid h-12 w-12 place-items-center rounded-full bg-emerald-400/15 text-2xl">🌿</span>
+        <span className="grid h-12 w-12 place-items-center rounded-full bg-emerald-200/15 text-2xl">🌿</span>
         <div className="flex-1">
           <p className="text-sm font-semibold text-white">Need a custom report?</p>
           <p className="text-xs text-white/60">Our experts can help you build a report tailored to your business and compliance needs.</p>
         </div>
-        <button className="inline-flex items-center gap-1.5 rounded-md bg-lime-300 px-3 py-2 text-xs font-semibold text-black hover:bg-lime-200">
+        <button className="inline-flex items-center gap-1.5 rounded-md bg-lime-100 px-3 py-2 text-xs font-semibold text-black hover:bg-lime-100">
           Request Custom Report →
         </button>
       </div>

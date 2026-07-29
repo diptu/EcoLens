@@ -1,4 +1,4 @@
-"""Tests for ecolens.forecasting.training.tune (ECO-113), against a
+"""Tests for ecolens.forecasting.service.training.tune (ECO-113), against a
 real local MLflow tracking store (same pattern as
 test_forecasting_registry.py) since nested-run logging is the whole
 point of this module and mocking MLflow out would just test the mock.
@@ -12,8 +12,9 @@ import pandas as pd
 import pytest
 
 from ecolens.config import Settings
-from ecolens.forecasting.features import FEATURE_COLUMNS, build_windowed_dataset
-from ecolens.forecasting.training.tune import tune
+from ecolens.forecasting.schema.features import FEATURE_COLUMNS
+from ecolens.forecasting.service.windowing import build_windowed_dataset
+from ecolens.forecasting.service.training.tune import tune
 
 
 @pytest.fixture
@@ -61,7 +62,7 @@ class TestTune:
         assert set(result.best_params) == {"hidden_size", "num_layers", "dropout", "lr"}
 
     def test_best_run_id_is_registerable(self, mlflow_tmp):
-        from ecolens.forecasting.mlops.registry import ModelRegistry
+        from ecolens.forecasting.service.mlops.registry import ModelRegistry
 
         dataset = _dataset()
         settings = Settings(  # type: ignore[call-arg]

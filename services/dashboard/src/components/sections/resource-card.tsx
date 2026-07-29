@@ -37,7 +37,7 @@ export function ResourceCard({ items, className }: ResourceCardProps) {
         <MotionItem
           key={r.title}
           variant="fadeUp"
-          className="group overflow-hidden rounded-2xl border border-white/10 bg-white/[0.02] transition-colors hover:border-emerald-400/30"
+          className="group overflow-hidden rounded-2xl border border-white/10 bg-white/[0.02] transition-colors hover:border-emerald-200/30"
         >
           <m.div
             variants={cardHover}
@@ -54,7 +54,7 @@ export function ResourceCard({ items, className }: ResourceCardProps) {
               loading="lazy"
               className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
             />
-            <span className="absolute left-3 top-3 rounded-md bg-emerald-400/90 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-black">
+            <span className="absolute left-3 top-3 rounded-md bg-emerald-200/90 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-black">
               {r.type}
             </span>
             <div className="absolute inset-0 bg-gradient-to-t from-black/40 to-transparent" />
@@ -66,7 +66,7 @@ export function ResourceCard({ items, className }: ResourceCardProps) {
               <span className="inline-flex items-center gap-1 text-white/50">
                 <ClockIcon /> {r.meta}
               </span>
-              <span className="rounded-full border border-emerald-400/20 bg-emerald-400/10 px-2 py-0.5 text-emerald-300">
+              <span className="rounded-full border border-emerald-200/20 bg-emerald-200/10 px-2 py-0.5 text-emerald-100">
                 {r.level}
               </span>
             </div>

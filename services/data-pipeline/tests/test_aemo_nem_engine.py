@@ -1,4 +1,4 @@
-"""Tests for ecolens.ingestion.sources.aemo_nem.engine.AEMONEMFetcher."""
+"""Tests for ecolens.ingestion.service.aemo_nem.engine.AEMONEMFetcher."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ import httpx
 import pandas as pd
 import pytest
 
-from ecolens.ingestion.sources.aemo_nem.engine import AEMONEMFetcher
-from ecolens.ingestion.sources.aemo_nem.schema import OUTPUT_COLUMNS
+from ecolens.ingestion.service.aemo_nem.engine import AEMONEMFetcher
+from ecolens.ingestion.schema.aemo_nem import OUTPUT_COLUMNS
 
 
 def _fake_tables() -> dict[str, pd.DataFrame]:
@@ -48,7 +48,7 @@ class TestFetch:
             return _fake_tables()
 
         monkeypatch.setattr(
-            "ecolens.ingestion.sources.aemo_nem.client.AEMONEMClient.fetch_day_tables",
+            "ecolens.ingestion.service.aemo_nem.client.AEMONEMClient.fetch_day_tables",
             fake_fetch_day_tables,
         )
         async with httpx.AsyncClient() as client:
@@ -71,7 +71,7 @@ class TestFetch:
             return None
 
         monkeypatch.setattr(
-            "ecolens.ingestion.sources.aemo_nem.client.AEMONEMClient.fetch_day_tables",
+            "ecolens.ingestion.service.aemo_nem.client.AEMONEMClient.fetch_day_tables",
             fake_fetch_day_tables,
         )
         async with httpx.AsyncClient() as client:
@@ -92,7 +92,7 @@ class TestFetch:
             return _fake_tables()
 
         monkeypatch.setattr(
-            "ecolens.ingestion.sources.aemo_nem.client.AEMONEMClient.fetch_day_tables",
+            "ecolens.ingestion.service.aemo_nem.client.AEMONEMClient.fetch_day_tables",
             flaky_fetch_day_tables,
         )
         async with httpx.AsyncClient() as client:
@@ -114,7 +114,7 @@ class TestFetch:
             return None
 
         monkeypatch.setattr(
-            "ecolens.ingestion.sources.aemo_nem.client.AEMONEMClient.fetch_day_tables",
+            "ecolens.ingestion.service.aemo_nem.client.AEMONEMClient.fetch_day_tables",
             fake_fetch_day_tables,
         )
         async with httpx.AsyncClient() as client:
@@ -136,7 +136,7 @@ class TestFetch:
             )
 
         monkeypatch.setattr(
-            "ecolens.ingestion.sources.aemo_nem.client.AEMONEMClient.fetch_day_tables",
+            "ecolens.ingestion.service.aemo_nem.client.AEMONEMClient.fetch_day_tables",
             fake_fetch_day_tables,
         )
         async with httpx.AsyncClient() as client:
@@ -159,7 +159,7 @@ class TestFetch:
             )
 
         monkeypatch.setattr(
-            "ecolens.ingestion.sources.aemo_nem.client.AEMONEMClient.fetch_day_tables",
+            "ecolens.ingestion.service.aemo_nem.client.AEMONEMClient.fetch_day_tables",
             fake_fetch_day_tables,
         )
         async with httpx.AsyncClient() as client:
@@ -191,7 +191,7 @@ class TestFetch:
             return _fake_tables()
 
         monkeypatch.setattr(
-            "ecolens.ingestion.sources.aemo_nem.client.AEMONEMClient.fetch_day_tables",
+            "ecolens.ingestion.service.aemo_nem.client.AEMONEMClient.fetch_day_tables",
             fake_fetch_day_tables,
         )
         async with httpx.AsyncClient() as client:
@@ -214,7 +214,7 @@ class TestFetchForDate:
             return _fake_tables()
 
         monkeypatch.setattr(
-            "ecolens.ingestion.sources.aemo_nem.client.AEMONEMClient.fetch_day_tables",
+            "ecolens.ingestion.service.aemo_nem.client.AEMONEMClient.fetch_day_tables",
             fake_fetch_day_tables,
         )
         async with httpx.AsyncClient() as client:
@@ -231,7 +231,7 @@ class TestFetchForDate:
             return None
 
         monkeypatch.setattr(
-            "ecolens.ingestion.sources.aemo_nem.client.AEMONEMClient.fetch_day_tables",
+            "ecolens.ingestion.service.aemo_nem.client.AEMONEMClient.fetch_day_tables",
             fake_fetch_day_tables,
         )
 
@@ -243,7 +243,7 @@ class TestFetchForDate:
                 )  # ~11am AEST on the 21st
 
         monkeypatch.setattr(
-            "ecolens.ingestion.sources.aemo_nem.engine.datetime", FixedDatetime
+            "ecolens.ingestion.service.aemo_nem.engine.datetime", FixedDatetime
         )
         async with httpx.AsyncClient() as client:
             await fetcher.fetch_for_date(client)

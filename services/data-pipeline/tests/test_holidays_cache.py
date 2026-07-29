@@ -1,11 +1,11 @@
-"""Tests for ecolens.ingestion.sources.holidays.cache (read_cache/write_cache)."""
+"""Tests for ecolens.ingestion.service.holidays.cache (read_cache/write_cache)."""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from ecolens.ingestion.sources.holidays.cache import read_cache, write_cache
-from ecolens.ingestion.sources.holidays.schema import NEM_REGIONS
+from ecolens.ingestion.service.holidays.cache import read_cache, write_cache
+from ecolens.ingestion.schema.holidays import NEM_REGIONS
 
 
 def _doc(**overrides) -> dict:

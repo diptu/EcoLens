@@ -35,6 +35,24 @@
 -- dbt_project.yml's `lookback_days` var) to pick up AEMO's
 -- late-arriving/revised settlement data without reprocessing all of
 -- history every run.
+--
+-- Root TODO.md's "Anomaly Detection" section: `anomaly_score`/
+-- `anomaly_flags`/`anomaly_explanation` are per-*record* on the staging
+-- models this reads from, but this model buckets several 5-min NEM
+-- records into one 30-min row (and, for NEM specifically, further
+-- combines the per-region market row with the network-level fueltech
+-- row and an OpenElectricity fallback) -- so those three columns need
+-- an explicit "how do N contributing anomaly scores become one"
+-- decision, not an average (an anomaly score isn't a physical quantity
+-- to average; the worst one is the one worth surfacing). Two-step rule,
+-- applied consistently at both the intra-bucket (`*_30min` CTEs) and
+-- cross-source (`nem_final`/`wem_final`) merges: take the *max* score,
+-- and carry the flags/explanation belonging to whichever contributing
+-- row/source had that max -- never a blended/averaged explanation
+-- string, which would describe a record that doesn't correspond to any
+-- one real observation.
+
+
 
 with nem_market as (
     select * from {{ ref("stg_aemo_nem_dispatch") }}
@@ -72,7 +90,8 @@ nem_market_30min as (
         avg({{ col }}) as {{ col }},
         {% endfor %}
         max(data_quality_status) as data_quality_status,
-        max(source) as source
+        max(source) as source,
+        {{ worst_anomaly_agg() }}
     from nem_market
     group by region, {{ bucket_30min("ts") }}
 ),
@@ -85,7 +104,8 @@ nem_fueltech_30min as (
         {% for col in fueltech_metric_columns() %}
         avg({{ col }}) as {{ col }},
         {% endfor %}
-        max(source) as source
+        max(source) as source,
+        {{ worst_anomaly_agg() }}
     from nem_fueltech
     group by {{ bucket_30min("ts") }}
 ),
@@ -98,7 +118,8 @@ wem_30min as (
         avg({{ col }}) as {{ col }},
         {% endfor %}
         max(data_quality_status) as data_quality_status,
-        max(source) as source
+        max(source) as source,
+        {{ worst_anomaly_agg() }}
     from wem
     group by region, {{ bucket_30min("ts") }}
 ),
@@ -113,7 +134,8 @@ oe_30min as (
         {% for col in energy_metric_columns() %}
         avg({{ col }}) as {{ col }},
         {% endfor %}
-        max(source) as source
+        max(source) as source,
+        {{ worst_anomaly_agg() }}
     from oe
     group by region, {{ bucket_30min("ts") }}
 ),
@@ -129,7 +151,8 @@ nem_final as (
         coalesce(f.{{ col }}, oe_nem.{{ col }}) as {{ col }},
         {% endfor %}
         m.data_quality_status,
-        m.source
+        m.source,
+        {{ pick_worse_of_three("m", "f", "oe_nem") }}
     from nem_market_30min m
     left join nem_fueltech_30min f
         on f.ts_30 = m.ts_30
@@ -146,7 +169,8 @@ wem_final as (
         coalesce(w.{{ col }}, oe_wem.{{ col }}) as {{ col }},
         {% endfor %}
         w.data_quality_status,
-        w.source
+        w.source,
+        {{ pick_worse_of_two("w", "oe_wem") }}
     from wem_30min w
     left join oe_30min oe_wem
         on oe_wem.region = 'WEM'

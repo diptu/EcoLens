@@ -56,7 +56,7 @@ export function Navbar() {
           <m.div
             whileHover={{ rotate: 12 }}
             transition={{ type: "spring", stiffness: 300, damping: 15 }}
-            className="grid h-8 w-8 place-items-center rounded-full bg-gradient-to-br from-emerald-400 to-lime-300"
+            className="grid h-8 w-8 place-items-center rounded-full bg-gradient-to-br from-emerald-200 to-lime-100"
           >
             <LeafIcon className="h-4 w-4 text-black" />
           </m.div>

@@ -30,13 +30,17 @@ test.describe("/login", () => {
   test("renders form with email + password + Sign In", async ({ page }) => {
     await page.goto("/login/");
     await expect(page.getByRole("heading", { name: "Login" })).toBeVisible();
-    await expect(page.getByLabel("Email address")).toBeVisible();
+    await expect(page.getByLabel(/Email or username/i)).toBeVisible();
     await expect(page.getByLabel("Password")).toBeVisible();
     await expect(page.getByRole("button", { name: "Sign In" })).toBeVisible();
     await expect(page.getByRole("button", { name: /Google/ })).toBeVisible();
     await expect(page.getByRole("button", { name: /Microsoft/ })).toBeVisible();
     await expect(page.getByText("Forgot password?")).toBeVisible();
     await expect(page.getByText("Don't have an account?")).toBeVisible();
+    // Pre-filled demo credentials are shown so the tester doesn't have to dig.
+    await expect(page.getByText(/Demo credentials/i)).toBeVisible();
+    await expect(page.getByText("diptu")).toBeVisible();
+    await expect(page.getByText("Hello123")).toBeVisible();
   });
 
   test("'Sign up' link goes to /signup", async ({ page }) => {
@@ -49,6 +53,66 @@ test.describe("/login", () => {
     await page.goto("/login/");
     await page.getByRole("link", { name: "Forgot password?" }).click();
     await page.waitForURL(/\/forgot-password/);
+  });
+
+  test("signs in successfully with diptu / Hello123 and redirects to /dashboard/executive", async ({ page }) => {
+    await page.goto("/login/");
+    // The form pre-fills the credentials (it's the demo account).
+    await page.getByLabel(/Email or username/i).fill("diptu");
+    await page.locator('input[name="password"]').fill("Hello123");
+    await page.getByTestId("login-submit").click();
+    await page.waitForURL(/\/dashboard\/executive\/?$/, { timeout: 10_000 });
+    // Session is in localStorage
+    const session = await page.evaluate(() => window.localStorage.getItem("ecolens.session"));
+    expect(session).toBeTruthy();
+    const parsed = JSON.parse(session!);
+    expect(parsed.user.username).toBe("diptu");
+    expect(parsed.user.role).toBe("admin");
+  });
+
+  test("shows an error for a wrong password and does not navigate", async ({ page }) => {
+    await page.goto("/login/");
+    await page.getByLabel(/Email or username/i).fill("diptu");
+    await page.locator('input[name="password"]').fill("NotTheRightPassword");
+    await page.getByTestId("login-submit").click();
+    const err = page.getByTestId("login-error");
+    await expect(err).toBeVisible({ timeout: 5_000 });
+    await expect(err).toContainText(/password doesn't match/i);
+    // Still on /login
+    expect(page.url()).toMatch(/\/login/);
+  });
+
+  test("shows an error for an unknown user", async ({ page }) => {
+    await page.goto("/login/");
+    await page.getByLabel(/Email or username/i).fill("nobody@example.com");
+    await page.locator('input[name="password"]').fill("whatever");
+    await page.getByTestId("login-submit").click();
+    const err = page.getByTestId("login-error");
+    await expect(err).toBeVisible({ timeout: 5_000 });
+    await expect(err).toContainText(/couldn't find an account/i);
+  });
+
+  test("show/hide password toggle changes input type", async ({ page }) => {
+    await page.goto("/login/");
+    const pw = page.locator('input[name="password"]');
+    await expect(pw).toHaveAttribute("type", "password");
+    await page.getByRole("button", { name: /Show password/ }).click();
+    await expect(pw).toHaveAttribute("type", "text");
+    await page.getByRole("button", { name: /Hide password/ }).click();
+    await expect(pw).toHaveAttribute("type", "password");
+  });
+
+  test("topbar profile chip shows the signed-in user's name after login", async ({ page }) => {
+    await page.goto("/login/");
+    await page.getByLabel(/Email or username/i).fill("diptu@ecolens.com");
+    await page.locator('input[name="password"]').fill("Hello123");
+    await page.getByTestId("login-submit").click();
+    await page.waitForURL(/\/dashboard\/home/);
+    // The topbar profile chip's accessible name reflects the signed-in user.
+    const chip = page.getByTestId("profile-chip");
+    await expect(chip).toBeVisible();
+    await expect(chip).toHaveAttribute("aria-label", "Diptu");
+    await expect(chip).toContainText("DI");
   });
 });
 

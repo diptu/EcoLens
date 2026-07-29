@@ -49,7 +49,7 @@ export function BillingToggle({
         className={
           "rounded-full px-4 py-1.5 text-xs font-semibold transition-colors " +
           (value === "monthly"
-            ? "bg-lime-300 text-black"
+            ? "bg-lime-100 text-black"
             : "text-white/70 hover:text-white")
         }
       >
@@ -63,13 +63,13 @@ export function BillingToggle({
         className={
           "rounded-full px-4 py-1.5 text-xs font-semibold transition-colors " +
           (value === "annually"
-            ? "bg-lime-300 text-black"
+            ? "bg-lime-100 text-black"
             : "text-white/70 hover:text-white")
         }
       >
         Pay Annually
       </button>
-      <span className="ml-1 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-emerald-300">
+      <span className="ml-1 rounded-full border border-emerald-200/30 bg-emerald-200/10 px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-emerald-100">
         Save up to 20%
       </span>
     </div>
@@ -83,9 +83,6 @@ export function useDefaultBillingPeriod(): [BillingPeriod, (next: BillingPeriod)
     if (typeof window === "undefined") return;
     const hash = window.location.hash.replace("#", "").toLowerCase();
     if (hash === "monthly" || hash === "annually") {
-      // One-time hydration from a browser-only API (URL hash) that doesn't
-      // exist during SSR -- there's no lazy-initializer alternative here.
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setPeriod(hash as BillingPeriod);
       return;
     }

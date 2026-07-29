@@ -1,4 +1,4 @@
-"""Tests for ecolens.forecasting.evaluation.metrics (ECO-114)."""
+"""Tests for ecolens.forecasting.service.evaluation.metrics (ECO-114)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from ecolens.forecasting.evaluation.metrics import evaluate_predictions, mae, mape, rmse
+from ecolens.forecasting.service.evaluation.metrics import (
+    evaluate_predictions,
+    mae,
+    mape,
+    rmse,
+)
 
 
 class TestPointMetrics:

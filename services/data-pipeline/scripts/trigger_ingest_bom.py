@@ -36,9 +36,9 @@ import httpx
 import pandera.errors
 
 from ecolens.config import get_settings
-from ecolens.ingestion.sources.bom import BomFetcher
-from ecolens.ingestion.storage import duckdb_store
-from ecolens.ingestion.validators.bom import validate as validate_docs
+from ecolens.ingestion.service.bom import BomFetcher
+from ecolens.ingestion.db import duckdb_store
+from ecolens.ingestion.schema.validators.bom import validate as validate_docs
 from ecolens.shared.observability.logging import get_logger
 
 log = get_logger("trigger_ingest_bom")

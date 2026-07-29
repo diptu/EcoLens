@@ -93,8 +93,38 @@ ignore_missing_imports = true
 module = "yaml.*"
 ignore_missing_imports = true
 
+# pika (RabbitMQ producer client, ecolens.shared.events.rabbitmq) has no
+# py.typed marker or stub package -- same "ignore rather than chase a
+# separate stub package" treatment as the other untyped infra clients
+# above.
+[[tool.mypy.overrides]]
+module = "pika.*"
+ignore_missing_imports = true
+
+# timesfm (forecasting/service/timesfm_backbone.py) ships no py.typed
+# marker or stub package -- same "ignore rather than chase a separate
+# stub package" treatment as the other untyped infra clients above.
+[[tool.mypy.overrides]]
+module = "timesfm.*"
+ignore_missing_imports = true
+
+# scikit-learn's own stub coverage is still partial project-wide (a
+# separate scikit-learn-stubs package exists but isn't a dependency
+# here) -- same treatment as pandas/scipy above.
+[[tool.mypy.overrides]]
+module = "sklearn.*"
+ignore_missing_imports = true
+
+# statsmodels ships no py.typed marker either (forecasting/service/
+# feature_selection.py's Step 3 PACF + notebooks/data-pipeline.ipynb's
+# own prototype both use tsa.stattools.pacf).
+[[tool.mypy.overrides]]
+module = "statsmodels.*"
+ignore_missing_imports = true
+
 [tool.uv.workspace]
 members = [
     "services/data-pipeline",
     "services/forecast-api",
+    "services/iam",
 ]

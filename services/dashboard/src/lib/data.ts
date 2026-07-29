@@ -1,202 +1,213 @@
 /**
- * Static/demo data layer. Every page in this app reads from here rather
- * than a live backend (see root TODO.md ECO-130: only home/analytics
- * were converted to real forecast-api calls; everything else still
- * reads this file). Edit here to change content globally; keep the
- * shapes in sync with tests/unit/{data,dashboard-data,pricing-data}.test.ts.
+ * Static dummy data for the inner pages (/product, /resources, /solutions).
+ *
+ * Single source of truth so all 3 pages share the same set of resources,
+ * industries, features, and platform stats. Replace with a real API
+ * when the backend is ready.
+ *
+ * Versioning: bump DATA_VERSION when the shape changes so consumers
+ * (and tests) can detect mismatches.
  */
-
 export const DATA_VERSION = "1.0.0";
 
-/* ───────────────────────── /solutions ───────────────────────── */
-
+/* ─────────────────  Solutions — industries  ───────────────── */
 export const INDUSTRIES = [
-  { title: "Manufacturing", image: "/images/industry-manufacturing.jpg", alt: "Manufacturing facility", href: "/solutions/manufacturing", body: "Track Scope 1-3 emissions across plants and supply chains.", metrics: { label: "Avg. reduction", value: "18%" } },
-  { title: "Energy & Utilities", image: "/images/industry-energy.jpg", alt: "Energy infrastructure", href: "/solutions/energy", body: "Monitor generation mix and grid emissions intensity in real time.", metrics: { label: "Avg. reduction", value: "22%" } },
-  { title: "Technology", image: "/images/industry-tech.jpg", alt: "Data center", href: "/solutions/technology", body: "Measure data-center and cloud-compute carbon footprint.", metrics: { label: "Avg. reduction", value: "15%" } },
-  { title: "Transportation & Logistics", image: "/images/industry-transport.jpg", alt: "Logistics fleet", href: "/solutions/transportation", body: "Optimize fleet routing and fuel use for lower emissions.", metrics: { label: "Avg. reduction", value: "20%" } },
-  { title: "Construction", image: "/images/industry-construction.jpg", alt: "Construction site", href: "/solutions/construction", body: "Track embodied carbon across materials and project phases.", metrics: { label: "Avg. reduction", value: "17%" } },
-];
-
-export const PLATFORM_FEATURES = [
-  { title: "Real-time Monitoring", body: "Live emissions data from every connected source.", icon: "trend" },
-  { title: "Automated Reporting", body: "Generate CDP, GHG Protocol, and TCFD-ready reports in minutes.", icon: "globe" },
-  { title: "AI-Powered Insights", body: "Get reduction recommendations ranked by impact and cost.", icon: "brain" },
-  { title: "Multi-source Integration", body: "Connect utilities, ERPs, and IoT sensors out of the box.", icon: "hub" },
-  { title: "Scenario Planning", body: "Model reduction pathways before you commit capital.", icon: "flow" },
-  { title: "Compliance Ready", body: "Stay aligned with evolving regional and global standards.", icon: "shield" },
-];
-
-export const SOLUTIONS_STATS = [
-  { value: 500, suffix: "+", label: "Organizations onboarded", icon: "group" },
-  { value: 30, suffix: "%", label: "Average emissions reduction", icon: "trend" },
-  { value: 2, suffix: "M+", label: "Data points processed daily", icon: "hub" },
-  { value: 98, suffix: "%", label: "Customer satisfaction", icon: "leaf" },
-];
-
-/* ───────────────────────── /product ───────────────────────── */
-
-export const PRODUCT_FEATURES = [
-  { title: "Unified Data Ingestion", body: "Connect every data source and let EcoLens normalize it automatically.", bullets: ["Connect utilities, ERPs, and IoT in minutes", "Automated unit conversion and normalization", "Continuous data-quality validation"], icon: "cloud", visual: "funnel" },
-  { title: "Emissions Intelligence", body: "Understand exactly where your footprint comes from.", bullets: ["Scope 1, 2, and 3 breakdowns", "Region- and facility-level granularity", "Anomaly detection on every data point"], icon: "chart", visual: "chart" },
-  { title: "Forecasting", body: "See where your emissions are headed, not just where they've been.", bullets: ["LSTM-based demand and emissions forecasts", "Conformal-calibrated confidence bands", "Scenario-adjusted projections"], icon: "globe", visual: "donut" },
-  { title: "Reduction Planning", body: "Turn insight into an actionable, prioritized roadmap.", bullets: ["AI-ranked reduction opportunities", "Cost/effort/impact scoring", "Roadmap tracking against targets"], icon: "target", visual: "wind" },
-  { title: "Reporting & Compliance", body: "Export audit-ready reports for every major framework.", bullets: ["One-click CDP/GHG Protocol exports", "Audit-ready data lineage", "Custom report builder"], icon: "doc", visual: "report" },
-  { title: "Team Collaboration", body: "Keep every stakeholder aligned on the same goals.", bullets: ["Role-based access across teams", "Shared goals and accountability", "Org-wide notifications"], icon: "leaf", visual: "brain" },
-];
-
-export const PRODUCT_STEPS = [
-  { number: 1, title: "Connect your sources", body: "Link utilities, ERPs, and sensors — no code required.", icon: "cloud" },
-  { number: 2, title: "We calculate your footprint", body: "Automated Scope 1-3 calculations, validated continuously.", icon: "chart" },
-  { number: 3, title: "Get AI-ranked recommendations", body: "See exactly which reductions move the needle.", icon: "brain" },
-  { number: 4, title: "Track and report progress", body: "Monitor goals and export compliance-ready reports.", icon: "doc" },
-];
-
-export const PRODUCT_PILL_FEATURES = [
-  { title: "Real-time data", body: "Live emissions figures, not last quarter's spreadsheet.", icon: "cloud" },
-  { title: "AI-powered", body: "Recommendations ranked by real impact and cost.", icon: "brain" },
-  { title: "Audit-ready", body: "Every number traces back to its source.", icon: "doc" },
-];
-
-/* ───────────────────────── /resources ───────────────────────── */
-
-export const CATEGORIES = [
-  { title: "Guides", body: "Step-by-step playbooks for every stage of your journey.", resourceCount: 24, href: "/resources/guides", icon: "book" },
-  { title: "Reports", body: "Industry benchmarks and original research.", resourceCount: 12, href: "/resources/reports", icon: "chart" },
-  { title: "Templates", body: "Ready-to-use trackers and calculators.", resourceCount: 18, href: "/resources/templates", icon: "doc" },
-  { title: "Webinars", body: "Live and recorded sessions with sustainability experts.", resourceCount: 9, href: "/resources/webinars", icon: "video" },
-  { title: "Case Studies", body: "How real organizations cut emissions with EcoLens.", resourceCount: 15, href: "/resources/case-studies", icon: "case" },
-  { title: "Compliance", body: "Regulatory guides for every major framework.", resourceCount: 11, href: "/resources/compliance", icon: "shield" },
-];
-
-export const FEATURED_RESOURCES = [
-  { type: "Guide", title: "The Complete Guide to Scope 3 Emissions", body: "Everything you need to measure your value-chain footprint.", meta: "12 min read", level: "Intermediate", image: "/images/resource-1.jpg", alt: "Guide cover", href: "/resources/scope-3-guide" },
-  { type: "Report", title: "2026 State of Corporate Sustainability", body: "Benchmarks across 500+ organizations.", meta: "28 pages", level: "All levels", image: "/images/resource-2.jpg", alt: "Report cover", href: "/resources/state-of-sustainability" },
-  { type: "Template", title: "GHG Protocol Reporting Template", body: "A ready-to-fill Scope 1/2/3 reporting workbook.", meta: "Spreadsheet", level: "Beginner", image: "/images/resource-3.jpg", alt: "Template preview", href: "/resources/ghg-template" },
-  { type: "Case Study", title: "How Acme Manufacturing Cut Emissions 22%", body: "A 12-month reduction roadmap, step by step.", meta: "8 min read", level: "Intermediate", image: "/images/resource-4.jpg", alt: "Case study cover", href: "/resources/acme-case-study" },
-  { type: "Webinar", title: "Forecasting Emissions with Machine Learning", body: "How conformal prediction improves planning confidence.", meta: "45 min", level: "Advanced", image: "/images/resource-1.jpg", alt: "Webinar thumbnail", href: "/resources/ml-forecasting-webinar" },
-];
-
-export const TOOLS = [
-  { title: "Carbon Footprint Calculator", body: "Estimate your organization's baseline in minutes.", cta: "Try Calculator", icon: "calc" },
-  { title: "Data Source Checklist", body: "Make sure you're capturing every emissions source.", cta: "Get Checklist", icon: "db" },
-  { title: "Reduction ROI Estimator", body: "Compare cost and impact across initiatives.", cta: "Estimate ROI", icon: "trend" },
-  { title: "Compliance Readiness Assessment", body: "See how ready you are for CDP/TCFD reporting.", cta: "Start Assessment", icon: "shield" },
-];
-
-export const RESOURCE_STATS = [
-  { value: 89, suffix: "+", label: "Resources published", icon: "doc" },
-  { value: 50, suffix: "K+", label: "Downloads", icon: "chart" },
-  { value: 4.8, suffix: "/5", label: "Average rating", icon: "target" },
-  { value: 12, suffix: "", label: "New this month", icon: "trend" },
-];
-
-export const POPULAR_TAGS = ["Scope 3", "GHG Protocol", "Net Zero", "CDP", "Forecasting", "Compliance"];
-
-/* ───────────────────────── /pricing ───────────────────────── */
-
-export const PRICING_PLANS = [
   {
-    id: "starter",
-    name: "Starter",
-    description: "For small teams getting started with emissions tracking.",
-    icon: "leaf",
-    cta: { label: "Start Free Trial", href: "/signup" },
-    price: { monthly: 99, annually: 79 },
-    customLabel: undefined as string | undefined,
-    features: ["Up to 3 data sources", "Monthly reporting", "Scope 1 & 2 tracking", "Email support", "1 user seat"],
-    highlighted: false,
+    title: "Manufacturing",
+    image: "/images/industry-1.webp",
+    alt: "Manufacturing plant",
+    href: "/solutions/manufacturing",
+    body: "Track and reduce emissions across production lines and supply chains.",
+    metrics: { emissions: "1.2M tCO₂e", reduction: "32%", sites: 24 },
   },
   {
-    id: "growth",
-    name: "Growth",
-    description: "For growing organizations that need deeper insight.",
-    icon: "trend",
-    cta: { label: "Start Free Trial", href: "/signup" },
-    price: { monthly: 299, annually: 239 },
-    customLabel: undefined as string | undefined,
-    features: ["Up to 15 data sources", "Weekly reporting", "Scope 1, 2 & 3 tracking", "AI reduction recommendations", "Priority support", "10 user seats"],
-    highlighted: true,
+    title: "Energy & Utilities",
+    image: "/images/industry-2.webp",
+    alt: "Wind turbines",
+    href: "/solutions/energy",
+    body: "Optimize energy generation and grid operations with real-time data.",
+    metrics: { emissions: "850K tCO₂e", reduction: "41%", sites: 18 },
   },
   {
-    id: "professional",
-    name: "Professional",
-    description: "For established teams managing multi-site operations.",
-    icon: "hub",
-    cta: { label: "Start Free Trial", href: "/signup" },
-    price: { monthly: 799, annually: 639 },
-    customLabel: undefined as string | undefined,
-    features: ["Unlimited data sources", "Real-time reporting", "Demand + emissions forecasting", "Custom scenario planning", "Dedicated support", "Unlimited seats"],
-    highlighted: false,
+    title: "Transportation & Logistics",
+    image: "/images/industry-3.webp",
+    alt: "Trucks at depot",
+    href: "/solutions/transport",
+    body: "Measure fleet emissions and plan low-carbon routes.",
+    metrics: { emissions: "640K tCO₂e", reduction: "24%", sites: 12 },
   },
   {
-    id: "enterprise",
-    name: "Enterprise",
-    description: "For global organizations with custom compliance needs.",
-    icon: "shield",
-    cta: { label: "Contact Sales", href: "/contact" },
-    price: { monthly: null, annually: null },
-    customLabel: "Custom",
-    features: ["Everything in Professional", "Custom integrations", "Dedicated success manager", "SLA-backed uptime", "SSO / SAML", "Custom contract terms"],
-    highlighted: false,
+    title: "Construction & Real Estate",
+    image: "/images/industry-4.webp",
+    alt: "Construction site",
+    href: "/solutions/construction",
+    body: "Track embodied carbon and operational emissions for buildings.",
+    metrics: { emissions: "320K tCO₂e", reduction: "19%", sites: 9 },
+  },
+  {
+    title: "Technology & SaaS",
+    image: "/images/industry-5.webp",
+    alt: "Server room",
+    href: "/solutions/tech",
+    body: "Scope 3 emissions and cloud carbon footprint management.",
+    metrics: { emissions: "180K tCO₂e", reduction: "37%", sites: 6 },
   },
 ] as const;
 
-export const PRICING_COMPARE_ROWS = [
-  { row: "Data sources", starter: "3", growth: "15", professional: "Unlimited", enterprise: "Unlimited" },
-  { row: "Scope 1 & 2 tracking", starter: true, growth: true, professional: true, enterprise: true },
-  { row: "Scope 3 tracking", starter: false, growth: true, professional: true, enterprise: true },
-  { row: "AI recommendations", starter: false, growth: true, professional: true, enterprise: true },
-  { row: "Demand forecasting", starter: false, growth: false, professional: true, enterprise: true },
-  { row: "Custom integrations", starter: false, growth: false, professional: false, enterprise: true },
-  { row: "SSO / SAML", starter: false, growth: false, professional: false, enterprise: true },
-];
+/* ─────────────────  Solutions — platform features  ───────────────── */
+export const PLATFORM_FEATURES = [
+  {
+    title: "AI-Driven Insights",
+    body: "Real-time analytics and predictive insights for sustainable impact.",
+    icon: "brain",
+  },
+  {
+    title: "Unified Data Hub",
+    body: "All your data, integrated for a complete view of impact.",
+    icon: "hub",
+  },
+  {
+    title: "Custom Workflows",
+    body: "Tailor the platform to your unique business needs.",
+    icon: "flow",
+  },
+  {
+    title: "Enterprise Security",
+    body: "SOC 2, ISO 27001, and GDPR compliant infrastructure.",
+    icon: "shield",
+  },
+  {
+    title: "Scalable Architecture",
+    body: "Built to grow with your business, from SMB to Enterprise.",
+    icon: "scale",
+  },
+  {
+    title: "Global Coverage",
+    body: "Country-specific regulations and emission factors built in.",
+    icon: "globe",
+  },
+] as const;
 
-export const PRICING_INCLUDED = [
-  "Unlimited historical data retention",
-  "Bank-grade data encryption",
-  "99.9% uptime SLA",
-  "Free onboarding & migration",
-  "API access for every plan",
-  "Cancel or change plans anytime",
-];
+export const SOLUTIONS_STATS = [
+  { value: 2400000, suffix: "+ tCO₂e", label: "Measured", icon: "cloud" },
+  { value: 28, suffix: "%", label: "Average Reduction", icon: "trend" },
+  { value: 75, suffix: "+", label: "Countries", icon: "globe" },
+  { value: 1250, suffix: "+", label: "Organizations", icon: "group" },
+] as const;
 
-export const PRICING_ADDONS = [
-  { name: "Extra data source", price: "$15/mo" },
-  { name: "Additional user seat", price: "$25/mo" },
-  { name: "Advanced forecasting module", price: "$199/mo" },
-  { name: "Dedicated onboarding", price: "$500 one-time" },
-];
+/* ─────────────────  Product — features  ───────────────── */
+export const PRODUCT_FEATURES = [
+  {
+    title: "Smart Data Ingestion",
+    body: "Connect all your data sources in minutes. We handle the complexity.",
+    bullets: ["ERP, IoT, Utility, Cloud & more", "Automated data validation", "Real-time or scheduled sync"],
+    icon: "cloud",
+    visual: "funnel",
+  },
+  {
+    title: "AI-Powered Calculations",
+    body: "Industry-leading models and AI ensure accuracy and transparency.",
+    bullets: ["Multiple methodologies", "AI anomaly detection", "What-if scenario modeling"],
+    icon: "brain",
+    visual: "brain",
+  },
+  {
+    title: "Actionable Insights",
+    body: "Go beyond numbers. Get insights that help you act and improve.",
+    bullets: ["Hotspot identification", "Reduction opportunities", "Benchmarks & comparisons"],
+    icon: "chart",
+    visual: "chart",
+  },
+  {
+    title: "Goals & Tracking",
+    body: "Set science-based goals and track progress in real time.",
+    bullets: ["SBTi aligned goals", "Real-time progress tracking", "Milestone & alerts"],
+    icon: "target",
+    visual: "donut",
+  },
+  {
+    title: "Reports & Compliance",
+    body: "Generate audit-ready reports aligned with global standards.",
+    bullets: ["GRI, CDP, TCFD, CSRD", "Custom report builder", "One-click export"],
+    icon: "doc",
+    visual: "report",
+  },
+  {
+    title: "Reduce & Offset",
+    body: "Take action and neutralize your unavoidable emissions.",
+    bullets: ["Reduction planning", "Offset marketplace", "Impact verification"],
+    icon: "leaf",
+    visual: "wind",
+  },
+] as const;
 
-/* ───────────────────────── shared small helpers ───────────────────────── */
+export const PRODUCT_STEPS = [
+  { number: 1, title: "Connect", body: "Integrate your data sources securely.", icon: "cloud" },
+  { number: 2, title: "Measure", body: "We calculate your emissions accurately.", icon: "doc" },
+  { number: 3, title: "Act", body: "Get insights and take meaningful actions.", icon: "leaf" },
+  { number: 4, title: "Impact", body: "Track progress and drive lasting change.", icon: "globe" },
+] as const;
 
-type Kpi = {
-  id?: string;
-  label: string;
-  value: string;
-  unit?: string;
-  sub?: string;
-  icon?: string;
-  trend?: { direction: "up" | "down" | "flat"; text: string; goodWhen?: "up" | "down" };
-};
-type BreakdownItem = { label: string; value: number; percent: number; color: string };
+export const PRODUCT_PILL_FEATURES = [
+  { title: "Accurate", body: "Science-backed models for reliable carbon accounting.", icon: "accurate" },
+  { title: "Actionable", body: "Turn insights into real world sustainability actions.", icon: "action" },
+  { title: "Transparent", body: "Clear, audit-ready reports you can trust.", icon: "trans" },
+] as const;
 
-const COLORS = ["rgba(132,204,22,0.9)", "rgba(56,189,248,0.9)", "rgba(168,85,247,0.8)", "rgba(244,63,94,0.8)", "rgba(251,191,36,0.85)", "rgba(148,163,184,0.6)"];
+/* ─────────────────  Resources  ───────────────── */
+export const CATEGORIES = [
+  { title: "Guides & Playbooks", body: "Step-by-step guides to help you on your sustainability journey.", resourceCount: 135, href: "/resources/guides", icon: "book" },
+  { title: "Reports & Research", body: "In-depth research, market reports, and industry benchmarks.", resourceCount: 98, href: "/resources/reports", icon: "chart" },
+  { title: "Tools & Calculators", body: "Practical tools to measure, calculate, and analyze your impact.", resourceCount: 40, href: "/resources/tools", icon: "tool" },
+  { title: "Videos & Webinars", body: "Watch expert sessions and on-demand webinars.", resourceCount: 75, href: "/resources/videos", icon: "video" },
+  { title: "Case Studies", body: "Real-world success stories from organizations driving change.", resourceCount: 60, href: "/resources/cases", icon: "case" },
+  { title: "Policy & Standards", body: "Stay up to date with global frameworks and regulations.", resourceCount: 65, href: "/resources/policy", icon: "shield" },
+] as const;
 
-/* ───────────────────────── /dashboard/home ───────────────────────── */
+export const FEATURED_RESOURCES = [
+  { type: "GUIDE", title: "Carbon Accounting 101", body: "A beginner's guide to measuring and reporting greenhouse gas emissions.", meta: "15 min read", level: "Beginner", image: "/images/resource-1.webp", alt: "Wind turbines against a sunset", href: "/resources/carbon-101" },
+  { type: "TEMPLATE", title: "GHG Inventory Template", body: "Streamline your data collection and emissions calculation.", meta: "Excel Template", level: "Intermediate", image: "/images/resource-2.webp", alt: "Laptop with dashboards", href: "/resources/ghg-template" },
+  { type: "REPORT", title: "State of Corporate Sustainability 2024", body: "Key trends, data, and insights shaping the sustainability landscape.", meta: "25 min read", level: "Report", image: "/images/resource-3.webp", alt: "Aerial forest", href: "/resources/sos-2024" },
+  { type: "WEBINAR", title: "Net Zero Roadmap", body: "Watch experts discuss actionable strategies for net zero.", meta: "45 min", level: "Advanced", image: "/images/resource-4.webp", alt: "Webinar session", href: "/resources/net-zero-webinar" },
+  { type: "CASE STUDY", title: "How GreenTech Cut Emissions by 40%", body: "A case study on data-driven decisions and real impact.", meta: "12 min read", level: "Case Study", image: "/images/resource-5.webp", alt: "Green building", href: "/resources/greentech-case" },
+] as const;
 
-export const HOME_KPIS: Kpi[] = [
-  { id: "total-emissions", label: "Total Emissions", value: "2,453", unit: "tCO₂e", sub: "this month", trend: { direction: "down", text: "12% vs last month", goodWhen: "down" } },
-  { id: "reduction", label: "Reduction vs Baseline", value: "18", unit: "%", sub: "YTD", trend: { direction: "up", text: "3pt vs last quarter", goodWhen: "up" } },
-  { id: "active-goals", label: "Active Goals", value: "6", sub: "3 on track" },
-  { id: "data-sources", label: "Data Sources Connected", value: "11", sub: "10 active" },
-];
+export const TOOLS = [
+  { title: "Carbon Footprint Calculator", body: "Estimate your organization's emissions in minutes.", cta: "Use Calculator", icon: "calc" },
+  { title: "Emissions Factor Database", body: "Access 10,000+ emission factors across industries.", cta: "Explore Database", icon: "db" },
+  { title: "ESG Report Template", body: "Create investor-ready ESG reports with ease.", cta: "Download Template", icon: "doc" },
+  { title: "Science-Based Targets Guide", body: "Step-by-step guide to set and achieve SBTs.", cta: "Read Guide", icon: "target" },
+] as const;
+
+export const RESOURCE_STATS = [
+  { value: 1200, suffix: "+", label: "Resources", icon: "book" },
+  { value: 85, suffix: "+", label: "Expert Contributors", icon: "person" },
+  { value: 50000, suffix: "+", label: "Active Learners", icon: "group" },
+  { value: 120, suffix: "+", label: "Countries Reached", icon: "globe" },
+] as const;
+
+export const POPULAR_TAGS = ["Carbon Accounting 101", "GHG Protocol", "Emissions Factors", "ESG Reporting", "Net Zero Guide"] as const;
+
+/* ════════════════════════════════════════════════════════════
+   DASHBOARD DATA
+   ════════════════════════════════════════════════════════════
+   Static data for /dashboard/* pages. All numeric values are
+   demo / dummy — replace with API when backend is ready. */
+
+/* ─────────────────  /dashboard/home (Overview)  ───────────────── */
+export const HOME_KPIS = [
+  { id: "total", label: "Total Emissions", value: "2,453", unit: "tCO₂e", trend: { direction: "down" as const, text: "18% vs last month", goodWhen: "down" as const } },
+  { id: "intensity", label: "Emission Intensity", value: "0.42", unit: "tCO₂e / $K", trend: { direction: "down" as const, text: "12% vs last month", goodWhen: "down" as const } },
+  { id: "cost", label: "Total Cost", value: "$128,430", trend: { direction: "down" as const, text: "9% vs last month", goodWhen: "down" as const } },
+  { id: "reduction", label: "Reduction vs Baseline", value: "28%", sub: "On track for 2030 goal", trend: { direction: "up" as const, text: "vs baseline", goodWhen: "up" as const } },
+  { id: "forecast", label: "Forecasted (2024)", value: "28,650", unit: "tCO₂e", sub: "vs 2023 forecast", trend: { direction: "down" as const, text: "14% vs 2023", goodWhen: "down" as const } },
+] as const;
 
 export const HOME_SCOPES = [
-  { label: "Scope 1 (Direct)", value: 490, percent: 20, color: COLORS[0] },
-  { label: "Scope 2 (Energy)", value: 736, percent: 30, color: COLORS[1] },
-  { label: "Scope 3 (Value Chain)", value: 1227, percent: 50, color: COLORS[2] },
-];
+  { label: "Scope 1", value: 613, percent: 25, color: "rgba(132,204,22,0.95)" },
+  { label: "Scope 2", value: 1104, percent: 45, color: "rgba(16,185,129,0.95)" },
+  { label: "Scope 3", value: 736, percent: 30, color: "rgba(168,85,247,0.95)" },
+] as const;
 
 export const HOME_EMISSIONS_TREND = {
   labels: ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
@@ -204,54 +215,60 @@ export const HOME_EMISSIONS_TREND = {
   baseline: [2200, 2250, 2300, 2350, 2400, 2450, 2480, 2500, 2520, 2540, 2550, 2560],
 };
 
-/* ───────────────────────── /dashboard/actions ───────────────────────── */
-
-export const ACTIONS_KPIS: Kpi[] = [
-  { label: "Total Recommendations", value: "24" },
-  { label: "Potential Reduction", value: "1,240", unit: "tCO₂e/yr" },
-  { label: "In Progress", value: "8" },
-  { label: "Completed", value: "6" },
-];
+/* ─────────────────  /dashboard/actions  ───────────────── */
+export const ACTIONS_KPIS = [
+  { id: "potential", label: "Potential Reduction", value: "1,246", unit: "tCO₂e", sub: "31% of total emissions" },
+  { id: "savings", label: "Potential Cost Savings", value: "$420K", sub: "Annual savings" },
+  { id: "in-progress", label: "Implementation in Progress", value: "5", sub: "Actions started" },
+  { id: "completed", label: "Completed Actions", value: "8", sub: "This year" },
+  { id: "roi", label: "Avg. ROI", value: "2.8x", sub: "Across all actions" },
+] as const;
 
 export const ACTION_RECOMMENDATIONS = [
-  { id: 1, title: "Switch to renewable energy contracts", body: "Move facility power contracts to certified renewable providers.", category: "Energy", reduction: 320, cost: "$45K/year", roi: "3.2x", difficulty: "Medium" as const, priority: "High" as const, status: "In Progress" as const },
-  { id: 2, title: "Upgrade to LED lighting facility-wide", body: "Replace remaining fluorescent fixtures across all sites.", category: "Facilities", reduction: 85, cost: "$12K/one-time", roi: "5.1x", difficulty: "Low" as const, priority: "Medium" as const, status: "Completed" as const },
-  { id: 3, title: "Optimize fleet routing", body: "Use route-optimization software to cut fuel use and idle time.", category: "Transport", reduction: 145, cost: "$8K/year", roi: "4.4x", difficulty: "Medium" as const, priority: "High" as const, status: "Recommended" as const },
-  { id: 4, title: "Install smart HVAC controls", body: "Add occupancy-based scheduling to reduce off-hours energy use.", category: "Facilities", reduction: 110, cost: "$22K/one-time", roi: "2.8x", difficulty: "Medium" as const, priority: "Medium" as const, status: "Recommended" as const },
-  { id: 5, title: "Shift suppliers to low-carbon alternatives", body: "Prioritize vendors with published, verified emissions data.", category: "Supply Chain", reduction: 410, cost: "$0/year", roi: "6.0x", difficulty: "High" as const, priority: "High" as const, status: "In Progress" as const },
-  { id: 6, title: "Enable remote-work default policy", body: "Reduce commute and office-energy emissions with a hybrid default.", category: "Operations", reduction: 60, cost: "$0/one-time", roi: "8.0x", difficulty: "Low" as const, priority: "Low" as const, status: "Recommended" as const },
-];
-
-export const ACTION_OVERVIEW = { total: 24, recommended: 10, inProgress: 8, notStarted: 0, completed: 6 };
+  { id: 1, title: "Switch to Renewable Energy", category: "Energy", body: "Transition to 100% renewable electricity through green energy tariffs.", reduction: 320, cost: "$45,000/yr", difficulty: "Medium", roi: "3.4x", priority: "High", status: "Recommended", effort: 3 },
+  { id: 2, title: "Optimize Logistics Routes", category: "Logistics", body: "Use AI route optimization and consolidate shipments to reduce fuel consumption.", reduction: 180, cost: "$18,000/yr", difficulty: "Low", roi: "2.7x", priority: "High", status: "Recommended", effort: 2 },
+  { id: 3, title: "Reduce High-Emission Suppliers", category: "Supply Chain", body: "Engage suppliers and switch to low-carbon alternatives.", reduction: 250, cost: "$25,000/yr", difficulty: "High", roi: "2.1x", priority: "Medium", status: "Recommended", effort: 4 },
+  { id: 4, title: "Improve Energy Efficiency", category: "Operations", body: "Upgrade to energy-efficient equipment and smart building controls.", reduction: 140, cost: "$75,000", difficulty: "Medium", roi: "3.9x", priority: "Medium", status: "In Progress", effort: 3 },
+  { id: 5, title: "Reduce Business Travel Emissions", category: "Travel", body: "Encourage virtual meetings and optimize travel policies.", reduction: 90, cost: "$8,000/yr", difficulty: "Low", roi: "4.2x", priority: "Medium", status: "Not Started", effort: 2 },
+  { id: 6, title: "Reduce Waste & Increase Recycling", category: "Waste", body: "Implement waste reduction programs and improve recycling rates.", reduction: 60, cost: "$5,000/yr", difficulty: "Low", roi: "1.8x", priority: "Low", status: "Not Started", effort: 1 },
+] as const;
 
 export const ACTION_CATEGORIES_BREAKDOWN = [
-  { label: "Energy", value: 320, reduction: 320, percent: 33, color: COLORS[0] },
-  { label: "Supply Chain", value: 410, reduction: 410, percent: 42, color: COLORS[1] },
-  { label: "Transport", value: 145, reduction: 145, percent: 15, color: COLORS[2] },
-  { label: "Facilities", value: 100, reduction: 100, percent: 10, color: COLORS[3] },
-];
+  { label: "Energy",       reduction: 520, percent: 42 },
+  { label: "Supply Chain", reduction: 250, percent: 20 },
+  { label: "Logistics",    reduction: 180, percent: 14 },
+  { label: "Operations",   reduction: 140, percent: 11 },
+  { label: "Travel",       reduction: 90,  percent: 7 },
+] as const;
+
+export const ACTION_OVERVIEW = {
+  total: 12,
+  recommended: 5,
+  inProgress: 3,
+  notStarted: 3,
+  completed: 1,
+} as const;
 
 export const ROADMAP = [
-  { phase: "Short-Term (0-6mo)", items: ["Switch to renewable energy contracts", "Upgrade facility lighting to LED", "Enable remote-work default policy"] },
-  { phase: "Mid-Term (6-18mo)", items: ["Optimize fleet routing", "Install smart HVAC controls"] },
-  { phase: "Long-Term (18mo+)", items: ["Shift suppliers to low-carbon alternatives", "Facility-wide renewable retrofit"] },
-];
+  { phase: "Short Term (0–3 months)", items: ["Optimize logistics", "Reduce business travel", "Improve recycling"] },
+  { phase: "Mid Term (3–12 months)",  items: ["Improve energy efficiency", "Supplier engagement"] },
+  { phase: "Long Term (12+ months)",  items: ["Switch to renewable energy", "Process innovation"] },
+] as const;
 
-/* ───────────────────────── /dashboard/analytics ───────────────────────── */
-
-export const ANALYTICS_KPIS: Kpi[] = [
-  { id: "total", label: "Total Emissions", value: "2,453", unit: "tCO₂e" },
-  { id: "intensity", label: "Emissions Intensity", value: "0.42", unit: "tCO₂e/$K" },
-  { id: "yoy", label: "YoY Change", value: "-12%" },
-  { id: "forecast", label: "2026 Forecast", value: "28,650", unit: "tCO₂e" },
-  { id: "goal", label: "Goal Progress", value: "42%" },
-];
+/* ─────────────────  /dashboard/analytics  ───────────────── */
+export const ANALYTICS_KPIS = [
+  { id: "total", label: "Total Emissions", value: "2,453", unit: "tCO₂e", trend: { direction: "down" as const, text: "18% vs last month", goodWhen: "down" as const } },
+  { id: "intensity", label: "Emissions Intensity", value: "0.42", unit: "tCO₂e / $K", trend: { direction: "down" as const, text: "12% vs last month", goodWhen: "down" as const } },
+  { id: "cost", label: "Total Cost", value: "$128,430", trend: { direction: "down" as const, text: "9% vs last month", goodWhen: "down" as const } },
+  { id: "reduction", label: "Reduction vs Baseline", value: "28%", sub: "On track for 2030 goal" },
+  { id: "forecast", label: "Forecasted (2024)", value: "28,650", unit: "tCO₂e", sub: "vs 2023 forecast", trend: { direction: "down" as const, text: "14% vs 2023", goodWhen: "down" as const } },
+] as const;
 
 export const ANALYTICS_SCOPES = [
-  { label: "Scope 1", value: 490, percent: 20, color: COLORS[0] },
-  { label: "Scope 2", value: 736, percent: 30, color: COLORS[1] },
-  { label: "Scope 3", value: 1227, percent: 50, color: COLORS[2] },
-];
+  { label: "Scope 1", value: 613, percent: 25, color: "rgba(132,204,22,0.95)" },
+  { label: "Scope 2", value: 1104, percent: 45, color: "rgba(56,189,248,0.95)" },
+  { label: "Scope 3", value: 736, percent: 30, color: "rgba(168,85,247,0.95)" },
+] as const;
 
 export const ANALYTICS_TREND = {
   labels: ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
@@ -260,317 +277,431 @@ export const ANALYTICS_TREND = {
 };
 
 export const ANALYTICS_INDUSTRY = [
-  { label: "You", value: 0.42 },
-  { label: "Industry Avg", value: 0.48 },
-  { label: "Top Quartile", value: 0.23 },
-  { label: "Peer Group A", value: 0.51 },
-  { label: "Peer Group B", value: 0.39 },
-];
+  { label: "You",            value: 0.42 },
+  { label: "Construction",   value: 0.73 },
+  { label: "Manufacturing",  value: 0.58 },
+  { label: "Energy",         value: 0.24 },
+  { label: "Technology",     value: 0.91 },
+  { label: "Services",       value: 0.36 },
+] as const;
 
 export const ANALYTICS_OPPORTUNITIES = [
-  { id: 1, name: "Renewable energy contracts", reduction: 320, percent: 15, cost: "Medium", effort: "Low", roi: "3.2x", priority: "High" as const },
-  { id: 2, name: "Supplier engagement program", reduction: 410, percent: 20, cost: "Low", effort: "High", roi: "4.1x", priority: "High" as const },
-  { id: 3, name: "Fleet route optimization", reduction: 145, percent: 8, cost: "Low", effort: "Medium", roi: "2.5x", priority: "Medium" as const },
-  { id: 4, name: "Facility retrofit", reduction: 195, percent: 10, cost: "High", effort: "High", roi: "1.6x", priority: "Medium" as const },
-  { id: 5, name: "Remote-work policy", reduction: 60, percent: 4, cost: "Low", effort: "Low", roi: "5.0x", priority: "Low" as const },
-];
-// percents intentionally total 57% -- "of total addressable emissions"
-// (see dashboard-data.test.ts), not 100%; the remainder needs longer-
-// horizon initiatives not yet modeled as discrete opportunities.
-// Note: reduction opportunity percents intentionally total 57% here — the
-// analytics page/test treat this as "of total addressable emissions",
-// not 100% (a majority still requires longer-horizon initiatives).
+  { id: 1, name: "Switch to Renewable Energy",  reduction: 512, percent: 21, cost: "$$", effort: "Medium", roi: "3.4x", priority: "High" },
+  { id: 2, name: "Optimize Logistics Routes",  reduction: 312, percent: 13, cost: "$",  effort: "Low",    roi: "2.7x", priority: "High" },
+  { id: 3, name: "Reduce High-Emission Suppliers", reduction: 245, percent: 10, cost: "$$", effort: "High", roi: "2.1x", priority: "Medium" },
+  { id: 4, name: "Improve Energy Efficiency",  reduction: 198, percent: 8,  cost: "$$", effort: "Medium", roi: "2.9x", priority: "Medium" },
+  { id: 5, name: "Reduce Business Travel",     reduction: 126, percent: 5,  cost: "$",  effort: "Low",    roi: "1.8x", priority: "Low" },
+] as const;
 
-/* ───────────────────────── /dashboard/goals ───────────────────────── */
-
-export const GOALS_KPIS: Kpi[] = [
-  { label: "Active Goals", value: "6" },
-  { label: "On Track", value: "3" },
-  { label: "At Risk", value: "2" },
-  { label: "Completed", value: "1" },
-];
+/* ─────────────────  /dashboard/goals  ───────────────── */
+export const GOALS_KPIS = [
+  { id: "active", label: "Active Goals", value: "6", sub: "1 new this month" },
+  { id: "target", label: "Total Target Reduction", value: "42%", sub: "By 2030" },
+  { id: "emissions", label: "Emissions to Reduce", value: "1,250", unit: "tCO₂e", sub: "From 2023 baseline" },
+  { id: "progress", label: "Avg Progress", value: "58%", sub: "Across all goals" },
+  { id: "on-track", label: "On Track", value: "4/6", sub: "67% of goals" },
+] as const;
 
 export const GOAL_ROADMAP_DATA = {
   labels: ["2023", "2024", "2025", "2026", "2027", "2028", "2029", "2030"],
-  actual: [3200, 2980, 2453, 2453, 2453, 2453, 2453, 2453],
-  target: [3200, 2900, 2600, 2300, 2000, 1700, 1400, 1100],
-  baseline: [3200, 3150, 3100, 3050, 3000, 2950, 2900, 2850],
+  actual:    [2976, 2730, 2453, 2200, 1900, 1500, 1100, 700],
+  target:    [2976, 2650, 2350, 2050, 1750, 1450, 1150, 850],
+  baseline:  [2976, 2976, 2976, 2976, 2976, 2976, 2976, 2976],
 };
 
 export const YOUR_GOALS = [
-  { id: 1, title: "Reduce Scope 1 & 2 by 30% by 2028", name: "Reduce Scope 1 & 2 by 30% by 2028", sub: "Emissions reduction target", status: "On Track" as const, progress: 62, category: "Emissions", type: "SBTi", target: "30% reduction", deadline: "Dec 2028" },
-  { id: 2, title: "Achieve Net Zero by 2035", name: "Achieve Net Zero by 2035", sub: "Long-term climate commitment", status: "On Track" as const, progress: 24, category: "Emissions", type: "Corporate", target: "Net Zero", deadline: "Dec 2035" },
-  { id: 3, title: "100% renewable energy by 2027", name: "100% renewable energy by 2027", sub: "Energy transition target", status: "At Risk" as const, progress: 45, category: "Energy", type: "Corporate", target: "100% renewable", deadline: "Dec 2027" },
-  { id: 4, title: "Zero waste to landfill by 2026", name: "Zero waste to landfill by 2026", sub: "Waste & circularity target", status: "Behind" as const, progress: 30, category: "Waste", type: "Corporate", target: "Zero waste", deadline: "Dec 2026" },
-  { id: 5, title: "Carbon-neutral shipping by 2029", name: "Carbon-neutral shipping by 2029", sub: "Transport emissions target", status: "On Track" as const, progress: 15, category: "Transport", type: "Corporate", target: "Carbon-neutral", deadline: "Dec 2029" },
-  { id: 6, title: "CDP A-list by 2025", name: "CDP A-list by 2025", sub: "Disclosure & compliance target", status: "Completed" as const, progress: 100, category: "Compliance", type: "SBTi", target: "CDP A", deadline: "Dec 2025" },
-];
+  { id: 1, name: "Net Zero by 2030", sub: "Company-wide", type: "Net Zero", target: "Net Zero by 2030", progress: 58, status: "On Track", deadline: "Dec 31, 2030" },
+  { id: 2, name: "Reduce 42% Scope 1 & 2", sub: "Absolute reduction", type: "SBTi", target: "42% by 2030", progress: 61, status: "On Track", deadline: "Dec 31, 2030" },
+  { id: 3, name: "Reduce 25% Scope 3", sub: "Absolute reduction", type: "SBTi", target: "25% by 2030", progress: 33, status: "At Risk", deadline: "Dec 31, 2030" },
+  { id: 4, name: "50% Renewable Energy", sub: "Energy Transition", type: "Other", target: "50% by 2026", progress: 76, status: "On Track", deadline: "Jun 30, 2026" },
+  { id: 5, name: "Reduce 20% Scope 1 & 2", sub: "Short-term target", type: "SBTi", target: "20% by 2025", progress: 82, status: "On Track", deadline: "Dec 31, 2025" },
+  { id: 6, name: "Supplier Engagement", sub: "Engage key suppliers", type: "Other", target: "80% by 2026", progress: 40, status: "Behind", deadline: "Jun 30, 2026" },
+] as const;
 
 export const GOAL_TYPES = [
-  { label: "Emissions Reduction", value: 45, percent: 45, color: COLORS[0] },
-  { label: "Energy Transition", value: 30, percent: 30, color: COLORS[1] },
-  { label: "Waste & Circularity", value: 15, percent: 15, color: COLORS[2] },
-  { label: "Compliance", value: 10, percent: 10, color: COLORS[3] },
-];
+  { label: "SBTi Targets",    value: 3, percent: 50, color: "rgba(132,204,22,0.95)" },
+  { label: "Net-zero Targets", value: 2, percent: 33, color: "rgba(56,189,248,0.95)" },
+  { label: "Other Targets",    value: 1, percent: 17, color: "rgba(168,85,247,0.95)" },
+] as const;
 
 export const UPCOMING_DEADLINES = [
-  { id: 1, title: "CDP Climate Disclosure", name: "CDP Climate Disclosure", date: "Aug 12, 2026", daysLeft: 21 },
-  { id: 2, title: "Q2 Scope 3 data submission", name: "Q2 Scope 3 data submission", date: "Jul 31, 2026", daysLeft: 9 },
-  { id: 3, title: "Annual sustainability report", name: "Annual sustainability report", date: "Sep 5, 2026", daysLeft: 45 },
-];
+  { id: 1, name: "Reduce 20% Scope 1 & 2", date: "Dec 31, 2025", daysLeft: 164 },
+  { id: 2, name: "50% Renewable Energy",   date: "Jun 30, 2026", daysLeft: 345 },
+  { id: 3, name: "Net Zero Commitment",     date: "Dec 31, 2030", daysLeft: 2001 },
+] as const;
 
 export const MILESTONES = [
-  { id: 1, title: "Baseline year established", name: "Baseline year established", date: "Jan 2023", status: "Completed" as const },
-  { id: 2, title: "First 10% reduction achieved", name: "First 10% reduction achieved", date: "Jun 2024", status: "Completed" as const },
-  { id: 3, title: "Renewable energy contracts signed", name: "Renewable energy contracts signed", date: "Feb 2025", status: "Completed" as const },
-  { id: 4, title: "30% reduction milestone", name: "30% reduction milestone", date: "Dec 2028", status: "On Track" as const },
-  { id: 5, title: "Net zero target year", name: "Net zero target year", date: "Dec 2035", status: "Upcoming" as const },
-];
+  { id: 1, name: "Baseline Assessment",    status: "Completed", date: "Mar 15, 2023" },
+  { id: 2, name: "Set Science-Based Targets", status: "Completed", date: "May 10, 2023" },
+  { id: 3, name: "Reduce 20% Scope 1 & 2",  status: "On Track", date: "Dec 31, 2025" },
+  { id: 4, name: "50% Renewable Energy",   status: "Upcoming", date: "Jun 30, 2026" },
+  { id: 5, name: "Net Zero Achieved",      status: "Upcoming", date: "Dec 31, 2030" },
+] as const;
 
-/* ───────────────────────── /dashboard/sources ───────────────────────── */
-
-export const SOURCES_KPIS: Kpi[] = [
-  { label: "Total Sources", value: "11" },
-  { label: "Active", value: "9" },
-  { label: "Syncing", value: "1" },
-  { label: "Data Points / day", value: "48,200" },
-];
+/* ─────────────────  /dashboard/sources  ───────────────── */
+export const SOURCES_KPIS = [
+  { id: "total", label: "Total Data Sources", value: "11", sub: "3 new this month" },
+  { id: "active", label: "Active Sources", value: "8", sub: "72.7% of total" },
+  { id: "points", label: "Data Points", value: "2.4M", sub: "15% vs last month" },
+  { id: "emissions", label: "Total Emissions", value: "2,453", unit: "tCO₂e", sub: "18% vs last month" },
+  { id: "freshness", label: "Data Freshness", value: "98%", sub: "Excellent" },
+] as const;
 
 export const DATA_SOURCES = [
-  { id: 1, name: "Grid Electricity (NSW1)", sub: "AEMO NEM dispatch feed", type: "Utility", status: "Active" as const, dataPoints: 8640, emissions: 812.4, lastSync: "5 min ago" },
-  { id: 2, name: "Grid Electricity (VIC1)", sub: "AEMO NEM dispatch feed", type: "Utility", status: "Active" as const, dataPoints: 8640, emissions: 640.2, lastSync: "5 min ago" },
-  { id: 3, name: "Natural Gas Meters", sub: "Facility metering", type: "Utility", status: "Active" as const, dataPoints: 2880, emissions: 310.8, lastSync: "12 min ago" },
-  { id: 4, name: "Fleet Telematics", sub: "Vehicle GPS + fuel logs", type: "IoT", status: "Active" as const, dataPoints: 14400, emissions: 145.0, lastSync: "2 min ago" },
-  { id: 5, name: "SAP ERP", sub: "Procurement & logistics data", type: "ERP", status: "Active" as const, dataPoints: 3200, emissions: 88.5, lastSync: "1 hour ago" },
-  { id: 6, name: "Weather Feed (BoM)", sub: "Bureau of Meteorology observations", type: "External API", status: "Active" as const, dataPoints: 4320, emissions: 0, lastSync: "3 min ago" },
-  { id: 7, name: "AEMO Market Data", sub: "Wholesale price & generation mix", type: "External API", status: "Active" as const, dataPoints: 5760, emissions: 0, lastSync: "1 min ago" },
-  { id: 8, name: "Waste Management System", sub: "Vendor waste manifests", type: "Vendor", status: "Syncing" as const, dataPoints: 640, emissions: 42.1, lastSync: "syncing" },
-  { id: 9, name: "Travel Booking Platform", sub: "Employee travel bookings", type: "Vendor", status: "Active" as const, dataPoints: 210, emissions: 60.3, lastSync: "6 hours ago" },
-  { id: 10, name: "Legacy Facilities Sensor Net", sub: "Deprecated on-prem sensors", type: "IoT", status: "Inactive" as const, dataPoints: 0, emissions: 0, lastSync: "14 days ago" },
-  { id: 11, name: "Supplier Emissions Portal", sub: "Upstream Scope 3 supplier data", type: "Vendor", status: "Active" as const, dataPoints: 128, emissions: 353.7, lastSync: "1 day ago" },
-];
+  { id: 1, name: "AWS CloudTrail",   sub: "Amazon Web Services", type: "Cloud",   status: "Active",  lastSync: "2 min ago",   dataPoints: 245320, emissions: 512.45, freshness: 98 },
+  { id: 2, name: "Stripe Payments",  sub: "Payment Processor",  type: "Finance", status: "Active",  lastSync: "15 min ago",  dataPoints: 85430,  emissions: 120.38, freshness: 96 },
+  { id: 3, name: "Fleet GPS Data",   sub: "Transportation",     type: "Logistics", status: "Active",  lastSync: "32 min ago",  dataPoints: 532184, emissions: 856.72, freshness: 97 },
+  { id: 4, name: "Electricity Usage",sub: "Energy Provider",    type: "Energy",   status: "Active",  lastSync: "1 hour ago",  dataPoints: 128645, emissions: 342.18, freshness: 99 },
+  { id: 5, name: "Waste Management", sub: "Waste Management",   type: "Waste",    status: "Active",  lastSync: "2 hours ago", dataPoints: 42184,  emissions: 68.43,  freshness: 95 },
+  { id: 6, name: "Water Consumption",sub: "Water Utility",      type: "Utilities", status: "Active",  lastSync: "3 hours ago", dataPoints: 23876,  emissions: 24.18,  freshness: 94 },
+  { id: 7, name: "Google Workspace", sub: "Productivity Suite", type: "SaaS",     status: "Active",  lastSync: "5 hours ago", dataPoints: 76432,  emissions: 45.12,  freshness: 93 },
+  { id: 8, name: "MongoDB Atlas",    sub: "Database",           type: "Cloud",   status: "Inactive", lastSync: "1 day ago",   dataPoints: 12430,  emissions: 12.65,  freshness: 0 },
+  { id: 9, name: "Manual Uploads",    sub: "Custom Data",        type: "Manual",   status: "Active",  lastSync: "2 days ago",  dataPoints: 8765,   emissions: 9.12,   freshness: 90 },
+  { id: 10, name: "Supplier Data Feed", sub: "Supply Chain",      type: "Supply Chain", status: "Syncing", lastSync: "Syncing…", dataPoints: 0, emissions: 0, freshness: 0 },
+  { id: 11, name: "SAP ERP",          sub: "Enterprise Resource Planning", type: "ERP", status: "Inactive", lastSync: "3 days ago", dataPoints: 0, emissions: 0, freshness: 0 },
+] as const;
 
-export const SOURCE_HEALTH = { healthy: 9, syncing: 1, inactive: 1, percent: 82 };
+export const SOURCE_HEALTH = { healthy: 8, syncing: 1, inactive: 2, percent: 98 } as const;
 
-export const SOURCES_BY_TYPE: BreakdownItem[] = [
-  { label: "Utility", value: 3, percent: 27, color: COLORS[0] },
-  { label: "IoT", value: 2, percent: 18, color: COLORS[1] },
-  { label: "ERP", value: 1, percent: 9, color: COLORS[2] },
-  { label: "External API", value: 2, percent: 18, color: COLORS[3] },
-  { label: "Vendor", value: 3, percent: 27, color: COLORS[4] },
-];
+export const SOURCES_BY_TYPE = [
+  { label: "Cloud",      value: 3, percent: 27, color: "rgba(56,189,248,0.95)" },
+  { label: "Energy",     value: 2, percent: 18, color: "rgba(132,204,22,0.95)" },
+  { label: "Finance",    value: 2, percent: 18, color: "rgba(168,85,247,0.95)" },
+  { label: "Logistics",  value: 2, percent: 18, color: "rgba(16,185,129,0.95)" },
+  { label: "SaaS",       value: 1, percent: 9,  color: "rgba(244,63,94,0.95)" },
+  { label: "Others",     value: 1, percent: 10, color: "rgba(148,163,184,0.6)" },
+] as const;
 
-export const SOURCE_BREAKDOWN: BreakdownItem[] = SOURCES_BY_TYPE;
+export const SOURCE_BREAKDOWN = [
+  { label: "Fleet GPS Data",  value: 856.72, percent: 34.9 },
+  { label: "AWS CloudTrail",  value: 512.45, percent: 20.9 },
+  { label: "Electricity Usage", value: 342.18, percent: 14.0 },
+  { label: "Stripe Payments", value: 120.38, percent: 4.9 },
+  { label: "Waste Management", value: 68.43, percent: 2.8 },
+  { label: "Others",          value: 552.84, percent: 22.5 },
+] as const;
 
 export const SOURCE_ALERTS = [
-  { id: 1, source: "Legacy Facilities Sensor Net", name: "Legacy Facilities Sensor Net", message: "No data received in 14 days", type: "sync failed", time: "14 days ago", severity: "High" as const },
-  { id: 2, source: "Waste Management System", name: "Waste Management System", message: "Sync in progress, delayed 20 min", type: "sync delayed", time: "20 min ago", severity: "Low" as const },
-];
+  { id: 1, name: "MongoDB Atlas",   time: "1 day ago",   type: "Connection failed" },
+  { id: 2, name: "Supplier Data Feed", time: "2 hours ago", type: "Sync delayed" },
+  { id: 3, name: "Electricity Usage", time: "3 hours ago", type: "Data validated" },
+] as const;
 
 export const POPULAR_INTEGRATIONS = [
-  { id: 1, name: "SAP", category: "ERP", sub: "ERP & procurement data", color: "rgba(56,102,204,0.85)" },
-  { id: 2, name: "Salesforce", category: "CRM", sub: "Customer & sales data", color: "rgba(56,189,248,0.85)" },
-  { id: 3, name: "AWS", category: "Cloud", sub: "Cloud compute & storage usage", color: "rgba(251,146,60,0.85)" },
-  { id: 4, name: "Workday", category: "HR", sub: "Employee & travel data", color: "rgba(132,204,22,0.85)" },
-];
+  { id: 1, name: "AWS",             sub: "Cloud", color: "#FF9900" },
+  { id: 2, name: "Google Cloud",    sub: "Cloud", color: "#4285F4" },
+  { id: 3, name: "Microsoft Azure", sub: "Cloud", color: "#00A4EF" },
+  { id: 4, name: "Stripe",          sub: "Finance", color: "#635BFF" },
+  { id: 5, name: "Salesforce",      sub: "CRM", color: "#00A1E0" },
+  { id: 6, name: "SAP",             sub: "ERP", color: "#0FAAFF" },
+] as const;
 
-/* ───────────────────────── /dashboard/notifications ───────────────────────── */
-
-export const NOTIFICATIONS_KPIS: Kpi[] = [
-  { label: "Unread", value: "4" },
-  { label: "High Priority", value: "2" },
-  { label: "This Week", value: "10" },
-  { label: "Actioned", value: "6" },
-];
+/* ─────────────────  /dashboard/notifications  ───────────────── */
+export const NOTIFICATIONS_KPIS = [
+  { id: "unread", label: "Unread", value: "6", sub: "View all unread" },
+  { id: "today", label: "Today", value: "12", sub: "20% vs yesterday" },
+  { id: "week", label: "This Week", value: "38", sub: "15% vs last week" },
+  { id: "critical", label: "Critical", value: "2", sub: "Requires immediate attention" },
+  { id: "resolved", label: "Resolved", value: "24", sub: "In the last 7 days" },
+] as const;
 
 export const NOTIFICATION_LIST = [
-  { id: 1, title: "Data source disconnected", body: "Legacy Facilities Sensor Net has not reported in 14 days.", message: "Legacy Facilities Sensor Net has not reported in 14 days.", type: "Data", color: "rose", priority: "High" as const, read: false, time: "2 hours ago" },
-  { id: 2, title: "Goal at risk", body: "100% renewable energy by 2027 is trending behind schedule.", message: "100% renewable energy by 2027 is trending behind schedule.", type: "Goal", color: "emerald", priority: "High" as const, read: false, time: "5 hours ago" },
-  { id: 3, title: "Monthly report ready", body: "Your May 2026 emissions report has been generated.", message: "Your May 2026 emissions report has been generated.", type: "Report", color: "purple", priority: "Medium" as const, read: false, time: "1 day ago" },
-  { id: 4, title: "New recommendation available", body: "AI identified a new reduction opportunity worth 145 tCO₂e/yr.", message: "AI identified a new reduction opportunity worth 145 tCO₂e/yr.", type: "Recommendation", color: "sky", priority: "Medium" as const, read: true, time: "1 day ago" },
-  { id: 5, title: "Milestone achieved", body: "30% reduction milestone is now on track.", message: "30% reduction milestone is now on track.", type: "Goal", color: "emerald", priority: "Low" as const, read: true, time: "2 days ago" },
-  { id: 6, title: "Data sync completed", body: "Waste Management System finished syncing.", message: "Waste Management System finished syncing.", type: "Data", color: "blue", priority: "Low" as const, read: true, time: "3 days ago" },
-  { id: 7, title: "Team member added", body: "Jordan Lee was added to your organization.", message: "Jordan Lee was added to your organization.", type: "Compliance", color: "amber", priority: "Low" as const, read: true, time: "4 days ago" },
-  { id: 8, title: "CDP deadline approaching", body: "Climate disclosure is due in 21 days.", message: "Climate disclosure is due in 21 days.", type: "Compliance", color: "amber", priority: "High" as const, read: false, time: "5 days ago" },
-  { id: 9, title: "Scenario comparison ready", body: "Your 'Aggressive Reduction' scenario finished modeling.", message: "Your 'Aggressive Reduction' scenario finished modeling.", type: "Anomaly", color: "purple", priority: "Medium" as const, read: true, time: "6 days ago" },
-  { id: 10, title: "Welcome to EcoLens", body: "Your account setup is complete.", message: "Your account setup is complete.", type: "Report", color: "blue", priority: "Low" as const, read: true, time: "2 weeks ago" },
-];
+  { id: 1, title: "New Recommendation Available", body: "AI has generated 3 new recommendations to help reduce emissions.", type: "Recommendation", priority: "Medium", time: "10 min ago", color: "blue" },
+  { id: 2, title: "Goal Milestone Achieved", body: "Great job! You've achieved 50% progress towards Reduce Scope 1 & 2 emissions by 2030.", type: "Goal", priority: "Low", time: "1 hour ago", color: "emerald" },
+  { id: 3, title: "Data Ingestion Failure", body: "Failed to ingest data from \"Electricity - Dhaka Office\". Please check the connection and try again.", type: "Data", priority: "High", time: "2 hours ago", color: "rose" },
+  { id: 4, title: "Report Generation Completed", body: "Your report \"GHG Protocol Report - Q1 2024\" has been generated successfully.", type: "Report", priority: "Low", time: "3 hours ago", color: "purple" },
+  { id: 5, title: "Emission Anomaly Detected", body: "An unusual increase of 35% detected in Transportation emissions compared to last month.", type: "Anomaly", priority: "High", time: "5 hours ago", color: "amber" },
+  { id: 6, title: "Compliance Deadline Approaching", body: "CDP Climate Change responses deadline is in 10 days (May 25, 2024).", type: "Compliance", priority: "Medium", time: "6 hours ago", color: "sky" },
+  { id: 7, title: "Data Ingestion Successful", body: "Data from \"Natural Gas - Plant 2\" was ingested successfully.", type: "Data", priority: "Low", time: "8 hours ago", color: "emerald" },
+  { id: 8, title: "You were mentioned", body: "Sarah Ahmed mentioned you in a comment on \"Net Zero 2040 Goal\".", type: "Mention", priority: "Low", time: "Yesterday, 09:15 PM", color: "purple" },
+  { id: 9, title: "Recommendation Implemented", body: "Your recommendation \"Switch to LED Lighting\" has been marked as Implemented.", type: "Recommendation", priority: "Low", time: "Yesterday, 04:30 PM", color: "blue" },
+  { id: 10, title: "Data Quality Issue", body: "Data quality check failed for \"Supplier Emissions\". Missing 12 required records.", type: "Data", priority: "High", time: "May 11, 2024 11:20 AM", color: "rose" },
+] as const;
 
-export const NOTIFICATION_TYPES_BREAKDOWN: BreakdownItem[] = [
-  { label: "Alerts", value: 3, percent: 30, color: COLORS[3] },
-  { label: "Reports", value: 2, percent: 20, color: COLORS[1] },
-  { label: "Recommendations", value: 3, percent: 30, color: COLORS[0] },
-  { label: "System", value: 2, percent: 20, color: COLORS[5] },
-];
+export const NOTIFICATION_TYPES_BREAKDOWN = [
+  { label: "Recommendations", value: 8, percent: 21, color: "rgba(56,189,248,0.95)" },
+  { label: "Goals",            value: 7, percent: 18, color: "rgba(16,185,129,0.95)" },
+  { label: "Data",             value: 9, percent: 24, color: "rgba(244,63,94,0.95)" },
+  { label: "Reports",          value: 5, percent: 13, color: "rgba(168,85,247,0.95)" },
+  { label: "Anomalies",        value: 4, percent: 11, color: "rgba(245,158,11,0.95)" },
+  { label: "Compliance",       value: 5, percent: 13, color: "rgba(132,204,22,0.95)" },
+] as const;
 
 export const NOTIFICATION_CHANNELS = [
-  { name: "Email", label: "Email", enabled: true },
-  { name: "In-app", label: "In-app", enabled: true },
-  { name: "Slack", label: "Slack", enabled: false },
-  { name: "SMS", label: "SMS", enabled: false },
-];
+  { label: "In-app", enabled: true },
+  { label: "Email",  enabled: true },
+  { label: "SMS",    enabled: false },
+  { label: "Slack",  enabled: true },
+] as const;
 
-/* ───────────────────────── /dashboard/reports ───────────────────────── */
-
-export const REPORTS_KPIS: Kpi[] = [
-  { label: "Reports Generated", value: "34" },
-  { label: "This Quarter", value: "8" },
-  { label: "Scheduled", value: "3" },
-  { label: "Frameworks Covered", value: "5" },
-];
-
-export const REPORT_TYPES = [
-  { id: "ghg", name: "GHG Protocol", sub: "The most widely used corporate GHG accounting standard.", cta: "Generate" },
-  { id: "cdp", name: "CDP Climate Change", sub: "Annual climate disclosure for investors and customers.", cta: "Generate" },
-  { id: "tcfd", name: "TCFD", sub: "Climate-related financial risk disclosure.", cta: "Generate" },
-  { id: "sasb", name: "SASB", sub: "Industry-specific sustainability accounting metrics.", cta: "Generate" },
-  { id: "sec", name: "SEC Climate Disclosure", sub: "US SEC climate-related disclosure rules.", cta: "Generate" },
-  { id: "iso", name: "ISO 14064", sub: "International GHG quantification and verification standard.", cta: "Generate" },
-  { id: "custom", name: "Custom Report", sub: "Build a report with exactly the metrics you need.", cta: "Build" },
-  { id: "board", name: "Board Summary", sub: "A concise summary for board and executive review.", cta: "Generate" },
-];
-
-export const RECENT_REPORTS = [
-  { id: 1, name: "May 2026 Emissions Report", sub: "GHG Protocol · May 2026", type: "GHG Protocol", framework: "GHG Protocol", period: "May 2026", date: "2026-06-01", generated: "2026-06-01 09:15 AM", status: "Completed" as const, size: "2.4 MB" },
-  { id: 2, name: "Q1 2026 CDP Submission", sub: "CDP · Q1 2026", type: "CDP", framework: "CDP", period: "Q1 2026", date: "2026-04-15", generated: "2026-04-15 02:40 PM", status: "Completed" as const, size: "5.1 MB" },
-  { id: 3, name: "2025 Annual Sustainability Report", sub: "ESG · FY2025", type: "Custom", framework: "ESG", period: "FY2025", date: "2026-01-20", generated: "2026-01-20 11:05 AM", status: "Completed" as const, size: "8.7 MB" },
-  { id: 4, name: "TCFD Climate Risk Disclosure", sub: "TCFD · FY2025", type: "TCFD", framework: "TCFD", period: "FY2025", date: "2025-12-10", generated: "2025-12-10 04:30 PM", status: "Completed" as const, size: "3.3 MB" },
-  { id: 5, name: "April 2026 Emissions Report", sub: "GHG Protocol · Apr 2026", type: "GHG Protocol", framework: "GHG Protocol", period: "Apr 2026", date: "2026-05-01", generated: "2026-05-01 09:10 AM", status: "Completed" as const, size: "2.2 MB" },
-  { id: 6, name: "Board Sustainability Summary Q1", sub: "Board Summary · Q1 2026", type: "Board Summary", framework: "Board Summary", period: "Q1 2026", date: "2026-04-05", generated: "2026-04-05 08:00 AM", status: "Completed" as const, size: "1.1 MB" },
-  { id: 7, name: "SASB Metrics 2025", sub: "SASB · FY2025", type: "SASB", framework: "SASB", period: "FY2025", date: "2026-02-28", generated: "2026-02-28 03:20 PM", status: "Completed" as const, size: "4.0 MB" },
-  { id: 8, name: "March 2026 Emissions Report", sub: "GHG Protocol · Mar 2026", type: "GHG Protocol", framework: "GHG Protocol", period: "Mar 2026", date: "2026-04-01", generated: "2026-04-01 09:05 AM", status: "Completed" as const, size: "2.3 MB" },
-];
-
-export const REPORT_FRAMEWORK_BREAKDOWN: BreakdownItem[] = [
-  { label: "GHG Protocol", value: 14, percent: 41, color: COLORS[0] },
-  { label: "CDP", value: 6, percent: 18, color: COLORS[1] },
-  { label: "TCFD", value: 5, percent: 15, color: COLORS[2] },
-  { label: "SASB", value: 4, percent: 12, color: COLORS[3] },
-  { label: "Other", value: 5, percent: 14, color: COLORS[5] },
-];
-
-export const REPORT_METRICS_POPULARITY = [
-  { label: "Scope 1 & 2 totals", value: 34 },
-  { label: "Scope 3 breakdown", value: 22 },
-  { label: "Emissions intensity", value: 18 },
-  { label: "YoY trend", value: 15 },
-];
-
-/* ───────────────────────── /dashboard/scenarios ───────────────────────── */
-
-export const SCENARIOS_KPIS: Kpi[] = [
-  { label: "Active Scenarios", value: "7" },
-  { label: "In Progress", value: "2" },
-  { label: "Completed", value: "3" },
-  { label: "Best ROI", value: "4.1x" },
-];
-
-export const SCENARIOS_LIST = [
-  { id: 1, name: "Aggressive Reduction 2030", category: "Overall", status: "Projected" as const, reduction: 1200, change: "-49%", cost: "$1.1M", roi: "3.8x", updated: "2 days ago" },
-  { id: 2, name: "Renewable Transition Fast-Track", category: "Energy", status: "In Progress" as const, reduction: 890, change: "-36%", cost: "$650K", roi: "4.1x", updated: "5 hours ago" },
-  { id: 3, name: "Supply Chain Engagement", category: "Supply Chain", status: "Completed" as const, reduction: 410, change: "-17%", cost: "$0", roi: "3.2x", updated: "1 week ago" },
-  { id: 4, name: "Fleet Electrification", category: "Logistics", status: "Draft" as const, reduction: 320, change: "-13%", cost: "$980K", roi: "2.1x", updated: "3 days ago" },
-  { id: 5, name: "Facility Retrofit Program", category: "Operations", status: "Projected" as const, reduction: 195, change: "-8%", cost: "$420K", roi: "1.6x", updated: "1 day ago" },
-  { id: 6, name: "Remote-Work Expansion", category: "Travel", status: "Completed" as const, reduction: 60, change: "-2%", cost: "$0", roi: "5.0x", updated: "2 weeks ago" },
-  { id: 7, name: "Net Zero by 2032 (stretch)", category: "Overall", status: "Draft" as const, reduction: 2453, change: "-100%", cost: "$3.4M", roi: "1.9x", updated: "6 hours ago" },
-];
-
-export const SCENARIO_TEMPLATES = [
-  { id: 1, name: "Renewable Energy Transition", sub: "Model a phased switch to 100% renewable contracts.", cta: "Use Template" },
-  { id: 2, name: "Fleet Electrification", sub: "Compare EV transition timelines and cost curves.", cta: "Use Template" },
-  { id: 3, name: "Supply Chain Engagement", sub: "Estimate impact of supplier-side reduction programs.", cta: "Use Template" },
-  { id: 4, name: "Facility Retrofit", sub: "Model energy-efficiency retrofit ROI across sites.", cta: "Use Template" },
-  { id: 5, name: "Net Zero Pathway", sub: "Build a full pathway to net zero by a target year.", cta: "Use Template" },
-];
-
-export const SCENARIO_REDUCTION_BREAKDOWN: BreakdownItem[] = [
-  { label: "Energy", value: 890, percent: 38, color: COLORS[0] },
-  { label: "Supply Chain", value: 410, percent: 18, color: COLORS[1] },
-  { label: "Transport", value: 320, percent: 14, color: COLORS[2] },
-  { label: "Facilities", value: 195, percent: 8, color: COLORS[3] },
-  { label: "Other", value: 526, percent: 22, color: COLORS[5] },
-];
-
-/* ───────────────────────── /dashboard/organization ───────────────────────── */
-
+/* ─────────────────  /dashboard/organization  ───────────────── */
 export const ORG_OVERVIEW = {
-  name: "Acme Sustainability Group",
-  employees: 1240,
-  locations: 5,
-  industry: "Manufacturing",
-  founded: 2008,
-  hq: "Sydney, Australia",
-  orgId: "ECO-ORG-10492",
-  growth: 8,
-  facilities: 4,
-  fiscalYear: "Jul-Jun",
+  name: "EcoLens Technologies Ltd.",
+  verified: true,
+  industry: "Software & IT Services",
+  founded: "Jan 15, 2020",
+  hq: "Dhaka, Bangladesh",
+  orgId: "org_867b2c1e",
+  employees: 482,
+  growth: 12,
+  locations: 8,
+  facilities: 14,
+  fiscalYear: "Jan – Dec",
   framework: "GHG Protocol",
-};
+} as const;
 
 export const ORG_LOCATIONS = [
-  { id: 1, name: "Sydney HQ", flag: "🇦🇺", type: "Headquarters" as const, employees: 420 },
-  { id: 2, name: "Melbourne Office", flag: "🇦🇺", type: "Regional Office" as const, employees: 310 },
-  { id: 3, name: "Brisbane Office", flag: "🇦🇺", type: "Office" as const, employees: 180 },
-  { id: 4, name: "Perth Office", flag: "🇦🇺", type: "Office" as const, employees: 150 },
-  { id: 5, name: "Adelaide Office", flag: "🇦🇺", type: "Office" as const, employees: 180 },
-];
+  { id: 1, name: "Dhaka, Bangladesh",  type: "Headquarters",   employees: 268, flag: "🇧🇩" },
+  { id: 2, name: "Singapore, Singapore", type: "Regional Office", employees: 84, flag: "🇸🇬" },
+  { id: 3, name: "New York, USA",       type: "Office",          employees: 56, flag: "🇺🇸" },
+  { id: 4, name: "London, UK",          type: "Office",          employees: 32, flag: "🇬🇧" },
+  { id: 5, name: "Berlin, Germany",     type: "Office",          employees: 24, flag: "🇩🇪" },
+] as const;
 
 export const ORG_FACILITIES = [
-  { id: 1, name: "Sydney Manufacturing Plant", location: "Sydney, NSW", area: "85,000 ft²", type: "Manufacturing" },
-  { id: 2, name: "Melbourne Distribution Center", location: "Melbourne, VIC", area: "120,000 ft²", type: "Warehouse" },
-  { id: 3, name: "Brisbane Assembly Facility", location: "Brisbane, QLD", area: "62,000 ft²", type: "Manufacturing" },
-  { id: 4, name: "Sydney HQ Office Tower", location: "Sydney, NSW", area: "45,000 ft²", type: "Office" },
-];
+  { id: 1, name: "Corporate HQ Building", location: "Dhaka, Bangladesh",    area: "25,000 ft²" },
+  { id: 2, name: "Data Center 1",          location: "Singapore, Singapore", area: "12,500 ft²" },
+  { id: 3, name: "Office Building – NY",   location: "New York, USA",        area: "8,200 ft²" },
+  { id: 4, name: "Logistics Warehouse",    location: "Berlin, Germany",      area: "18,000 ft²" },
+] as const;
 
 export const ORG_EMPLOYEES = {
-  total: 1240,
+  total: 482,
   breakdown: [
-    { label: "Manufacturing", value: 620, percent: 50, color: COLORS[0] },
-    { label: "Operations", value: 310, percent: 25, color: COLORS[1] },
-    { label: "Corporate", value: 186, percent: 15, color: COLORS[2] },
-    { label: "Sales & Support", value: 124, percent: 10, color: COLORS[3] },
+    { label: "Full-time", value: 352, percent: 73, color: "rgba(132,204,22,0.95)" },
+    { label: "Part-time", value: 48,  percent: 10, color: "rgba(168,85,247,0.95)" },
+    { label: "Contractor",value: 56,  percent: 12, color: "rgba(56,189,248,0.95)" },
+    { label: "Intern",   value: 26,  percent: 5,  color: "rgba(244,63,94,0.95)" },
   ],
-};
+} as const;
 
 export const ORG_FRAMEWORKS = [
-  { id: 1, name: "GHG Protocol", sub: "Primary reporting standard", role: "Primary", primary: true },
-  { id: 2, name: "CDP", sub: "Investor climate disclosure", role: "Supporting", primary: false },
-  { id: 3, name: "TCFD", sub: "Climate risk disclosure", role: "Supporting", primary: false },
-  { id: 4, name: "SASB", sub: "Industry sustainability metrics", role: "Supporting", primary: false },
-  { id: 5, name: "ISO 14064", sub: "GHG verification standard", role: "Supporting", primary: false },
-];
+  { id: 1, name: "GHG Protocol", sub: "Corporate Standard", primary: true,  role: "Primary" },
+  { id: 2, name: "TCFD",         sub: "Task Force on Climate-related Financial Disclosures", primary: false, role: "Secondary" },
+  { id: 3, name: "SASB",         sub: "Sustainability Accounting Standards Board", primary: false, role: "Secondary" },
+  { id: 4, name: "GRI",          sub: "Global Reporting Initiative", primary: false, role: "Supporting" },
+  { id: 5, name: "CDP",          sub: "Carbon Disclosure Project", primary: false, role: "Supporting" },
+] as const;
 
-/* ───────────────────────── /dashboard/profile ───────────────────────── */
-
+/* ─────────────────  /dashboard/profile  ───────────────── */
 export const PROFILE_USER = {
-  name: "Jordan Lee",
-  email: "jordan.lee@acme-sustainability.com",
-  role: "Sustainability Manager",
-  avatar: "/images/earth.jpg",
-  bio: "Leading Acme's path to net zero, one data source at a time.",
-  department: "Sustainability & ESG",
-  location: "Sydney, Australia",
-  memberSince: "Mar 2023",
-  lastLogin: "Today, 9:12 AM",
+  name: "Diptu Alam",
+  role: "Administrator",
+  email: "diptu@ecolens.com",
+  department: "Sustainability",
+  location: "Dhaka, Bangladesh",
+  memberSince: "Jan 12, 2024",
+  lastLogin: "May 12, 2024, 09:30 AM",
   jobTitle: "Sustainability Manager",
-  phone: "+61 4 1234 5678",
-  language: "English (Australia)",
-};
+  phone: "+880 1712 345678",
+  language: "English (US)",
+  bio: "Sustainability Leader passionate about data-driven climate action.",
+} as const;
 
 export const PROFILE_PREFERENCES = [
-  { id: "dash", label: "Email digest frequency", hint: "How often you receive summary emails", value: "Weekly" },
-  { id: "reportformat", label: "Default report format", hint: "Used when generating new reports", value: "PDF" },
-  { id: "tz", label: "Time zone", hint: "Used for all dates and schedules", value: "Australia/Sydney" },
-  { id: "units", label: "Units", hint: "Emissions and energy unit system", value: "Metric (tCO₂e)" },
-  { id: "date", label: "Language", hint: "Display language across the app", value: "English" },
-  { id: "theme", label: "Theme", hint: "Light or dark interface", value: "Dark" },
-];
+  { id: "theme",    label: "Theme",          value: "Dark",           hint: "Choose your preferred theme" },
+  { id: "date",     label: "Date Format",    value: "May 12, 2024 (MM DD, YYYY)", hint: "Choose how dates are displayed" },
+  { id: "tz",       label: "Time Zone",      value: "(GMT+06:00) Asia/Dhaka", hint: "Select your current time zone" },
+  { id: "dash",     label: "Default Dashboard", value: "Overview",   hint: "Choose your default landing page" },
+  { id: "units",    label: "Units & Currency", value: "Metric (kg, tCO₂e) & USD", hint: "Set your preferred units and currency" },
+  { id: "number",   label: "Number Format",  value: "1,234.56",       hint: "Choose your number format" },
+] as const;
 
 export const PROFILE_NOTIFICATION_CATEGORIES = [
-  { id: "goals", label: "Goal alerts", body: "Notify me when a goal falls behind schedule.", enabled: true },
-  { id: "alerts", label: "Data source issues", body: "Notify me when a data source disconnects or errors.", enabled: true },
-  { id: "recs", label: "New recommendations", body: "Notify me when AI finds a new reduction opportunity.", enabled: true },
-  { id: "reports", label: "Report generation", body: "Notify me when a scheduled report finishes generating.", enabled: true },
-  { id: "activity", label: "Team activity", body: "Notify me about teammate actions on shared goals.", enabled: false },
-  { id: "compliance", label: "Product updates", body: "Notify me about new EcoLens features and changes.", enabled: false },
-];
+  { id: "recs",       label: "Recommendations", body: "New AI-powered recommendations and improvement opportunities" },
+  { id: "goals",      label: "Goal Milestones",  body: "Updates on goal progress and milestone achievements" },
+  { id: "alerts",     label: "Data & System Alerts", body: "Data ingestion issues, system failures, and anomalies" },
+  { id: "reports",    label: "Reports",          body: "Report generation completed and ready to download" },
+  { id: "compliance", label: "Compliance & Deadlines", body: "Upcoming deadlines and compliance notifications" },
+  { id: "product",    label: "Product Updates",  body: "New features, product updates, and announcements" },
+] as const;
+
+/* ─────────────────  /dashboard/reports  ───────────────── */
+export const REPORTS_KPIS = [
+  { id: "generated", label: "Reports Generated", value: "28", sub: "33% vs last year" },
+  { id: "total", label: "Total Reports", value: "42", sub: "All time" },
+  { id: "downloads", label: "Downloads", value: "156", sub: "21% vs last year" },
+  { id: "last", label: "Last Report", value: "May 10, 2024", sub: "ESG Report - Q1 2024" },
+  { id: "score", label: "Compliance Score", value: "98%", sub: "Excellent" },
+] as const;
+
+export const REPORT_TYPES = [
+  { id: "ghg",  name: "GHG Protocol Report",     sub: "Standard GHG inventory report aligned with the GHG Protocol.", cta: "Generate" },
+  { id: "scope",name: "Scope 1/2/3 Report",       sub: "Comprehensive report across Scope 1, 2 & 3 emissions.", cta: "Generate" },
+  { id: "esg",  name: "ESG Report",              sub: "Environmental, Social & Governance performance report.", cta: "Generate" },
+  { id: "cdp",  name: "CDP Report",              sub: "Climate Disclosure Project report for climate change.", cta: "Generate" },
+  { id: "tcfd", name: "TCFD Report",             sub: "Report aligned to the Task Force on Climate-related Financial Disclosures.", cta: "Generate" },
+  { id: "csrd", name: "CSRD Report",             sub: "Corporate Sustainability Reporting Directive compliant report.", cta: "Generate" },
+  { id: "custom",name: "Custom Report",          sub: "Build a custom report with the metrics and sections you need.", cta: "Create" },
+  { id: "audit",name: "Audit Package",          sub: "Generate audit-ready package with supporting evidence.", cta: "Generate" },
+] as const;
+
+export const RECENT_REPORTS = [
+  { id: 1, name: "ESG Report - Q1 2024",      sub: "Quarterly ESG performance report", framework: "ESG",      period: "Q1 2024", generated: "May 10, 2024 10:24 AM", status: "Completed", size: "2.4 MB" },
+  { id: 2, name: "GHG Protocol Report - 2023", sub: "Annual GHG inventory report",    framework: "GHG Protocol", period: "2023", generated: "Apr 28, 2024 03:15 PM", status: "Completed", size: "3.1 MB" },
+  { id: 3, name: "Scope 1-2-3 Emissions - 2023", sub: "Comprehensive scope report",  framework: "Scope 1/2/3", period: "2023", generated: "Apr 20, 2024 11:42 AM", status: "Completed", size: "2.7 MB" },
+  { id: 4, name: "CDP Climate Change 2023",   sub: "CDP submission report",          framework: "CDP",     period: "2023", generated: "Apr 05, 2024 09:30 AM", status: "Completed", size: "1.8 MB" },
+  { id: 5, name: "TCFD Report - 2023",        sub: "TCFD aligned disclosure",         framework: "TCFD",    period: "2023", generated: "Mar 28, 2024 02:11 PM", status: "Completed", size: "2.2 MB" },
+  { id: 6, name: "CSRD Report - FY2023",      sub: "CSRD compliance report",          framework: "CSRD",    period: "FY2023", generated: "Mar 15, 2024 01:05 PM", status: "Completed", size: "3.6 MB" },
+  { id: 7, name: "Custom Report - Supply Chain", sub: "Supplier emissions analysis", framework: "Custom", period: "Q4 2023", generated: "Feb 28, 2024 04:55 PM", status: "Completed", size: "1.2 MB" },
+  { id: 8, name: "Audit Package - 2023",      sub: "Audit evidence & reports bundle", framework: "Audit Package", period: "2023", generated: "Feb 10, 2024 09:12 AM", status: "Completed", size: "12.4 MB" },
+] as const;
+
+export const REPORT_FRAMEWORK_BREAKDOWN = [
+  { label: "GHG Protocol",  value: 9, percent: 32, color: "rgba(132,204,22,0.95)" },
+  { label: "ESG",           value: 6, percent: 21, color: "rgba(16,185,129,0.95)" },
+  { label: "Scope 1/2/3",   value: 5, percent: 18, color: "rgba(56,189,248,0.95)" },
+  { label: "CDP",           value: 3, percent: 11, color: "rgba(244,63,94,0.95)" },
+  { label: "TCFD",          value: 2, percent: 7,  color: "rgba(168,85,247,0.95)" },
+  { label: "CSRD",          value: 2, percent: 7,  color: "rgba(245,158,11,0.95)" },
+  { label: "Custom",        value: 1, percent: 4,  color: "rgba(148,163,184,0.6)" },
+] as const;
+
+export const REPORT_METRICS_POPULARITY = [
+  { label: "Total Emissions (tCO₂e)", value: 28 },
+  { label: "Scope 1 Emissions",      value: 28 },
+  { label: "Scope 2 Emissions",      value: 28 },
+  { label: "Scope 3 Emissions",      value: 24 },
+  { label: "Energy Consumption",     value: 18 },
+  { label: "Renewable Energy %",     value: 16 },
+] as const;
+
+/* ─────────────────  /dashboard/scenarios  ───────────────── */
+export const SCENARIOS_KPIS = [
+  { id: "baseline", label: "Baseline Emissions", value: "2,453", unit: "tCO₂e", sub: "Year 2023" },
+  { id: "total", label: "Total Scenarios", value: "7", sub: "Across all time" },
+  { id: "avg", label: "Avg Reductions", value: "18%", sub: "Compared to baseline" },
+  { id: "highest", label: "Highest Reduction", value: "42%", sub: "Scenario: Net Zero Pathway" },
+  { id: "active", label: "Active Scenarios", value: "3", sub: "Currently in progress" },
+] as const;
+
+export const SCENARIOS_LIST = [
+  { id: 1, name: "Switch 50% Electricity to Renewable Energy", category: "Energy",     change: "50%", reduction: 1226, cost: "$120K", roi: "2.8x", status: "Projected",  updated: "May 10, 2024" },
+  { id: 2, name: "Reduce Transportation Emissions by 20%",      category: "Logistics",  change: "20%", reduction: 312,  cost: "$45K",  roi: "3.2x", status: "Projected",  updated: "May 8, 2024" },
+  { id: 3, name: "Optimize Supply Chain (Supplier Engagement)",   category: "Supply Chain", change: "15%", reduction: 285,  cost: "$35K",  roi: "2.1x", status: "Projected",  updated: "May 6, 2024" },
+  { id: 4, name: "Improve Building Energy Efficiency by 30%",     category: "Operations", change: "30%", reduction: 410,  cost: "$70K",  roi: "2.6x", status: "In Progress", updated: "May 1, 2024" },
+  { id: 5, name: "Reduce Business Travel Emissions by 30%",       category: "Travel",     change: "30%", reduction: 155,  cost: "$12K",  roi: "4.5x", status: "Completed",   updated: "Apr 25, 2024" },
+  { id: 6, name: "Net Zero Pathway 2030",                          category: "Overall",    change: "—",  reduction: 1980, cost: "$1.2M", roi: "3.6x", status: "Projected",  updated: "Apr 20, 2024" },
+  { id: 7, name: "Low Carbon Logistics Transition",                category: "Logistics",  change: "35%", reduction: 520,  cost: "$90K",  roi: "2.9x", status: "Draft",      updated: "Apr 18, 2024" },
+] as const;
+
+export const SCENARIO_TEMPLATES = [
+  { id: 1, name: "Renewable Energy Transition",     sub: "Evaluate the impact of switching to renewable energy sources.", cta: "Use Template" },
+  { id: 2, name: "Transportation Optimization",     sub: "Analyze impact of improving fuel efficiency and route optimization.", cta: "Use Template" },
+  { id: 3, name: "Supply Chain Decarbonization",    sub: "Assess supplier engagement and low-carbon sourcing.", cta: "Use Template" },
+  { id: 4, name: "Energy Efficiency Upgrade",        sub: "Simulate efficiency improvements of buildings and operations.", cta: "Use Template" },
+  { id: 5, name: "Net Zero Pathway",                 sub: "Build and evaluate a complete net zero transition pathway.", cta: "Use Template" },
+] as const;
+
+export const SCENARIO_REDUCTION_BREAKDOWN = [
+  { label: "Scope 1", value: 306, percent: 25, color: "rgba(132,204,22,0.95)" },
+  { label: "Scope 2", value: 552, percent: 45, color: "rgba(56,189,248,0.95)" },
+  { label: "Scope 3", value: 368, percent: 30, color: "rgba(168,85,247,0.95)" },
+] as const;
+
+
+/* ─────────────────  /pricing  ───────────────── */
+export const PRICING_PLANS = [
+  {
+    id: "starter",
+    name: "Starter",
+    description: "For small teams getting started with sustainability.",
+    price:       { monthly: 39, annually: 29 },   // billed monthly / annually
+    icon: "users",
+    cta:  { label: "Start Free Trial", href: "/signup" },
+    highlighted: false,
+    customLabel: null,
+    features: [
+      "Up to 3 users",
+      "Track Scope 1 & 2 emissions",
+      "5 data sources",
+      "Basic dashboards",
+      "Email support",
+    ],
+  },
+  {
+    id: "growth",
+    name: "Growth",
+    description: "For growing organizations that want to go further.",
+    price:       { monthly: 99, annually: 79 },
+    icon: "trending-up",
+    cta:  { label: "Start Free Trial", href: "/signup" },
+    highlighted: true,                          // "Most popular" badge
+    customLabel: null,
+    features: [
+      "Up to 15 users",
+      "Track Scope 1, 2 & 3 emissions",
+      "Unlimited data sources",
+      "Advanced analytics",
+      "AI-powered recommendations",
+      "Priority email support",
+    ],
+  },
+  {
+    id: "professional",
+    name: "Professional",
+    description: "For mid-sized organizations managing complex operations.",
+    price:       { monthly: 249, annually: 199 },
+    icon: "briefcase",
+    cta:  { label: "Start Free Trial", href: "/signup" },
+    highlighted: false,
+    customLabel: null,
+    features: [
+      "Up to 50 users",
+      "Track Scope 1, 2 & 3 emissions",
+      "Unlimited data sources",
+      "Advanced analytics & scenarios",
+      "Custom reports & exports",
+      "SSO / SAML",
+      "Priority support",
+    ],
+  },
+  {
+    id: "enterprise",
+    name: "Enterprise",
+    description: "For large organizations with advanced needs.",
+    price:       { monthly: null, annually: null },   // Custom pricing
+    customLabel: "Custom",
+    icon: "building",
+    cta:  { label: "Contact Sales", href: "mailto:sales@ecolens.app" },
+    highlighted: false,
+    features: [
+      "Unlimited users",
+      "Track Scope 1, 2 & 3 emissions",
+      "Unlimited data sources",
+      "Advanced analytics & AI",
+      "Custom reports & exports",
+      "SSO / SAML / SCIM",
+      "Dedicated account manager",
+      "24/7 phone & priority support",
+    ],
+  },
+] as const;
+
+export const PRICING_COMPARE_ROWS = [
+  { row: "Users",            starter: "Up to 3",      growth: "Up to 15",     professional: "Up to 50",      enterprise: "Unlimited" },
+  { row: "Emissions Tracking", starter: "Scope 1 & 2", growth: "Scope 1, 2 & 3", professional: "Scope 1, 2 & 3", enterprise: "Scope 1, 2 & 3" },
+  { row: "Data Sources",     starter: "5",            growth: "Unlimited",    professional: "Unlimited",      enterprise: "Unlimited" },
+  { row: "Dashboards & Reports", starter: true,        growth: true,           professional: true,             enterprise: true },
+  { row: "AI Recommendations", starter: false,         growth: true,           professional: true,             enterprise: true },
+  { row: "Scenarios & What-If Analysis", starter: false, growth: true,         professional: true,             enterprise: true },
+  { row: "Custom Reports",   starter: false,           growth: false,          professional: true,             enterprise: true },
+  { row: "SSO / SAML",       starter: false,           growth: false,          professional: true,             enterprise: true },
+  { row: "Support",          starter: "Email",         growth: "Priority Email", professional: "Priority",      enterprise: "24/7 & Dedicated" },
+] as const;
+
+export const PRICING_INCLUDED = [
+  "Secure & compliant",
+  "Audit trail & data history",
+  "GDPR compliant",
+  "Regular product updates",
+  "Export to PDF & CSV",
+  "Mobile-friendly experience",
+] as const;
+
+export const PRICING_ADDONS = [
+  { name: "Additional users",     price: "$10 / user / month" },
+  { name: "Advanced integrations", price: "$49 / month" },
+  { name: "Custom report builder", price: "$99 / month" },
+  { name: "Dedicated data store",  price: "$99 / month" },
+] as const;

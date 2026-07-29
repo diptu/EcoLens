@@ -1,4 +1,4 @@
-"""Tests for ecolens.ingestion.sources.aemo_nem.client.AEMONEMClient."""
+"""Tests for ecolens.ingestion.service.aemo_nem.client.AEMONEMClient."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import httpx
 import pytest
 import respx
 
-from ecolens.ingestion.sources.aemo_nem.client import AEMONEMClient
+from ecolens.ingestion.service.aemo_nem.client import AEMONEMClient
 
 
 class TestParseMmsTables:
@@ -142,9 +142,17 @@ class TestFetchDayTables:
     @pytest.mark.asyncio
     @respx.mock
     async def test_returns_none_when_not_published(self):
+        # Not in the Current rolling window -> fetch_day_tables falls
+        # back to the Archive's monthly zip-of-zips (see its docstring);
+        # mock that 404ing too so this exercises the real end-to-end
+        # "not published anywhere" path, not just the Current listing.
         respx.get("https://www.nemweb.com.au/Reports/Current/Daily_Reports/").mock(
             return_value=httpx.Response(200, text="<html></html>")
         )
+        respx.get(
+            "https://www.nemweb.com.au/Reports/Archive/Daily_Reports/"
+            "PUBLIC_DAILY_20260701.zip"
+        ).mock(return_value=httpx.Response(404))
         client = AEMONEMClient()
         async with httpx.AsyncClient() as http:
             tables = await client.fetch_day_tables(

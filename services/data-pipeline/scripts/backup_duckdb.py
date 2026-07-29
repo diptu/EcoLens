@@ -41,7 +41,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ecolens.config import get_settings
-from ecolens.ingestion.storage.duckdb_store import _connect_with_retry
+from ecolens.ingestion.db.duckdb_store import _connect_with_retry
 from ecolens.shared.observability.logging import get_logger
 
 log = get_logger("backup_duckdb")

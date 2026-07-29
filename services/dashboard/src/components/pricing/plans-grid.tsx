@@ -35,22 +35,22 @@ function PlanCard({
       className={cn(
         "relative flex flex-col rounded-2xl border p-6 transition-colors",
         plan.highlighted
-          ? "border-emerald-400/40 bg-emerald-400/[0.02] shadow-[0_0_0_1px_rgba(132,204,22,0.2)]"
+          ? "border-emerald-200/40 bg-emerald-200/[0.02] shadow-[0_0_0_1px_rgba(132,204,22,0.2)]"
           : "border-white/10 bg-white/[0.02]"
       )}
     >
       {plan.highlighted && (
-        <span className="absolute -top-3 left-1/2 -translate-x-1/2 rounded-full bg-emerald-400 px-3 py-0.5 text-[10px] font-bold uppercase tracking-wider text-black">
+        <span className="absolute -top-3 left-1/2 -translate-x-1/2 rounded-full bg-emerald-200 px-3 py-0.5 text-[10px] font-bold uppercase tracking-wider text-black">
           Most Popular
         </span>
       )}
       <span
         className={cn(
           "grid h-10 w-10 place-items-center rounded-full",
-          plan.highlighted ? "bg-emerald-400/15" : "bg-white/[0.04]"
+          plan.highlighted ? "bg-emerald-200/15" : "bg-white/[0.04]"
         )}
       >
-        <Icon className="h-5 w-5 text-emerald-300" />
+        <Icon className="h-5 w-5 text-emerald-100" />
       </span>
       <h3 className="mt-4 text-lg font-bold text-white">{plan.name}</h3>
       <p className="mt-1 min-h-[2.5rem] text-xs leading-relaxed text-white/60">
@@ -83,7 +83,7 @@ function PlanCard({
       <ul className="mt-5 space-y-2 text-sm text-white/75">
         {plan.features.map((feat) => (
           <li key={feat} className="flex items-start gap-2">
-            <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-300" />
+            <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-100" />
             <span>{feat}</span>
           </li>
         ))}
@@ -93,8 +93,8 @@ function PlanCard({
         className={cn(
           "mt-6 inline-flex w-full items-center justify-center rounded-md px-4 py-2.5 text-sm font-semibold transition-colors",
           plan.highlighted
-            ? "bg-lime-300 text-black hover:bg-lime-200"
-            : "border border-emerald-400/30 bg-emerald-400/5 text-emerald-300 hover:bg-emerald-400/10"
+            ? "bg-lime-100 text-black hover:bg-lime-100"
+            : "border border-emerald-200/30 bg-emerald-200/5 text-emerald-100 hover:bg-emerald-200/10"
         )}
       >
         {plan.cta.label}

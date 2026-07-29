@@ -1,4 +1,4 @@
-"""Tests for ecolens.forecasting.training.online (ECO-118)."""
+"""Tests for ecolens.forecasting.service.training.online (ECO-118)."""
 
 from __future__ import annotations
 
@@ -7,9 +7,10 @@ import pandas as pd
 import torch
 
 from ecolens.config import Settings
-from ecolens.forecasting.features import FEATURE_COLUMNS, build_windowed_dataset
-from ecolens.forecasting.models.lstm import DemandLSTM
-from ecolens.forecasting.training.online import fine_tune
+from ecolens.forecasting.schema.features import FEATURE_COLUMNS
+from ecolens.forecasting.service.windowing import build_windowed_dataset
+from ecolens.forecasting.model.lstm import DemandLSTM
+from ecolens.forecasting.service.training.online import fine_tune
 
 
 def _dataset():

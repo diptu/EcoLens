@@ -1,4 +1,4 @@
-"""Tests for ecolens.ingestion.sources.bom.cache (read_cache/write_cache)."""
+"""Tests for ecolens.ingestion.service.bom.cache (read_cache/write_cache)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-from ecolens.ingestion.sources.bom.cache import read_cache, write_cache
+from ecolens.ingestion.service.bom.cache import read_cache, write_cache
 
 
 def _doc(**overrides) -> dict:

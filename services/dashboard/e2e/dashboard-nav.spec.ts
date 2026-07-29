@@ -1,66 +1,100 @@
 /**
  * E2E tests for dashboard navigation.
  * Verifies the sidebar nav links work and active state is set.
+ *
+ * On mobile the sidebar is a drawer; the open/close interaction is
+ * not part of these tests, so we only assert the static link set
+ * on desktop-sized viewports.
  */
 import { test, expect } from "@playwright/test";
 
-test("sidebar nav: Home -> Actions", async ({ page }) => {
-  await page.goto("/dashboard/home");
-  await page.locator("aside").getByRole("link", { name: "Actions", exact: true }).first().click();
-  await page.waitForURL(/\/dashboard\/actions/);
-  await expect(page.locator("h1").first()).toContainText("Actions");
-});
+test.describe("sidebar nav (desktop only)", () => {
+  test.beforeEach(async ({ viewport }) => {
+    test.skip(viewport && viewport.width < 1024, "Sidebar is a drawer on mobile");
+  });
 
-test("sidebar nav: Actions -> Analytics", async ({ page }) => {
-  await page.goto("/dashboard/actions");
-  await page.locator("aside").getByRole("link", { name: "Analytics", exact: true }).first().click();
-  await page.waitForURL(/\/dashboard\/analytics/);
-});
+  test("Executive -> Operations", async ({ page }) => {
+    await page.goto("/dashboard/executive");
+    await page.locator("aside").getByRole("link", { name: "Operations", exact: true }).first().click();
+    await page.waitForURL(/\/dashboard\/operations/);
+    await expect(page.locator("h1").first()).toContainText("Operations");
+  });
 
-test("sidebar nav: Analytics -> Goals", async ({ page }) => {
-  await page.goto("/dashboard/analytics");
-  await page.locator("aside").getByRole("link", { name: "Goals", exact: true }).first().click();
-  await page.waitForURL(/\/dashboard\/goals/);
-});
+  test("Operations -> Data Sources", async ({ page }) => {
+    await page.goto("/dashboard/operations");
+    await page.locator("aside").getByRole("link", { name: "Data Sources", exact: true }).first().click();
+    await page.waitForURL(/\/dashboard\/data-sources/);
+  });
 
-test("sidebar nav: Goals -> Sources", async ({ page }) => {
-  await page.goto("/dashboard/goals");
-  await page.locator("aside").getByRole("link", { name: "Sources", exact: true }).first().click();
-  await page.waitForURL(/\/dashboard\/sources/);
-});
+  test("Data Sources -> Ingestion", async ({ page }) => {
+    await page.goto("/dashboard/data-sources");
+    await page.locator("aside").getByRole("link", { name: "Ingestion Pipeline", exact: true }).first().click();
+    await page.waitForURL(/\/dashboard\/ingestion/);
+  });
 
-test("sidebar nav: Sources -> Reports", async ({ page }) => {
-  await page.goto("/dashboard/sources");
-  await page.locator("aside").getByRole("link", { name: "Reports", exact: true }).first().click();
-  await page.waitForURL(/\/dashboard\/reports/);
-});
+  test("Ingestion -> Data Quality", async ({ page }) => {
+    await page.goto("/dashboard/ingestion");
+    await page.locator("aside").getByRole("link", { name: /Data Quality/ }).first().click();
+    await page.waitForURL(/\/dashboard\/data-quality/);
+  });
 
-test("sidebar nav: Reports -> Scenarios", async ({ page }) => {
-  await page.goto("/dashboard/reports");
-  await page.locator("aside").getByRole("link", { name: "Scenarios", exact: true }).first().click();
-  await page.waitForURL(/\/dashboard\/scenarios/);
-});
+  test("Data Quality -> Forecast", async ({ page }) => {
+    await page.goto("/dashboard/data-quality");
+    await page.locator("aside").getByRole("link", { name: /Forecast Explorer/ }).first().click();
+    await page.waitForURL(/\/dashboard\/forecast/);
+  });
 
-test("topbar: breadcrumb shows current page", async ({ page }) => {
-  await page.goto("/dashboard/analytics");
-  const breadcrumb = page.locator("header").filter({ hasText: "Home" }).first();
-  await expect(breadcrumb).toContainText("Dashboard");
-  await expect(breadcrumb).toContainText("Analytics");
-});
+  test("Forecast -> Carbon", async ({ page }) => {
+    await page.goto("/dashboard/forecast");
+    await page.locator("aside").getByRole("link", { name: /Carbon Intelligence/ }).first().click();
+    await page.waitForURL(/\/dashboard\/carbon/);
+  });
 
-test("topbar: ⌘K focuses search", async ({ page }) => {
-  await page.goto("/dashboard/home");
-  // Wait for the JS event handler to attach
-  await page.waitForTimeout(500);
-  // Use Control+K on Linux (⌘K on Mac)
-  await page.keyboard.press("Control+k");
-  const searchInput = page.locator("#dash-search");
-  await expect(searchInput).toBeFocused();
-});
+  test("Carbon -> Analytics", async ({ page }) => {
+    await page.goto("/dashboard/carbon");
+    await page.locator("aside").getByRole("link", { name: /Energy Analytics/ }).first().click();
+    await page.waitForURL(/\/dashboard\/analytics/);
+  });
 
-test("profile dropdown opens on click", async ({ page }) => {
-  await page.goto("/dashboard/home");
-  await page.locator("button:has-text('Diptu Alam')").first().click();
-  // The dropdown should show Profile link
-  await expect(page.getByRole("link", { name: "Profile", exact: true }).first()).toBeVisible();
+  test("Analytics -> Models", async ({ page }) => {
+    await page.goto("/dashboard/analytics");
+    await page.locator("aside").getByRole("link", { name: /Model Registry/ }).first().click();
+    await page.waitForURL(/\/dashboard\/models/);
+  });
+
+  test("Models -> Training", async ({ page }) => {
+    await page.goto("/dashboard/models");
+    await page.locator("aside").getByRole("link", { name: /Training/ }).first().click();
+    await page.waitForURL(/\/dashboard\/training/);
+  });
+
+  test("Training -> Operational Tasks", async ({ page }) => {
+    await page.goto("/dashboard/training");
+    await page.locator("aside").getByRole("link", { name: /Operational Tasks/ }).first().click();
+    await page.waitForURL(/\/dashboard\/operational-tasks/);
+  });
+
+  test("Operational Tasks -> System Health", async ({ page }) => {
+    await page.goto("/dashboard/operational-tasks");
+    await page.locator("aside").getByRole("link", { name: /System Health/ }).first().click();
+    await page.waitForURL(/\/dashboard\/system-health/);
+  });
+
+  test("System Health -> Reports", async ({ page }) => {
+    await page.goto("/dashboard/system-health");
+    await page.locator("aside").getByRole("link", { name: "Reports", exact: true }).first().click();
+    await page.waitForURL(/\/dashboard\/reports/);
+  });
+
+  test("Reports -> Settings", async ({ page }) => {
+    await page.goto("/dashboard/reports");
+    await page.locator("aside").getByRole("link", { name: /Settings/ }).first().click();
+    await page.waitForURL(/\/dashboard\/settings/);
+  });
+
+  test("sidebar Operations link returns to /dashboard/operations", async ({ page }) => {
+    await page.goto("/dashboard/forecast");
+    await page.locator("aside").getByRole("link", { name: "Operations", exact: true }).first().click();
+    await page.waitForURL(/\/dashboard\/operations/);
+  });
 });

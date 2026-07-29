@@ -1,4 +1,4 @@
-"""Integration tests for ecolens.forecasting.mlops.{registry,promote,health}
+"""Integration tests for ecolens.forecasting.service.mlops.{registry,promote,health}
 (ECO-115/ECO-116, and root TODO's ECO-T01 "integration test coverage
 for ML registry") against a *real* local MLflow tracking store (SQLite
 + local artifact dir under `tmp_path`) -- not a mock. `mlflow.set_tracking_uri`
@@ -16,14 +16,18 @@ import pytest
 import torch
 
 from ecolens.config import Settings
-from ecolens.forecasting.evaluation.conformal import ConformalCalibration
-from ecolens.forecasting.evaluation.evaluate import FullEvaluation, evaluate_model
-from ecolens.forecasting.evaluation.metrics import EvaluationReport
-from ecolens.forecasting.features import FEATURE_COLUMNS, build_windowed_dataset
-from ecolens.forecasting.mlops.health import get_health_snapshot
-from ecolens.forecasting.mlops.promote import decide, promote_if_better
-from ecolens.forecasting.mlops.registry import ModelRegistry
-from ecolens.forecasting.models.lstm import DemandLSTM
+from ecolens.forecasting.service.evaluation.conformal import ConformalCalibration
+from ecolens.forecasting.service.evaluation.evaluate import (
+    FullEvaluation,
+    evaluate_model,
+)
+from ecolens.forecasting.service.evaluation.metrics import EvaluationReport
+from ecolens.forecasting.schema.features import FEATURE_COLUMNS
+from ecolens.forecasting.service.windowing import build_windowed_dataset
+from ecolens.forecasting.service.mlops.health import get_health_snapshot
+from ecolens.forecasting.service.mlops.promote import decide, promote_if_better
+from ecolens.forecasting.service.mlops.registry import ModelRegistry
+from ecolens.forecasting.model.lstm import DemandLSTM
 
 
 @pytest.fixture
@@ -174,7 +178,7 @@ class TestEvaluateModelIntegration:
     """
 
     def test_full_pipeline(self, registry: ModelRegistry):
-        from ecolens.forecasting.training.train import train_model
+        from ecolens.forecasting.service.training.train import train_model
 
         rng = np.random.default_rng(42)
         n = 300
@@ -226,7 +230,7 @@ class TestLoadCheckpoint:
     """
 
     def _train_a_real_run(self, registry: ModelRegistry, *, seed: int = 0):
-        from ecolens.forecasting.training.train import train_model
+        from ecolens.forecasting.service.training.train import train_model
 
         rng = np.random.default_rng(seed)
         n = 300
@@ -287,7 +291,7 @@ class TestLoadCheckpoint:
         assert np.array_equal(checkpoint.scaler.std, dataset.scaler.std)
 
     def test_missing_optimizer_state_degrades_to_none(self, registry: ModelRegistry):
-        from ecolens.forecasting.mlops.registry import log_model_artifacts
+        from ecolens.forecasting.service.mlops.registry import log_model_artifacts
 
         model = DemandLSTM(
             n_features=len(FEATURE_COLUMNS), hidden_size=8, num_layers=1, horizon=48
@@ -307,3 +311,147 @@ class TestLoadCheckpoint:
         checkpoint = registry.load_checkpoint(run_id)
         assert checkpoint.optimizer_state is None
         assert checkpoint.model_state is not None
+
+
+class TestModelRegistryTFT:
+    """Proves `mlops/registry.py`'s generalization (`log_model_artifacts`
+    widened to `nn.Module`, `load_by_alias`'s new `model_type` param) is
+    real, not just type-hint theater -- a full train -> evaluate ->
+    register -> promote -> load_by_alias(model_type=DemandTFT) cycle
+    against the same real local MLflow store the LSTM tests above use.
+    """
+
+    def test_full_pipeline(self, registry: ModelRegistry):
+        from ecolens.forecasting.model.tft import DemandTFT
+        from ecolens.forecasting.service.evaluation.evaluate_tft import (
+            evaluate_tft_model,
+        )
+        from ecolens.forecasting.service.training.train_tft import train_tft_model
+
+        rng = np.random.default_rng(42)
+        n = 300
+        ts = pd.date_range("2026-01-01", periods=n, freq="30min", tz="UTC")
+        df = pd.DataFrame({"ts_30": ts, "region": "NSW1"})
+        t = np.arange(n)
+        df["demand_mw"] = 5000 + 300 * np.sin(2 * np.pi * t / 48) + rng.normal(0, 20, n)
+        for col in FEATURE_COLUMNS:
+            if col == "demand_mw":
+                continue
+            df[col] = (
+                rng.integers(0, 2, size=n)
+                if col == "is_holiday"
+                else rng.normal(size=n)
+            )
+
+        dataset = build_windowed_dataset(df, lookback=48, horizon=48)
+        result = train_tft_model(
+            dataset,
+            settings=Settings(  # type: ignore[call-arg]
+                model_tft_train_epochs=3,
+                model_tft_d_model=16,
+                model_tft_num_heads=2,
+                model_tft_static_dim=8,
+                model_tft_batch_size=16,
+                mlflow_tracking_uri=registry.settings.mlflow_tracking_uri,
+                mlflow_experiment_name_tft=registry.settings.mlflow_experiment_name,
+            ),
+        )
+        assert result.run_id
+
+        evaluation = evaluate_tft_model(
+            result.model, dataset, result.region_to_idx, alpha=0.2
+        )
+        registered = registry.register(result.run_id)
+        decision = promote_if_better(
+            registry,
+            registered,
+            evaluation,
+            alias=registry.settings.model_registry_alias,
+        )
+        assert decision.promote is True
+
+        loaded = registry.load_by_alias(
+            registry.settings.model_registry_alias, model_type=DemandTFT
+        )
+        assert isinstance(loaded, DemandTFT)
+
+    def test_load_by_alias_rejects_the_wrong_model_type(self, registry: ModelRegistry):
+        from ecolens.forecasting.model.tft import DemandTFT
+
+        run_id = _log_a_run()  # logs a DemandLSTM
+        registered = registry.register(run_id)
+        registry.set_alias("production", registered.version)
+
+        with pytest.raises(TypeError, match="DemandTFT"):
+            registry.load_by_alias("production", model_type=DemandTFT)
+
+
+class _FakeTimesFMBackbone:
+    def forecast_raw(self, contexts: np.ndarray, *, horizon: int):
+        last = contexts[:, -1:]
+        p50 = np.repeat(last, horizon, axis=1)
+        return p50 - 200.0, p50, p50 + 200.0
+
+
+class TestModelRegistryTimesFM:
+    """Same proof as `TestModelRegistryTFT`, for the third architecture --
+    `TimesFMCalibrationHead` round-trips through the same generalized
+    registry with a fake backbone (see test_forecasting_train_timesfm.py
+    for why: the real one downloads a ~2GB checkpoint, out of place here).
+    """
+
+    def test_full_pipeline(self, registry: ModelRegistry):
+        from ecolens.forecasting.model.timesfm_head import TimesFMCalibrationHead
+        from ecolens.forecasting.service.evaluation.evaluate_timesfm import (
+            evaluate_timesfm_model,
+        )
+        from ecolens.forecasting.service.training.train_timesfm import (
+            train_timesfm_model,
+        )
+
+        rng = np.random.default_rng(42)
+        n = 300
+        ts = pd.date_range("2026-01-01", periods=n, freq="30min", tz="UTC")
+        df = pd.DataFrame({"ts_30": ts, "region": "NSW1"})
+        t = np.arange(n)
+        df["demand_mw"] = 5000 + 300 * np.sin(2 * np.pi * t / 48) + rng.normal(0, 20, n)
+        for col in FEATURE_COLUMNS:
+            if col == "demand_mw":
+                continue
+            df[col] = (
+                rng.integers(0, 2, size=n)
+                if col == "is_holiday"
+                else rng.normal(size=n)
+            )
+
+        dataset = build_windowed_dataset(df, lookback=48, horizon=48)
+        result = train_timesfm_model(
+            dataset,
+            settings=Settings(  # type: ignore[call-arg]
+                model_timesfm_train_epochs=3,
+                model_timesfm_hidden_dim=16,
+                model_timesfm_static_dim=8,
+                model_timesfm_batch_size=16,
+                mlflow_tracking_uri=registry.settings.mlflow_tracking_uri,
+                mlflow_experiment_name_timesfm=registry.settings.mlflow_experiment_name,
+            ),
+            backbone=_FakeTimesFMBackbone(),
+        )
+        assert result.run_id
+
+        evaluation = evaluate_timesfm_model(
+            result.model, dataset, result.region_to_idx, result.raw_forecasts, alpha=0.2
+        )
+        registered = registry.register(result.run_id)
+        decision = promote_if_better(
+            registry,
+            registered,
+            evaluation,
+            alias=registry.settings.model_registry_alias,
+        )
+        assert decision.promote is True
+
+        loaded = registry.load_by_alias(
+            registry.settings.model_registry_alias, model_type=TimesFMCalibrationHead
+        )
+        assert isinstance(loaded, TimesFMCalibrationHead)

@@ -2,12 +2,17 @@
  * /signup — Create your account.
  * Two-panel layout: feature list + eco illustration on the left, signup form on the right.
  */
+import { Eye } from "lucide-react";
+
 import {
   AuthLayout,
+  AuthField,
+  AuthButton,
+  AuthDivider,
+  SocialAuthButton,
   AuthHeader,
   AuthFooter,
 } from "@/components/auth/auth-layout";
-import { SignupForm } from "@/components/auth/signup-form";
 
 const FEATURES = [
   {
@@ -69,7 +74,7 @@ export default function SignupPage() {
         <ul className="space-y-2.5 text-left">
           {FEATURES.map((f) => (
             <li key={f.title} className="flex items-start gap-3 rounded-md border border-white/5 bg-white/[0.03] p-2.5">
-              <span className="mt-0.5 grid h-7 w-7 place-items-center rounded-md bg-emerald-400/15 text-emerald-300">
+              <span className="mt-0.5 grid h-7 w-7 place-items-center rounded-md bg-emerald-200/15 text-emerald-100">
                 {f.icon}
               </span>
               <div>
@@ -86,7 +91,71 @@ export default function SignupPage() {
         Join EcoLens and start your sustainability journey.
       </p>
 
-      <SignupForm />
+      <form className="space-y-4">
+        <AuthField
+          label="Full name"
+          name="fullName"
+          placeholder="Enter your full name"
+          autoComplete="name"
+        />
+        <AuthField
+          label="Work email"
+          name="email"
+          type="email"
+          placeholder="Enter your work email"
+          autoComplete="email"
+        />
+        <AuthField
+          label="Company name"
+          name="company"
+          placeholder="Enter your company name"
+          autoComplete="organization"
+        />
+        <AuthField
+          label="Password"
+          name="password"
+          type="password"
+          placeholder="Create a password"
+          autoComplete="new-password"
+          icon={<Eye className="h-4 w-4" />}
+        />
+        <AuthField
+          label="Confirm password"
+          name="confirm"
+          type="password"
+          placeholder="Confirm your password"
+          autoComplete="new-password"
+          icon={<Eye className="h-4 w-4" />}
+        />
+
+        <label className="flex items-start gap-2 pt-1 text-xs text-white/60">
+          <input
+            type="checkbox"
+            className="mt-0.5 h-3.5 w-3.5 rounded border-white/20 bg-white/5 text-emerald-200 focus:ring-emerald-200/30"
+          />
+          <span>
+            I agree to the{" "}
+            <a className="text-emerald-100 hover:text-emerald-100" href="#">
+              Terms of Service
+            </a>{" "}
+            and{" "}
+            <a className="text-emerald-100 hover:text-emerald-100" href="#">
+              Privacy Policy
+            </a>
+            .
+          </span>
+        </label>
+
+        <AuthButton type="submit" className="mt-2">Create Account</AuthButton>
+      </form>
+
+      <div className="mt-5">
+        <AuthDivider label="or sign up with" />
+        <div className="mt-3 flex gap-3">
+          <SocialAuthButton provider="Google" />
+          <SocialAuthButton provider="Microsoft" />
+        </div>
+      </div>
 
       <AuthFooter text="Already have an account?" linkLabel="Login" linkHref="/login" />
     </AuthLayout>

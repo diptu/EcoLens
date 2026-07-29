@@ -4,7 +4,7 @@ Purely additive: every method degrades to a no-op cache miss when
 `redis_url` isn't configured or Redis is unreachable, so a missing or
 unhealthy cache never turns into a request failure -- it just costs a
 Postgres round-trip. Mirrors data-pipeline's
-`ecolens.warehouse.api.cache.Cache`. Addresses forecast-api's TODO.md
+`ecolens.warehouse.db.cache.Cache`. Addresses forecast-api's TODO.md
 ECO-P01 ("Implement Redis caching layer for `/forecast/latest`").
 """
 

@@ -40,7 +40,10 @@
     net_import_mw::double precision as net_import_mw,
     source,
     ingest_run_id,
-    fetched_at::timestamptz as fetched_at
+    fetched_at::timestamptz as fetched_at,
+    anomaly_score::double precision as anomaly_score,
+    anomaly_flags,
+    anomaly_explanation
 {% endmacro %}
 
 {#

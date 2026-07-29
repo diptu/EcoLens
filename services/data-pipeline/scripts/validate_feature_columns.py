@@ -85,9 +85,9 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.feature_selection import mutual_info_regression
 
 from ecolens.config import get_settings
-from ecolens.forecasting.features import FEATURE_COLUMNS
+from ecolens.forecasting.schema.features import FEATURE_COLUMNS
 from ecolens.shared.observability.logging import get_logger
-from ecolens.warehouse.api.settings import get_warehouse_api_settings
+from ecolens.warehouse.core.api_settings import get_warehouse_api_settings
 
 log = get_logger("validate_feature_columns")
 

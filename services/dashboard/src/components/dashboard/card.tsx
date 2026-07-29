@@ -12,6 +12,7 @@ export function Card({
   className,
   children,
   noPadding,
+  "data-testid": testId,
 }: {
   title?: React.ReactNode;
   subtitle?: React.ReactNode;
@@ -20,9 +21,13 @@ export function Card({
   className?: string;
   children?: React.ReactNode;
   noPadding?: boolean;
+  "data-testid"?: string;
 }) {
   return (
-    <section className={cn("rounded-xl border border-white/5 bg-white/[0.02]", className)}>
+    <section
+      className={cn("rounded-xl border border-white/5 bg-white/[0.02]", className)}
+      data-testid={testId}
+    >
       {(title || actions || badge) && (
         <header className="flex items-start justify-between gap-3 border-b border-white/5 px-5 py-4">
           <div className="min-w-0">

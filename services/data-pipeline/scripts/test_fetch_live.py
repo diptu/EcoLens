@@ -13,7 +13,7 @@ import json
 import httpx
 
 from ecolens.config import get_settings
-from ecolens.ingestion.sources.openelectricity import OpenElectricityFetcher
+from ecolens.ingestion.service.openelectricity import OpenElectricityFetcher
 from ecolens.shared.observability.logging import get_logger
 
 log = get_logger("test_fetch_live")

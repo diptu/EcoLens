@@ -11,6 +11,8 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { cn } from "@/lib/utils";
+import { clearSession, readSession, type AuthSession } from "@/lib/auth";
+import { useRouter } from "next/navigation";
 
 interface Crumb {
   label: string;
@@ -22,10 +24,10 @@ function buildCrumbs(pathname: string): Crumb[] {
   if (!path) return [];
   const segments = path.split("/");
   // Always start with "Home" -> /dashboard
-  const crumbs: Crumb[] = [{ label: "Home", href: "/dashboard/home" }];
+  const crumbs: Crumb[] = [{ label: "Home", href: "/dashboard/executive" }];
   if (segments[0] === "dashboard") {
     if (segments[1]) {
-      crumbs.push({ label: "Dashboard", href: "/dashboard/home" });
+      crumbs.push({ label: "Dashboard", href: "/dashboard/executive" });
       const label = segments[1]
         .replace(/-/g, " ")
         .replace(/\b\w/g, (c) => c.toUpperCase());
@@ -48,6 +50,24 @@ export function Topbar() {
   const crumbs = buildCrumbs(pathname);
   const [q, setQ] = useState("");
   const [profileOpen, setProfileOpen] = useState(false);
+  const [session, setSession] = useState<AuthSession | null>(null);
+  const router = useRouter();
+
+  // Read the session on mount + whenever the tab regains focus
+  // (so a logout/login in another tab is reflected here).
+  useEffect(() => {
+    setSession(readSession());
+    const onFocus = () => setSession(readSession());
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, []);
+
+  function onLogout() {
+    clearSession();
+    setSession(null);
+    setProfileOpen(false);
+    router.replace("/login");
+  }
 
   // ⌘K to focus search
   useEffect(() => {
@@ -90,7 +110,7 @@ export function Topbar() {
             value={q}
             onChange={(e) => setQ(e.target.value)}
             placeholder="Search anything…"
-            className="w-full rounded-full border border-white/10 bg-white/5 py-1.5 pl-9 pr-12 text-sm text-white placeholder:text-white/40 focus:border-emerald-400/50 focus:outline-none"
+            className="w-full rounded-full border border-white/10 bg-white/5 py-1.5 pl-9 pr-12 text-sm text-white placeholder:text-white/40 focus:border-emerald-200/50 focus:outline-none"
           />
           <kbd className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 rounded border border-white/10 bg-white/5 px-1.5 py-0.5 text-[10px] text-white/50">
             ⌘K
@@ -99,7 +119,7 @@ export function Topbar() {
 
         {/* Notification bell */}
         <Link
-          href="/dashboard/notifications"
+          href="/dashboard/system-health"
           className="relative grid h-9 w-9 place-items-center rounded-full border border-white/10 bg-white/5 text-white/70 transition-colors hover:text-white"
           aria-label="Notifications"
         >
@@ -116,12 +136,21 @@ export function Topbar() {
             onClick={() => setProfileOpen((o) => !o)}
             className="flex items-center gap-2 rounded-full border border-white/10 bg-white/5 py-1 pl-1 pr-2.5 text-left transition-colors hover:bg-white/10"
           >
-            <span className="grid h-7 w-7 place-items-center overflow-hidden rounded-full bg-gradient-to-br from-emerald-400 to-lime-300 text-xs font-bold text-black">
-              D
+            <span
+              className="grid h-7 w-7 place-items-center overflow-hidden rounded-full bg-gradient-to-br from-emerald-200 to-lime-100 text-xs font-bold text-black"
+              data-testid="profile-chip"
+              title={session?.user.name ?? "Diptu Alam"}
+              aria-label={session?.user.name ?? "Diptu Alam"}
+            >
+              {session?.user.initials ?? "D"}
             </span>
             <span className="hidden flex-col leading-tight md:flex">
-              <span className="text-sm font-semibold text-white">Diptu Alam</span>
-              <span className="text-[10px] text-white/50">Admin</span>
+              <span className="text-sm font-semibold text-white">
+                {session?.user.name ?? "Diptu Alam"}
+              </span>
+              <span className="text-[10px] text-white/50 capitalize">
+                {session?.user.role ?? "admin"}
+              </span>
             </span>
           </button>
           {profileOpen && (
@@ -129,15 +158,18 @@ export function Topbar() {
               <div className="fixed inset-0 z-30" onClick={() => setProfileOpen(false)} />
               <div className="absolute right-0 top-12 z-40 w-56 rounded-xl border border-white/10 bg-[#0a1410] p-2 shadow-2xl">
                 <div className="border-b border-white/5 px-3 py-2">
-                  <p className="text-sm font-semibold text-white">Diptu Alam</p>
-                  <p className="text-xs text-white/50">diptu@ecolens.com</p>
+                  <p className="text-sm font-semibold text-white">
+                    {session?.user.name ?? "Diptu Alam"}
+                  </p>
+                  <p className="text-xs text-white/50">
+                    {session?.user.email ?? "diptu@ecolens.com"}
+                  </p>
                 </div>
                 <div className="py-1">
                   {[
-                    { label: "Profile",       href: "/dashboard/profile" },
-                    { label: "Organization",  href: "/dashboard/organization" },
-                    { label: "Preferences",   href: "/dashboard/preferences" },
-                    { label: "Notifications", href: "/dashboard/notifications" },
+                    { label: "Settings & Users", href: "/dashboard/settings" },
+                    { label: "Reports",          href: "/dashboard/reports"  },
+                    { label: "System Health",    href: "/dashboard/system-health" },
                   ].map((item) => (
                     <Link
                       key={item.href}
@@ -150,13 +182,14 @@ export function Topbar() {
                   ))}
                 </div>
                 <div className="border-t border-white/5 py-1">
-                  <Link
-                    href="/"
-                    className="block rounded-md px-3 py-1.5 text-sm text-rose-300 hover:bg-rose-500/10"
-                    onClick={() => setProfileOpen(false)}
+                  <button
+                    type="button"
+                    onClick={onLogout}
+                    data-testid="logout-button"
+                    className="block w-full rounded-md px-3 py-1.5 text-left text-sm text-rose-300 hover:bg-rose-500/10"
                   >
                     Log out
-                  </Link>
+                  </button>
                 </div>
               </div>
             </>

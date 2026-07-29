@@ -25,7 +25,6 @@ class TestSettingsDefaults:
         assert settings.service_name == "ecolens-data-pipeline"
         assert settings.env == "dev"
         assert settings.log_level == "INFO"
-        assert settings.mongo_db_name == "ecolens"
         assert settings.oe_api_key is None
         assert settings.model_lookback == 48
         assert settings.optuna_n_trials == 50
@@ -38,7 +37,10 @@ class TestSettingsDefaults:
 
     def test_api_cors_origins_default_factory(self):
         settings = Settings(_env_file=None)  # type: ignore[call-arg]
-        assert settings.api_cors_origins == ["http://localhost:3000"]
+        assert settings.api_cors_origins == [
+            "http://localhost:3000",
+            "http://localhost:8000",
+        ]
 
     def test_derived_paths(self):
         settings = Settings(_env_file=None)  # type: ignore[call-arg]

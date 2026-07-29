@@ -1,4 +1,4 @@
-"""Unit tests for ecolens.ingestion.sources.openelectricity.transformers.
+"""Unit tests for ecolens.ingestion.service.openelectricity.transformers.
 
 Pure pandas logic, no network I/O — synthetic per-metric DataFrames in,
 canonical rows out.
@@ -9,7 +9,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from ecolens.ingestion.sources.openelectricity.transformers import (
+from ecolens.ingestion.service.openelectricity.transformers import (
     diagnose_data_quality,
     merge_network,
     migrate_v0_to_v1,
@@ -169,7 +169,7 @@ class TestMergeNetwork:
         assert row["net_import_mw"] == 300.0
 
     def test_output_has_all_34_canonical_columns(self):
-        from ecolens.ingestion.sources.openelectricity.schema import OUTPUT_COLUMNS
+        from ecolens.ingestion.schema.openelectricity import OUTPUT_COLUMNS
 
         result = merge_network("NEM", {"power": _power_frame()}, since=None)
         assert list(result.columns) == OUTPUT_COLUMNS

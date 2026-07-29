@@ -1,4 +1,4 @@
-"""Tests for ecolens.warehouse.runner.orchestrator.WarehouseRunner.
+"""Tests for ecolens.warehouse.service.orchestrator.WarehouseRunner.
 
 Every stage object is replaced with a mock so these exercise only the
 orchestrator's sequencing logic (which stages run, in what order,
@@ -13,9 +13,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from ecolens.warehouse.runner.models import StageResult
-from ecolens.warehouse.runner.orchestrator import WarehouseRunner
-from ecolens.warehouse.runner.settings import WarehouseRunnerSettings
+from ecolens.warehouse.model.run_result import StageResult
+from ecolens.warehouse.service.orchestrator import WarehouseRunner
+from ecolens.warehouse.core.runner_settings import WarehouseRunnerSettings
 
 
 def _stage(name: str, *, success: bool = True, error: str | None = None) -> StageResult:

@@ -1,8 +1,8 @@
-"""Tests for ecolens.warehouse.api.settings.WarehouseApiSettings."""
+"""Tests for ecolens.warehouse.core.api_settings.WarehouseApiSettings."""
 
 from __future__ import annotations
 
-from ecolens.warehouse.api.settings import (
+from ecolens.warehouse.core.api_settings import (
     WarehouseApiSettings,
     get_warehouse_api_settings,
 )

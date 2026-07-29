@@ -65,7 +65,7 @@ function CompareTable() {
                     return (
                       <td key={planId} className="px-5 py-3 text-center">
                         {val ? (
-                          <Check className="mx-auto h-4 w-4 text-emerald-300" />
+                          <Check className="mx-auto h-4 w-4 text-emerald-100" />
                         ) : (
                           <span className="text-white/30">—</span>
                         )}
@@ -143,7 +143,7 @@ export default function PricingPage() {
         <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
           <div className="rounded-2xl border border-white/5 bg-white/[0.02] p-6">
             <div className="flex items-center gap-2">
-              <span className="grid h-7 w-7 place-items-center rounded-md bg-emerald-400/15 text-emerald-300">
+              <span className="grid h-7 w-7 place-items-center rounded-md bg-emerald-200/15 text-emerald-100">
                 <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
                   <path d="M4 4l8 8 8-8M4 12l8 8 8-8" />
                 </svg>
@@ -153,7 +153,7 @@ export default function PricingPage() {
             <ul className="mt-4 grid grid-cols-2 gap-x-4 gap-y-2 text-xs text-white/75">
               {PRICING_INCLUDED.map((item) => (
                 <li key={item} className="flex items-start gap-2">
-                  <Check className="mt-0.5 h-3 w-3 shrink-0 text-emerald-300" />
+                  <Check className="mt-0.5 h-3 w-3 shrink-0 text-emerald-100" />
                   {item}
                 </li>
               ))}
@@ -166,13 +166,13 @@ export default function PricingPage() {
               {PRICING_ADDONS.map((a) => (
                 <li key={a.name} className="flex items-center justify-between">
                   <span className="text-white/75">{a.name}</span>
-                  <span className="font-mono text-emerald-300">{a.price}</span>
+                  <span className="font-mono text-emerald-100">{a.price}</span>
                 </li>
               ))}
             </ul>
           </div>
 
-          <div className="relative overflow-hidden rounded-2xl border border-white/5 bg-gradient-to-br from-emerald-400/10 via-white/[0.02] to-white/[0.02] p-6">
+          <div className="relative overflow-hidden rounded-2xl border border-white/5 bg-gradient-to-br from-emerald-200/10 via-white/[0.02] to-white/[0.02] p-6">
             <div aria-hidden className="pointer-events-none absolute -right-12 -bottom-12 h-32 w-32 opacity-20">
               <Image
                 src="/images/forest.webp"
@@ -190,7 +190,7 @@ export default function PricingPage() {
             </p>
             <a
               href="mailto:sales@ecolens.app"
-              className="mt-4 inline-flex items-center justify-center rounded-md bg-lime-300 px-4 py-2 text-xs font-semibold text-black hover:bg-lime-200"
+              className="mt-4 inline-flex items-center justify-center rounded-md bg-lime-100 px-4 py-2 text-xs font-semibold text-black hover:bg-lime-100"
             >
               Talk to Sales
             </a>

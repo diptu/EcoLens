@@ -58,6 +58,8 @@ Routes
     GET  /features/demand/v1
     GET  /features/demand/v1/latest
     GET  /holidays/{year}
+    GET  /api/analytics/executive-kpis   (service/executive_kpis.py --
+                                           see that module's own docstring)
 
 Usage
 =====

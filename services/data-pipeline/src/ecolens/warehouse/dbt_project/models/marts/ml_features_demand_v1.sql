@@ -41,25 +41,33 @@
 --     total_generation_mw, emissions_intensity_kgco2e_per_mwh,
 --     net_import_mw
 --                                   -- market + grid-mix covariates.
---                                      total_generation_mw is only
---                                      reported by AEMO WEM (AEMO NEM
---                                      doesn't emit it), so ~53% of raw
---                                      rows are null -- gap-filled the
---                                      same way as every other column
---                                      here, so it's always dense by
---                                      the time it lands in this mart.
+--                                      total_generation_mw used to be
+--                                      ~53% null (AEMO WEM reports it
+--                                      directly; AEMO NEM only carried
+--                                      it on its separate network-level
+--                                      row) -- int_energy_unified_30min's
+--                                      NEM fuel-tech broadcast fix now
+--                                      reaches this column too, verified
+--                                      0% null on a real 103,734-row
+--                                      fetch -- gap-filled the same way
+--                                      as every other column here either
+--                                      way, so it's always dense by the
+--                                      time it lands in this mart.
 --   * temp_c, apparent_temp_c, dew_point_c, humidity_pct,
 --     wind_speed_kmh, wind_direction_deg, wind_gust_kmh, pressure_hpa,
 --     rain_since_9am_mm, cloud_cover_pct
 --                                   -- the full 10-column BoM weather set
 --   * is_holiday, is_weekend       -- calendar covariates
 --
--- Note: rain_since_9am_mm/is_weekend and total_generation_mw are
--- carried here for completeness of the raw-ingested-column set this
--- mart is built from, but FEATURE_COLUMNS in
--- forecasting/features.py is the actual model-input contract -- see
--- that file's exclusion comment for which of these columns the LSTM
--- consumes (validation-driven: scripts/validate_feature_columns.py).
+-- Note: rain_since_9am_mm/is_weekend are carried here for completeness
+-- of the raw-ingested-column set this mart is built from, but excluded
+-- from the model-input contract -- FEATURE_COLUMNS in
+-- forecasting/schema/features.py is the actual model-input contract,
+-- see that file's exclusion comment for the full list (validation-driven:
+-- scripts/validate_feature_columns.py). total_generation_mw, despite the
+-- note above about its history, *is* one of FEATURE_COLUMNS -- the
+-- validation pass added it back in after finding it scored as high as
+-- top-quartile included features.
 --   * hour_sin, hour_cos, dow_sin, dow_cos, month_sin, month_cos
 --                                   -- cyclical encodings of
 --                                      region-local time (a neural net
@@ -110,12 +118,18 @@ featured as (
             rows between {{ var("ml_rolling_window_slots", 336) }} preceding and 1 preceding
         ) as demand_rolling_std_7d,
         price_mwh,
+        -- Plain addition, not coalesce(x, 0) + ... -- see
+        -- fact_demand_30min.sql's identical column for why: a NULL
+        -- component means genuinely no data was reported for that fuel
+        -- type, not "zero generation," and this column has no not_null
+        -- test (build_windowed_dataset already drops any row missing a
+        -- FEATURE_COLUMNS value).
         (
-            coalesce(hydro_mw, 0)
-            + coalesce(wind_mw, 0)
-            + coalesce(solar_utility_mw, 0)
-            + coalesce(solar_rooftop_mw, 0)
-            + coalesce(biomass_mw, 0)
+            hydro_mw
+            + wind_mw
+            + solar_utility_mw
+            + solar_rooftop_mw
+            + biomass_mw
         ) as renewable_generation_mw,
         renewable_proportion,
         total_generation_mw,

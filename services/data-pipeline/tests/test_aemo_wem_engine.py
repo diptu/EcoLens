@@ -1,4 +1,4 @@
-"""Tests for ecolens.ingestion.sources.aemo_wem.engine.AEMOWEMFetcher."""
+"""Tests for ecolens.ingestion.service.aemo_wem.engine.AEMOWEMFetcher."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from datetime import date, datetime, timezone
 import httpx
 import pytest
 
-from ecolens.ingestion.sources.aemo_wem.engine import AEMOWEMFetcher
-from ecolens.ingestion.sources.aemo_wem.schema import OUTPUT_COLUMNS
+from ecolens.ingestion.service.aemo_wem.engine import AEMOWEMFetcher
+from ecolens.ingestion.schema.aemo_wem import OUTPUT_COLUMNS
 
 
 def _fake_raw() -> dict:
@@ -46,7 +46,7 @@ class TestFetch:
             return _fake_raw()
 
         monkeypatch.setattr(
-            "ecolens.ingestion.sources.aemo_wem.client.AEMOWEMClient.fetch_day_data",
+            "ecolens.ingestion.service.aemo_wem.client.AEMOWEMClient.fetch_day_data",
             fake_fetch_day_data,
         )
         async with httpx.AsyncClient() as client:
@@ -70,7 +70,7 @@ class TestFetch:
             return None
 
         monkeypatch.setattr(
-            "ecolens.ingestion.sources.aemo_wem.client.AEMOWEMClient.fetch_day_data",
+            "ecolens.ingestion.service.aemo_wem.client.AEMOWEMClient.fetch_day_data",
             fake_fetch_day_data,
         )
         async with httpx.AsyncClient() as client:
@@ -93,7 +93,7 @@ class TestFetch:
             return _fake_raw()
 
         monkeypatch.setattr(
-            "ecolens.ingestion.sources.aemo_wem.client.AEMOWEMClient.fetch_day_data",
+            "ecolens.ingestion.service.aemo_wem.client.AEMOWEMClient.fetch_day_data",
             flaky_fetch_day_data,
         )
         async with httpx.AsyncClient() as client:
@@ -114,7 +114,7 @@ class TestFetch:
             return None
 
         monkeypatch.setattr(
-            "ecolens.ingestion.sources.aemo_wem.client.AEMOWEMClient.fetch_day_data",
+            "ecolens.ingestion.service.aemo_wem.client.AEMOWEMClient.fetch_day_data",
             fake_fetch_day_data,
         )
         async with httpx.AsyncClient() as client:
@@ -141,7 +141,7 @@ class TestFetch:
             raise RuntimeError("boom")
 
         monkeypatch.setattr(
-            "ecolens.ingestion.sources.aemo_wem.client.AEMOWEMClient.fetch_day_data",
+            "ecolens.ingestion.service.aemo_wem.client.AEMOWEMClient.fetch_day_data",
             flaky_fetch_day_data,
         )
         async with httpx.AsyncClient() as client:
@@ -166,7 +166,7 @@ class TestFetchForDate:
             return _fake_raw()
 
         monkeypatch.setattr(
-            "ecolens.ingestion.sources.aemo_wem.client.AEMOWEMClient.fetch_day_data",
+            "ecolens.ingestion.service.aemo_wem.client.AEMOWEMClient.fetch_day_data",
             fake_fetch_day_data,
         )
         async with httpx.AsyncClient() as client:
@@ -183,7 +183,7 @@ class TestFetchForDate:
             return None
 
         monkeypatch.setattr(
-            "ecolens.ingestion.sources.aemo_wem.client.AEMOWEMClient.fetch_day_data",
+            "ecolens.ingestion.service.aemo_wem.client.AEMOWEMClient.fetch_day_data",
             fake_fetch_day_data,
         )
 
@@ -195,7 +195,7 @@ class TestFetchForDate:
                 )  # ~9am AWST on the 21st
 
         monkeypatch.setattr(
-            "ecolens.ingestion.sources.aemo_wem.engine.datetime", FixedDatetime
+            "ecolens.ingestion.service.aemo_wem.engine.datetime", FixedDatetime
         )
         async with httpx.AsyncClient() as client:
             await fetcher.fetch_for_date(client)

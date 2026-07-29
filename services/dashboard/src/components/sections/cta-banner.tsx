@@ -123,9 +123,9 @@ function CenterBadge({ children }: { children: React.ReactNode }) {
   return (
     <m.span
       variants={fadeUp}
-      className="inline-flex items-center gap-2 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-3 py-1 text-xs font-medium tracking-wider text-emerald-300"
+      className="inline-flex items-center gap-2 rounded-full border border-emerald-200/30 bg-emerald-200/10 px-3 py-1 text-xs font-medium tracking-wider text-emerald-100"
     >
-      <span className="grid h-4 w-4 place-items-center rounded-full bg-emerald-400/20">
+      <span className="grid h-4 w-4 place-items-center rounded-full bg-emerald-200/20">
         <svg viewBox="0 0 8 8" fill="currentColor" className="h-2.5 w-2.5">
           <path d="M4 0L4.6 3.4L8 4L4.6 4.6L4 8L3.4 4.6L0 4L3.4 3.4Z" />
         </svg>
@@ -159,7 +159,7 @@ function PlayIcon() {
 
 function CheckIcon() {
   return (
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" className="text-emerald-400">
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" className="text-emerald-200">
       <circle cx="7" cy="7" r="6" stroke="currentColor" strokeOpacity="0.4" strokeWidth="1.2" />
       <path
         d="M4 7l2 2 4-4"

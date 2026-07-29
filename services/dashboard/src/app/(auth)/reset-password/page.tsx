@@ -50,7 +50,7 @@ export default function ResetPasswordPage() {
               <span
                 className={
                   s.id <= 2
-                    ? "grid h-7 w-7 place-items-center rounded-full bg-emerald-400 text-xs font-bold text-black ring-2 ring-emerald-400/30"
+                    ? "grid h-7 w-7 place-items-center rounded-full bg-emerald-200 text-xs font-bold text-black ring-2 ring-emerald-200/30"
                     : "grid h-7 w-7 place-items-center rounded-full border border-white/20 bg-white/5 text-xs font-bold text-white/40"
                 }
               >
@@ -61,7 +61,7 @@ export default function ResetPasswordPage() {
               </span>
             </div>
             {i < STEPS.length - 1 && (
-              <span className="mx-1 mb-5 h-0.5 flex-1 bg-emerald-400/40" />
+              <span className="mx-1 mb-5 h-0.5 flex-1 bg-emerald-200/40" />
             )}
           </li>
         ))}
@@ -83,7 +83,7 @@ export default function ResetPasswordPage() {
         <ul className="space-y-1.5 pl-1">
           {REQUIREMENTS.map((r) => (
             <li key={r} className="flex items-center gap-2 text-[11px] text-white/60">
-              <Check className="h-3 w-3 text-emerald-300" />
+              <Check className="h-3 w-3 text-emerald-100" />
               {r}
             </li>
           ))}

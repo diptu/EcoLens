@@ -9,14 +9,17 @@ connection is made. Mirrors data-pipeline's
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from .cache import Cache
 from .db import ConnectionPool
+from .forecasting.fuel_loader import FuelEnsembleLoader
 from .forecasting.reload import ModelReloader
 from .logging import get_logger
 from .routes import router
@@ -62,6 +65,20 @@ def _build_lifespan(
             log.warning("app.startup.model_unavailable", error=str(exc))
         app.state.reloader = reloader
 
+        # Root TODO.md's "API & Registry Serving": loaded once here, not
+        # on reloader's poll-loop cadence -- see fuel_loader.py's
+        # docstring for why a v1 without hot-reload is a deliberate scope
+        # cut. Same resilient-startup pattern as the LSTM reloader above:
+        # an unreachable MLflow server or no version registered yet must
+        # not block app startup, just degrade source_breakdown_mw/
+        # carbon_metrics to None in the response (routes.py).
+        fuel_loader = FuelEnsembleLoader(settings)
+        try:
+            app.state.fuel_ensemble = await asyncio.to_thread(fuel_loader.load_current)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("app.startup.fuel_ensemble_unavailable", error=str(exc))
+            app.state.fuel_ensemble = None
+
         log.info("app.startup", host=settings.api_host, port=settings.api_port)
         yield
 
@@ -92,6 +109,12 @@ def create_app(settings: ForecastApiSettings | None = None) -> FastAPI:
             "or the raw.* Postgres schema."
         ),
         lifespan=_build_lifespan(resolved_settings),
+    )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=resolved_settings.cors_origins,
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
     app.include_router(router)
     return app

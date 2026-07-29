@@ -110,7 +110,7 @@ export function NameCell({
 
 export function StatusDot({ color, label }: { color: "green" | "amber" | "red" | "gray"; label?: string }) {
   const c = {
-    green: "bg-emerald-400 shadow-[0_0_8px_rgba(16,185,129,0.6)]",
+    green: "bg-emerald-200 shadow-[0_0_8px_rgba(16,185,129,0.6)]",
     amber: "bg-amber-400",
     red:   "bg-rose-400",
     gray:  "bg-white/30",
@@ -134,8 +134,8 @@ export function Pill({
 }) {
   const styles: Record<NonNullable<typeof color>, string> = {
     gray:    "border-white/10 bg-white/5 text-white/70",
-    lime:    "border-lime-400/30 bg-lime-400/10 text-lime-300",
-    emerald: "border-emerald-400/30 bg-emerald-400/10 text-emerald-300",
+    lime:    "border-lime-200/30 bg-lime-200/10 text-lime-100",
+    emerald: "border-emerald-200/30 bg-emerald-200/10 text-emerald-100",
     purple:  "border-purple-400/30 bg-purple-400/10 text-purple-300",
     sky:     "border-sky-400/30 bg-sky-400/10 text-sky-300",
     amber:   "border-amber-400/30 bg-amber-400/10 text-amber-300",

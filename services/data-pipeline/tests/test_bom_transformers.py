@@ -1,4 +1,4 @@
-"""Unit tests for ecolens.ingestion.sources.bom.transformers."""
+"""Unit tests for ecolens.ingestion.service.bom.transformers."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from ecolens.ingestion.sources.bom.schema import DEFAULT_BOM_STATIONS
-from ecolens.ingestion.sources.bom.transformers import (
+from ecolens.ingestion.schema.bom import DEFAULT_BOM_STATIONS
+from ecolens.ingestion.service.bom.transformers import (
     apply_data_quality_fixes,
     diagnose,
     normalize_observation,

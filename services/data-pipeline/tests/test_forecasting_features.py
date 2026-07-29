@@ -6,12 +6,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from ecolens.forecasting.features import (
+from ecolens.forecasting.schema.features import (
     FEATURE_COLUMNS,
     TARGET_INDEX,
     FeatureScaler,
-    build_windowed_dataset,
 )
+from ecolens.forecasting.service.windowing import build_windowed_dataset
 
 
 def _synthetic_snapshot(

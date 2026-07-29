@@ -23,12 +23,20 @@ from .forecasting.features import FEATURE_COLUMNS
 
 _LAG_COLUMNS = [f"demand_lag_{i:02d}" for i in range(1, 49)]
 
+# temp_c/humidity_pct/wind_speed_kmh: root TODO.md's "API & Registry
+# Serving" weather_context block -- needed on the baseline path too, not
+# just the LSTM path's FEATURE_COLUMNS-based query below, so
+# weather_context is populated regardless of which forecaster served the
+# rest of the response.
 _BASELINE_FEATURE_COLUMNS = [
     "ts_30",
     "demand_mw",
     *_LAG_COLUMNS,
     "demand_rolling_avg_7d",
     "demand_rolling_std_7d",
+    "temp_c",
+    "humidity_pct",
+    "wind_speed_kmh",
 ]
 
 _LATEST_FEATURE_ROW_QUERY = (

@@ -25,8 +25,8 @@ from datetime import date, timedelta
 
 import httpx
 
-from ecolens.ingestion.sources.aemo_nem import AEMONEMFetcher
-from ecolens.ingestion.sources.aemo_wem import AEMOWEMFetcher
+from ecolens.ingestion.service.aemo_nem import AEMONEMFetcher
+from ecolens.ingestion.service.aemo_wem import AEMOWEMFetcher
 from ecolens.ingestion.storage.mongo import bulk_upsert, get_db, get_mongo_client
 from ecolens.shared.observability.logging import get_logger
 

@@ -1,4 +1,4 @@
-"""Tests for ecolens.warehouse.runner.cli argument parsing."""
+"""Tests for ecolens.warehouse.core.cli argument parsing."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import sys
 
 import pytest
 
-from ecolens.warehouse.runner.cli import parse_args
+from ecolens.warehouse.core.cli import parse_args
 
 
 class TestParseArgs:

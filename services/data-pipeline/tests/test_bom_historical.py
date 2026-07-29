@@ -1,4 +1,4 @@
-"""Tests for ecolens.ingestion.sources.bom.historical.HistoricalFetcher."""
+"""Tests for ecolens.ingestion.service.bom.historical.HistoricalFetcher."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 
-from ecolens.ingestion.sources.bom.historical import HistoricalFetcher
+from ecolens.ingestion.service.bom.historical import HistoricalFetcher
 
 STATIONS = {"NSW1": "066037", "VIC1": "086282"}
 
@@ -182,7 +182,7 @@ class TestWriteCache:
             calls.append((cache_dir, docs))
             return []
 
-        import ecolens.ingestion.sources.bom.historical as historical_module
+        import ecolens.ingestion.service.bom.historical as historical_module
 
         monkeypatch.setattr(
             historical_module.cache_module, "write_cache", fake_write_cache
@@ -197,18 +197,18 @@ class TestWriteDuckdb:
         fetcher = HistoricalFetcher(cache_dir=tmp_path)
         calls = []
 
-        def fake_write_historical(source, docs):
-            calls.append((source, docs))
+        def fake_write_historical(source, docs, *, run_id=None):
+            calls.append((source, docs, run_id))
             return len(docs)
 
-        import ecolens.ingestion.sources.bom.historical as historical_module
+        import ecolens.ingestion.service.bom.historical as historical_module
 
         monkeypatch.setattr(
             historical_module.duckdb_store, "write_historical", fake_write_historical
         )
         docs = [{"station_id": "066037", "ts": "2024-01-01"}]
-        result = fetcher.write_duckdb(docs)
-        assert calls == [("bom", docs)]
+        result = fetcher.write_duckdb(docs, run_id="run-1")
+        assert calls == [("bom", docs, "run-1")]
         assert result == 1
 
     def test_round_trips_through_real_duckdb_store(self, tmp_path, monkeypatch):
@@ -231,7 +231,7 @@ class TestWriteDuckdb:
         written = fetcher.write_duckdb(docs)
         assert written == 1
 
-        from ecolens.ingestion.storage.duckdb_store import read_historical
+        from ecolens.ingestion.db.duckdb_store import read_historical
 
         out = read_historical("bom")
         assert len(out) == 1

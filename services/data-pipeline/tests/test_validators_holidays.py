@@ -1,11 +1,11 @@
-"""Tests for ecolens.ingestion.validators.holidays."""
+"""Tests for ecolens.ingestion.schema.validators.holidays."""
 
 from __future__ import annotations
 
 import pandera.errors
 import pytest
 
-from ecolens.ingestion.validators.holidays import validate
+from ecolens.ingestion.schema.validators.holidays import validate
 
 
 def _valid_doc(**overrides) -> dict:

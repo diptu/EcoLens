@@ -1,4 +1,4 @@
-"""Tests for ecolens.forecasting.data (ECO-109).
+"""Tests for ecolens.forecasting.repository.training_data (ECO-109).
 
 `TrainingSetLoader.fetch()` opens its own `asyncpg.connect()` (a single
 connection, not a pool -- it's a one-shot batch read, not a live
@@ -15,8 +15,12 @@ import pandas as pd
 import pytest
 
 from ecolens.config import Settings
-from ecolens.forecasting.data import TrainingSetLoader, latest_snapshot, load_snapshot
-from ecolens.warehouse.api.settings import WarehouseApiSettings
+from ecolens.forecasting.repository.training_data import (
+    TrainingSetLoader,
+    latest_snapshot,
+    load_snapshot,
+)
+from ecolens.warehouse.core.api_settings import WarehouseApiSettings
 
 
 class FakeConn:
@@ -39,7 +43,9 @@ def _install_fake_connect(monkeypatch, rows: list[dict[str, Any]]) -> FakeConn:
     async def fake_connect(**kwargs: Any) -> FakeConn:
         return conn
 
-    monkeypatch.setattr("ecolens.forecasting.data.asyncpg.connect", fake_connect)
+    monkeypatch.setattr(
+        "ecolens.forecasting.repository.training_data.asyncpg.connect", fake_connect
+    )
     return conn
 
 
@@ -131,7 +137,9 @@ class TestFetch:
         async def fake_connect(**kwargs: Any) -> FakeConn:
             return conn
 
-        monkeypatch.setattr("ecolens.forecasting.data.asyncpg.connect", fake_connect)
+        monkeypatch.setattr(
+            "ecolens.forecasting.repository.training_data.asyncpg.connect", fake_connect
+        )
         loader = TrainingSetLoader(
             warehouse_settings=WarehouseApiSettings(), settings=Settings()
         )  # type: ignore[call-arg]

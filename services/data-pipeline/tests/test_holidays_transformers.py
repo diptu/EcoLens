@@ -1,4 +1,4 @@
-"""Unit tests for ecolens.ingestion.sources.holidays.transformers."""
+"""Unit tests for ecolens.ingestion.service.holidays.transformers."""
 
 from __future__ import annotations
 
@@ -6,13 +6,13 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from ecolens.ingestion.sources.holidays.schema import (
+from ecolens.ingestion.schema.holidays import (
     HOLIDAY_OUTPUT_COLUMNS,
     NEM_REGIONS,
     VALID_HOLIDAY_TYPES,
     VALID_STATES,
 )
-from ecolens.ingestion.sources.holidays.transformers import (
+from ecolens.ingestion.service.holidays.transformers import (
     apply_data_quality_fixes,
     attach_days_until,
     easter_date,

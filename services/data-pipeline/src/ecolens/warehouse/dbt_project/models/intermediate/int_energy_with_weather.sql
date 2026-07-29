@@ -13,6 +13,16 @@
 -- buckets; the holiday flag is resolved against each region's local
 -- calendar date, not UTC -- everything upstream stays in UTC and this
 -- is the one place we convert, per werehouse.md's DST guidance.
+--
+-- Root TODO.md's "Anomaly Detection" section: `energy` already carries
+-- one combined anomaly_score/flags/explanation (int_energy_unified_30min's
+-- own header comment covers how); `weather`'s own per-bucket combine
+-- follows the same "max score, its own flags/explanation" rule
+-- (`worst_anomaly_agg()`), and the two are combined the same way again
+-- (`pick_worse_of_two()`) -- weather and energy readings are
+-- independent phenomena, so a temperature-sensor anomaly and a demand-
+-- reading anomaly in the same 30-min slot are both worth surfacing, but
+-- as "the worse of the two," not blended together.
 
 with energy as (
     select * from {{ ref("int_energy_unified_30min") }}
@@ -34,7 +44,8 @@ weather as (
         avg(wind_gust_kmh) as wind_gust_kmh,
         avg(pressure_hpa) as pressure_hpa,
         avg(rain_since_9am_mm) as rain_since_9am_mm,
-        avg(cloud_cover_pct) as cloud_cover_pct
+        avg(cloud_cover_pct) as cloud_cover_pct,
+        {{ worst_anomaly_agg() }}
     from {{ ref("stg_bom_observations") }}
     group by region, {{ bucket_30min("ts") }}
 ),
@@ -63,7 +74,8 @@ joined as (
         w.pressure_hpa,
         w.rain_since_9am_mm,
         w.cloud_cover_pct,
-        (h.date is not null) as is_holiday
+        (h.date is not null) as is_holiday,
+        {{ pick_worse_of_two("e", "w") }}
     from energy e
     left join weather w
         on w.region = e.region

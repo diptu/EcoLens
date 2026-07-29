@@ -1,10 +1,10 @@
-"""Tests for ecolens.forecasting.models.lstm (ECO-111)."""
+"""Tests for ecolens.forecasting.model.lstm (ECO-111)."""
 
 from __future__ import annotations
 
 import torch
 
-from ecolens.forecasting.models.lstm import DemandLSTM
+from ecolens.forecasting.model.lstm import DemandLSTM
 
 
 def _model(**overrides) -> DemandLSTM:

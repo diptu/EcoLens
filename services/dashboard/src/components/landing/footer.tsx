@@ -52,7 +52,7 @@ export function Footer() {
           {/* Brand */}
           <div className="md:col-span-1">
             <div className="flex items-center gap-2">
-              <div className="grid h-8 w-8 place-items-center rounded-full bg-gradient-to-br from-emerald-400 to-lime-300">
+              <div className="grid h-8 w-8 place-items-center rounded-full bg-gradient-to-br from-emerald-200 to-lime-100">
                 <span className="text-sm font-bold text-black">E</span>
               </div>
               <span className="text-lg font-bold text-white">EcoLens</span>

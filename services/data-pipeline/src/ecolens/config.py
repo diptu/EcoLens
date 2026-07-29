@@ -49,6 +49,19 @@ class Settings(BaseSettings):
         description="Async Redis URL.",
     )
 
+    # ── RabbitMQ ──────────────────────────────────────────────────────────
+    # Ingestion's sole write path (duckdb_store.write_historical) publishes
+    # a "data written" event here as soon as new/updated rows land in
+    # DuckDB; ecolens.warehouse.service.event_consumer consumes it and
+    # triggers an incremental WarehouseRunner run -- an event-driven
+    # replacement for the old every-30-min warehouse cron. Defaults assume
+    # a locally-running broker reachable from the host (this repo's
+    # processes all run directly on the host, not inside docker-compose's
+    # network -- same assumption NEON_DSN/MONGO_URI already make), not the
+    # in-container "rabbitmq" hostname docker-compose's other services use.
+    rabbitmq_url: str = "amqp://guest:guest@localhost:5672/"
+    rabbitmq_queue: str = "ecolens.warehouse.trigger"
+
     # ── S3 / MinIO ────────────────────────────────────────────────────────
     s3_endpoint_url: str = "http://minio:9000"
     s3_access_key: str = "minioadmin"
@@ -156,6 +169,59 @@ class Settings(BaseSettings):
     mlflow_experiment_name: str = "ecolens-demand-lstm"
     mlflow_registered_model_name: str = "ecolens_demand_lstm"
     model_registry_alias: str = "production"
+
+    # ── TFT tunables (forecasting/model/tft.py) ─────────────────────────────
+    # Registered/scoped separately from the LSTM above (own MLflow
+    # experiment + registered-model name) rather than sharing
+    # mlflow_experiment_name/mlflow_registered_model_name -- lets both
+    # architectures hold their own "production" alias without competing for
+    # the same registry entry. model_lookback/model_horizon/
+    # model_early_stop_patience/conformal_alpha/model_registry_alias above
+    # are architecture-agnostic and reused as-is.
+    model_tft_d_model: int = 64
+    model_tft_num_heads: int = 4
+    model_tft_num_lstm_layers: int = 1
+    model_tft_static_dim: int = 16
+    model_tft_dropout: float = 0.1
+    model_tft_train_lr: float = 1e-3
+    model_tft_train_epochs: int = 50
+    model_tft_batch_size: int = 64
+    mlflow_experiment_name_tft: str = "ecolens-demand-tft"
+    mlflow_registered_model_name_tft: str = "ecolens_demand_tft"
+
+    # ── TimesFM tunables (forecasting/service/serving/timesfm_backbone.py,
+    # forecasting/model/timesfm_head.py) ────────────────────────────────────
+    # TimesFM itself is a frozen pretrained foundation model (Google,
+    # via Hugging Face Hub) -- nothing here trains it. `timesfm_*` config
+    # is for loading/running the frozen backbone; `model_timesfm_*` is for
+    # the small calibration head trained on top of its output. Registered
+    # separately, same reasoning as the TFT fields above.
+    timesfm_repo_id: str = "google/timesfm-2.5-200m-pytorch"
+    timesfm_per_core_batch_size: int = 32
+    model_timesfm_hidden_dim: int = 32
+    model_timesfm_static_dim: int = 16
+    model_timesfm_dropout: float = 0.1
+    model_timesfm_train_lr: float = 1e-3
+    model_timesfm_train_epochs: int = 50
+    model_timesfm_batch_size: int = 64
+    mlflow_experiment_name_timesfm: str = "ecolens-demand-timesfm"
+    mlflow_registered_model_name_timesfm: str = "ecolens_demand_timesfm"
+    # ── Per-fuel LightGBM ensemble (forecasting/model/fuel_ensemble.py) ─────
+    # Root TODO.md "Normalization Constraint Layer": 16 independent
+    # per-fuel regressors, one LGBMRegressor each -- not a torch model,
+    # same LightGBM precedent feature_selection.py's Step 4 already sets
+    # in this codebase (including that module's n_jobs=1 SIGSEGV landmine
+    # from importing torch and LightGBM's multi-threaded OpenMP pool in
+    # the same process -- training/train_fuel_ensemble.py inherits the
+    # same fix). Registered under its own MLflow experiment/registered-
+    # model name, same reasoning as the TFT/TimesFM fields above -- no
+    # "production" alias contention with the demand-forecasting models.
+    model_fuel_num_leaves: int = 31
+    model_fuel_n_estimators: int = 200
+    model_fuel_learning_rate: float = 0.05
+    model_fuel_max_depth: int = -1
+    mlflow_experiment_name_fuel_ensemble: str = "ecolens-fuel-ensemble"
+    mlflow_registered_model_name_fuel_ensemble: str = "ecolens_fuel_ensemble"
     training_snapshot_dir: Path = Field(
         default=Path("data/training_snapshots"),
         description=(
@@ -175,7 +241,10 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"  # nosec B104 - must bind all interfaces inside the container
     api_port: int = 8001
     api_cors_origins: list[str] = Field(
-        default_factory=lambda: ["http://localhost:3000"]
+        # :3000 is `pnpm dev`; :8000 is `pnpm serve`'s static-export
+        # preview, which is what services/dashboard's own e2e suite
+        # (playwright.config.ts's default baseURL) actually targets.
+        default_factory=lambda: ["http://localhost:3000", "http://localhost:8000"]
     )
     api_workers: int = 1
 

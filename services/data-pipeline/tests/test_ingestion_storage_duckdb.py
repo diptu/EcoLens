@@ -1,4 +1,4 @@
-"""Tests for ecolens.ingestion.storage.duckdb_store.
+"""Tests for ecolens.ingestion.db.duckdb_store.
 
 Uses a tmp_path-scoped DuckDB file for every test -- never touches the
 real historical_duckdb_path -- so these are fast and hermetic.
@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from ecolens.ingestion.storage.duckdb_store import read_historical, write_historical
+from ecolens.ingestion.db.duckdb_store import read_historical, write_historical
 
 
 def _doc(station_id: str, ts: datetime, temp_c: float, **overrides) -> dict:

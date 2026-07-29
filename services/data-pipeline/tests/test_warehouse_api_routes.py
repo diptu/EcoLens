@@ -16,12 +16,13 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 
+import pytest
 from fastapi.testclient import TestClient
 
 from conftest import FakeConnectionPool
 from ecolens.warehouse.api.app import create_app
-from ecolens.warehouse.api.dependencies import require_pool
-from ecolens.warehouse.api.settings import WarehouseApiSettings
+from ecolens.warehouse.api.read_dependencies import require_pool
+from ecolens.warehouse.core.api_settings import WarehouseApiSettings
 
 SINCE = "2026-01-01T00:00:00Z"
 UNTIL = "2026-01-02T00:00:00Z"
@@ -63,7 +64,16 @@ class TestRegions:
         assert r.json()[0]["region"] == "NSW1"
 
     def test_regions_503_without_pool(self):
-        with client_with_pool(None) as client:
+        # Without an explicit, guaranteed-to-fail target here, the real
+        # app lifespan's pool.connect() would use whatever WAREHOUSE_PG_DSN
+        # happens to be set in the ambient .env -- which is a real,
+        # working NeonDB connection in this repo's dev environment, so
+        # the "without pool" scenario silently stopped reproducing.
+        # pg_dsn=None clears that env-sourced DSN; localhost:1 is
+        # guaranteed nothing is listening, so connect() fails fast.
+        with client_with_pool(
+            None, pg_dsn=None, pg_host="127.0.0.1", pg_port=1
+        ) as client:
             r = client.get("/regions")
         assert r.status_code == 503
 
@@ -126,6 +136,89 @@ class TestNationalDemand:
             r = client.get("/national/demand", params={"since": SINCE, "until": UNTIL})
         assert r.status_code == 200
         assert r.json()[0]["demand_mw"] == 25000.0
+
+
+class TestNationalSummary:
+    def test_happy_path(self):
+        pool = FakeConnectionPool(
+            fetchrow_result={
+                "n_slots": 48,
+                "avg_demand_mw": 25000.0,
+                "peak_demand_mw": 30000.0,
+                "peak_ts": None,
+                "min_demand_mw": 20000.0,
+                "total_energy_mwh": 1_200_000.0,
+                "avg_renewable_proportion": 25.0,
+                "avg_emissions_intensity_kgco2e_per_mwh": 700.0,
+                "total_carbon_tco2e": 840.0,
+            }
+        )
+        with client_with_pool(pool) as client:
+            r = client.get("/national/summary", params={"since": SINCE, "until": UNTIL})
+        assert r.status_code == 200
+        assert r.json()["total_carbon_tco2e"] == 840.0
+
+    def test_invalid_range_400s_before_touching_pool(self):
+        with client_with_pool(None) as client:
+            r = client.get("/national/summary", params={"since": UNTIL, "until": SINCE})
+        assert r.status_code == 400
+
+
+class TestNationalDailyEmissions:
+    def test_happy_path(self):
+        pool = FakeConnectionPool(
+            fetch_result=[
+                {
+                    "date_local": "2026-01-01",
+                    "total_demand_mwh": 500_000.0,
+                    "avg_renewable_proportion": 20.0,
+                    "avg_emissions_intensity_kgco2e_per_mwh": 700.0,
+                    "total_carbon_tco2e": 350_000.0,
+                }
+            ]
+        )
+        with client_with_pool(pool) as client:
+            r = client.get(
+                "/national/emissions/daily", params={"since": SINCE, "limit": 7}
+            )
+        assert r.status_code == 200
+        assert r.json()[0]["total_carbon_tco2e"] == 350_000.0
+
+
+class TestNationalGenerationMix:
+    def test_happy_path(self):
+        pool = FakeConnectionPool(
+            fetchrow_result={
+                "coal_black_mw": 100.0,
+                "coal_brown_mw": 0.0,
+                "gas_ccgt_mw": 0.0,
+                "gas_ocgt_mw": 0.0,
+                "gas_other_mw": 0.0,
+                "hydro_mw": 0.0,
+                "pumped_hydro_mw": 0.0,
+                "wind_mw": 100.0,
+                "solar_utility_mw": 0.0,
+                "solar_rooftop_mw": 0.0,
+                "biomass_mw": 0.0,
+                "distillate_mw": 0.0,
+                "battery_discharge_mw": 0.0,
+            }
+        )
+        with client_with_pool(pool) as client:
+            r = client.get(
+                "/national/generation-mix", params={"since": SINCE, "until": UNTIL}
+            )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["total_mw"] == 200.0
+        assert body["mix_share"]["coal_black_mw"] == pytest.approx(0.5)
+
+    def test_invalid_range_400s_before_touching_pool(self):
+        with client_with_pool(None) as client:
+            r = client.get(
+                "/national/generation-mix", params={"since": UNTIL, "until": SINCE}
+            )
+        assert r.status_code == 400
 
 
 class TestFeatures:
@@ -223,4 +316,93 @@ class TestApiKey:
         pool = FakeConnectionPool(fetch_result=[])
         with client_with_pool(pool) as client:
             r = client.get("/regions")
+        assert r.status_code == 200
+
+
+_KPI_ROW = {
+    "total_carbon_tco2e": 840.0,
+    "avg_emissions_intensity_kgco2e_per_mwh": 700.0,
+    "avg_renewable_proportion": 25.0,
+    "total_energy_mwh": 1_200_000.0,
+}
+
+
+class TestExecutiveKpisHappyPath:
+    def test_default_params_returns_200_with_six_kpis(self):
+        pool = FakeConnectionPool(fetchrow_result=_KPI_ROW, fetch_result=[])
+        with client_with_pool(pool) as client:
+            r = client.get("/api/analytics/executive-kpis")
+        assert r.status_code == 200
+        body = r.json()
+        assert len(body["kpis"]) == 6
+        assert body["meta"]["period"] == "ytd"
+        assert body["meta"]["region"] == "NEM"
+        assert body["meta"]["currency"] == "AUD"
+
+    def test_explicit_query_params_are_echoed_in_meta(self):
+        pool = FakeConnectionPool(fetchrow_result=_KPI_ROW, fetch_result=[])
+        with client_with_pool(pool) as client:
+            r = client.get(
+                "/api/analytics/executive-kpis",
+                params={"period": "30d", "region": "VIC1", "currency": "USD"},
+            )
+        assert r.status_code == 200
+        meta = r.json()["meta"]
+        assert meta == {**meta, "period": "30d", "region": "VIC1", "currency": "USD"}
+
+    def test_response_headers(self):
+        pool = FakeConnectionPool(fetchrow_result=_KPI_ROW, fetch_result=[])
+        with client_with_pool(pool) as client:
+            r = client.get(
+                "/api/analytics/executive-kpis",
+                headers={"X-Request-Id": "abc-123"},
+            )
+        assert r.headers["Cache-Control"] == "private, max-age=60"
+        assert r.headers["X-Cache"] == "MISS"
+        assert r.headers["X-Request-Id"] == "abc-123"
+
+    def test_no_request_id_header_when_not_supplied(self):
+        pool = FakeConnectionPool(fetchrow_result=_KPI_ROW, fetch_result=[])
+        with client_with_pool(pool) as client:
+            r = client.get("/api/analytics/executive-kpis")
+        assert "X-Request-Id" not in r.headers
+
+
+class TestExecutiveKpisValidation:
+    def test_invalid_period_400s_before_touching_pool(self):
+        with client_with_pool(None) as client:
+            r = client.get("/api/analytics/executive-kpis", params={"period": "bogus"})
+        assert r.status_code == 400
+
+    def test_invalid_region_400s_before_touching_pool(self):
+        with client_with_pool(None) as client:
+            r = client.get("/api/analytics/executive-kpis", params={"region": "BOGUS"})
+        assert r.status_code == 400
+
+    def test_invalid_currency_400s_before_touching_pool(self):
+        with client_with_pool(None) as client:
+            r = client.get("/api/analytics/executive-kpis", params={"currency": "GBP"})
+        assert r.status_code == 400
+
+
+class TestExecutiveKpisPoolAndAuth:
+    def test_503_without_a_working_pool(self):
+        with client_with_pool(
+            None, pg_dsn=None, pg_host="127.0.0.1", pg_port=1
+        ) as client:
+            r = client.get("/api/analytics/executive-kpis")
+        assert r.status_code == 503
+
+    def test_missing_api_key_401s_when_configured(self):
+        pool = FakeConnectionPool(fetchrow_result=_KPI_ROW, fetch_result=[])
+        with client_with_pool(pool, api_key="secret") as client:
+            r = client.get("/api/analytics/executive-kpis")
+        assert r.status_code == 401
+
+    def test_correct_api_key_passes(self):
+        pool = FakeConnectionPool(fetchrow_result=_KPI_ROW, fetch_result=[])
+        with client_with_pool(pool, api_key="secret") as client:
+            r = client.get(
+                "/api/analytics/executive-kpis", params={"api_key": "secret"}
+            )
         assert r.status_code == 200

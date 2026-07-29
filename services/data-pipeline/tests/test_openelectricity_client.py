@@ -1,4 +1,4 @@
-"""Tests for ecolens.ingestion.sources.openelectricity.client.OpenElectricityClient."""
+"""Tests for ecolens.ingestion.service.openelectricity.client.OpenElectricityClient."""
 
 from __future__ import annotations
 
@@ -10,9 +10,9 @@ import respx
 
 from conftest import FakeRedis
 
-from ecolens.ingestion.circuit_breaker import CircuitBreaker, CircuitBreakerOpen
-from ecolens.ingestion.sources.openelectricity.client import OpenElectricityClient
-from ecolens.ingestion.storage.settings import MongoSettings
+from ecolens.ingestion.core.circuit_breaker import CircuitBreaker, CircuitBreakerOpen
+from ecolens.ingestion.service.openelectricity.client import OpenElectricityClient
+from ecolens.ingestion.core.settings import IngestionSettings
 
 
 async def _no_sleep(*_args, **_kwargs):
@@ -361,7 +361,7 @@ class TestRetryAndCircuitBreaker:
         respx.get("https://api.openelectricity.org.au/v4/data/network/NEM").mock(
             return_value=httpx.Response(500)
         )
-        settings = MongoSettings(ingest_max_retries=1)
+        settings = IngestionSettings(ingest_max_retries=1)
         breaker = CircuitBreaker("openelectricity", FakeRedis(), settings=settings)
         client = OpenElectricityClient(
             api_key="test", use_sdk=False, settings=settings, circuit_breaker=breaker
@@ -382,7 +382,7 @@ class TestRetryAndCircuitBreaker:
 
     @pytest.mark.asyncio
     async def test_skips_call_when_breaker_open(self):
-        settings = MongoSettings(ingest_circuit_breaker_threshold=1)
+        settings = IngestionSettings(ingest_circuit_breaker_threshold=1)
         breaker = CircuitBreaker("openelectricity", FakeRedis(), settings=settings)
         await breaker.record_failure()  # threshold=1 -> already open
 

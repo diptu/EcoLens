@@ -4,7 +4,6 @@
 Scrolls the page first to trigger all `whileInView` animations, then
 captures full-page + per-section screenshots at 2x retina.
 """
-
 import asyncio
 import sys
 from pathlib import Path
@@ -40,12 +39,12 @@ async def trigger_all_animations(page) -> None:
 async def take_per_section_screenshots(page, prefix: str) -> None:
     """Capture each section at its natural scroll position."""
     sections = [
-        ("hero", 0, 1000),
-        ("stats", 900, 900),
-        ("globe", 1500, 1100),
+        ("hero",     0,    1000),
+        ("stats",    900,  900),
+        ("globe",    1500, 1100),
         ("features", 2400, 900),
-        ("trusted", 3100, 700),
-        ("cta", 3700, 900),
+        ("trusted",  3100, 700),
+        ("cta",      3700, 900),
     ]
     for name, scroll_y, viewport_h in sections:
         # The mobile/full-page ones don't need this
@@ -61,11 +60,7 @@ async def main() -> int:
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-            ],
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
         )
         try:
             # ─────────────  Desktop (1440x900, 2x retina)  ─────────────

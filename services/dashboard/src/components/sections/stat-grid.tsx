@@ -30,7 +30,7 @@ export interface StatGridProps {
 export function StatGrid({ stats, className, variant = "default" }: StatGridProps) {
   if (variant === "sidebar") {
     return (
-      <div className="rounded-2xl border border-emerald-400/20 bg-emerald-400/5 p-6">
+      <div className="rounded-2xl border border-emerald-200/20 bg-emerald-200/5 p-6">
         <h3 className="text-lg font-semibold text-white">Turning Knowledge into Impact</h3>
         <StaggerContainer
           className="mt-6 space-y-5"
@@ -38,11 +38,11 @@ export function StatGrid({ stats, className, variant = "default" }: StatGridProp
         >
           {stats.map((stat) => (
             <MotionItem key={stat.label} variant="fadeUp" className="flex items-center gap-3">
-              <span className="grid h-10 w-10 place-items-center rounded-md border border-emerald-400/20 bg-emerald-400/10 text-emerald-300">
+              <span className="grid h-10 w-10 place-items-center rounded-md border border-emerald-200/20 bg-emerald-200/10 text-emerald-100">
                 {stat.icon}
               </span>
               <div>
-                <p className="text-2xl font-bold text-lime-300">
+                <p className="text-2xl font-bold text-lime-100">
                   <MotionCounter
                     value={stat.value}
                     prefix={stat.prefix}
@@ -77,11 +77,11 @@ export function StatGrid({ stats, className, variant = "default" }: StatGridProp
               initial="rest"
               whileHover="hover"
               animate="rest"
-              className="mx-auto mb-3 grid h-12 w-12 place-items-center rounded-full bg-emerald-400/10 text-emerald-300"
+              className="mx-auto mb-3 grid h-12 w-12 place-items-center rounded-full bg-emerald-200/10 text-emerald-100"
             >
               {stat.icon}
             </m.div>
-            <p className="text-3xl font-bold text-lime-300 md:text-4xl">
+            <p className="text-3xl font-bold text-lime-100 md:text-4xl">
               <MotionCounter
                 value={stat.value}
                 prefix={stat.prefix}
@@ -102,7 +102,7 @@ export function StatGrid({ stats, className, variant = "default" }: StatGridProp
     <StaggerContainer className={className ?? "grid grid-cols-2 gap-6 md:grid-cols-4"} staggerDelay={0.1}>
       {stats.map((stat) => (
         <MotionItem key={stat.label} variant="fadeUp" className="text-center">
-          <p className="text-3xl font-bold text-lime-300 md:text-4xl">
+          <p className="text-3xl font-bold text-lime-100 md:text-4xl">
             <MotionCounter
               value={stat.value}
               prefix={stat.prefix}

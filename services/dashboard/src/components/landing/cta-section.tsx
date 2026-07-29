@@ -16,7 +16,7 @@ export function CtaSection() {
     <section className="relative overflow-hidden py-24 md:py-32">
       {/* Soft glow */}
       <div className="pointer-events-none absolute inset-0">
-        <div className="absolute left-1/2 top-1/2 h-[500px] w-[800px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-emerald-500/15 blur-[140px]" />
+        <div className="absolute left-1/2 top-1/2 h-[500px] w-[800px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-emerald-300/15 blur-[140px]" />
       </div>
 
       <StaggerContainer className="relative z-10 mx-auto grid max-w-7xl items-center gap-10 px-6 md:grid-cols-2">
@@ -24,7 +24,7 @@ export function CtaSection() {
         <MotionItem variant="fadeUp" className="flex flex-col">
           <h2 className="text-4xl font-bold leading-[1.1] tracking-tight text-white md:text-5xl">
             Your sustainability journey
-            <span className="mt-1 block bg-gradient-to-r from-lime-300 to-emerald-300 bg-clip-text text-transparent">
+            <span className="mt-1 block bg-gradient-to-r from-lime-100 to-emerald-100 bg-clip-text text-transparent">
               starts here.
             </span>
           </h2>
@@ -39,7 +39,7 @@ export function CtaSection() {
           <p className="text-2xl font-semibold leading-tight text-white md:text-right md:text-3xl">
             Start measuring
             <br />
-            in <span className="text-lime-300">less than 5 minutes.</span>
+            in <span className="text-lime-100">less than 5 minutes.</span>
           </p>
           <MotionButton size="lg" iconAfter={<ArrowRight />}>
             Get Started Free
@@ -66,24 +66,24 @@ export function CtaSection() {
 function SproutVisual() {
   return (
     <div className="relative h-48 w-48 opacity-30">
-      <div className="absolute inset-0 rounded-full bg-emerald-400/30 blur-3xl" />
+      <div className="absolute inset-0 rounded-full bg-emerald-200/30 blur-3xl" />
       <svg viewBox="0 0 100 100" className="relative h-full w-full">
         <defs>
           <radialGradient id="globe" cx="50%" cy="50%" r="50%">
-            <stop offset="0%" stopColor="#84cc16" stopOpacity="0.4" />
-            <stop offset="100%" stopColor="#10b981" stopOpacity="0" />
+            <stop offset="0%" stopColor="#65a30d" stopOpacity="0.4" />
+            <stop offset="100%" stopColor="#d1fae5" stopOpacity="0" />
           </radialGradient>
         </defs>
         <circle cx="50" cy="50" r="40" fill="url(#globe)" />
         <path
           d="M50 75 C 40 70, 35 60, 40 50 C 45 40, 55 45, 55 35 C 60 30, 65 35, 60 45"
           fill="none"
-          stroke="#84cc16"
+          stroke="#65a30d"
           strokeWidth="2"
           strokeLinecap="round"
         />
-        <ellipse cx="44" cy="42" rx="6" ry="3" fill="#84cc16" transform="rotate(-30 44 42)" />
-        <ellipse cx="60" cy="38" rx="6" ry="3" fill="#84cc16" transform="rotate(30 60 38)" />
+        <ellipse cx="44" cy="42" rx="6" ry="3" fill="#65a30d" transform="rotate(-30 44 42)" />
+        <ellipse cx="60" cy="38" rx="6" ry="3" fill="#65a30d" transform="rotate(30 60 38)" />
       </svg>
     </div>
   );

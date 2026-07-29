@@ -31,7 +31,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 from ecolens.shared.observability.logging import get_logger
-from ecolens.warehouse.api.settings import get_warehouse_api_settings
+from ecolens.warehouse.core.api_settings import get_warehouse_api_settings
 
 log = get_logger("plot_data_frequency")
 

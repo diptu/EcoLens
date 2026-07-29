@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from backup_duckdb import _prune_old_snapshots, backup  # noqa: E402
 from restore_duckdb import list_snapshots, restore  # noqa: E402
 
-from ecolens.ingestion.storage.duckdb_store import write_historical  # noqa: E402
+from ecolens.ingestion.db.duckdb_store import write_historical  # noqa: E402
 
 
 def _doc(station_id: str, ts: datetime, temp_c: float) -> dict:

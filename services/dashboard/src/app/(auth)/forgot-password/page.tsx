@@ -31,12 +31,12 @@ export default function ForgotPasswordPage() {
       />
 
       <div className="mb-5 flex justify-center">
-        <span className="grid h-14 w-14 place-items-center rounded-full bg-emerald-400/10 text-emerald-300">
+        <span className="grid h-14 w-14 place-items-center rounded-full bg-emerald-200/10 text-emerald-100">
           <Inbox className="h-7 w-7" />
         </span>
       </div>
       <p className="mb-5 text-center text-sm text-white/70">
-        No worries! Enter your work email and we&apos;ll send you a link to reset your password.
+        No worries! Enter your work email and we'll send you a link to reset your password.
       </p>
 
       <form className="space-y-4">

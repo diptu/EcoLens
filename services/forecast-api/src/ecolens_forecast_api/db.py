@@ -2,7 +2,7 @@
 
 Wraps `asyncpg.create_pool()` with a health check and statement-level
 error handling. Mirrors data-pipeline's
-`ecolens.warehouse.api.db.ConnectionPool` (resilient startup: a
+`ecolens.warehouse.db.connection.ConnectionPool` (resilient startup: a
 down/unreachable Postgres degrades `/health` and 503s data routes
 instead of crash-looping the process).
 """

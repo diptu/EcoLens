@@ -1,10 +1,10 @@
-"""Tests for ecolens.warehouse.runner.models (StageResult / RunResult)."""
+"""Tests for ecolens.warehouse.model.run_result (StageResult / RunResult)."""
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from ecolens.warehouse.runner.models import RunResult, StageResult
+from ecolens.warehouse.model.run_result import RunResult, StageResult
 
 
 def _now() -> datetime:

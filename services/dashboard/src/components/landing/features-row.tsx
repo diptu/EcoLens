@@ -68,7 +68,7 @@ export function FeaturesRow() {
               <m.div
                 whileHover={{ scale: 1.1, rotate: 4 }}
                 transition={{ type: "spring", stiffness: 300, damping: 15 }}
-                className="grid h-12 w-12 place-items-center rounded-xl border border-emerald-400/20 bg-emerald-400/5 text-emerald-300"
+                className="grid h-12 w-12 place-items-center rounded-xl border border-emerald-200/20 bg-emerald-200/5 text-emerald-100"
               >
                 {feature.icon}
               </m.div>

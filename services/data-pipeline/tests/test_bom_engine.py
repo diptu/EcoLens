@@ -1,4 +1,4 @@
-"""End-to-end (mocked HTTP) tests for ecolens.ingestion.sources.bom.engine.BomFetcher."""
+"""End-to-end (mocked HTTP) tests for ecolens.ingestion.service.bom.engine.BomFetcher."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import httpx
 import pytest
 import respx
 
-from ecolens.ingestion.sources.bom.engine import BomFetcher
+from ecolens.ingestion.service.bom.engine import BomFetcher
 
 GEOHASHES = {"NSW1": "r3gx2s", "VIC1": "r1qcxv"}
 
@@ -87,7 +87,7 @@ async def test_one_station_failing_does_not_abort_the_others(tmp_path, no_sleep)
 @pytest.mark.asyncio
 @respx.mock
 async def test_falls_back_to_cache_when_live_api_down(tmp_path, no_sleep):
-    from ecolens.ingestion.sources.bom.cache import write_cache
+    from ecolens.ingestion.service.bom.cache import write_cache
 
     since = datetime.now(timezone.utc) - timedelta(hours=1)
     write_cache(

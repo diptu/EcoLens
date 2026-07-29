@@ -31,12 +31,12 @@ export default function AboutPage() {
         />
         <div className="mx-auto max-w-7xl px-6">
           <div className="text-center">
-            <span className="inline-flex items-center gap-2 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-3 py-1 text-xs font-medium tracking-wider text-emerald-300">
+            <span className="inline-flex items-center gap-2 rounded-full border border-emerald-200/30 bg-emerald-200/10 px-3 py-1 text-xs font-medium tracking-wider text-emerald-100">
               ABOUT US
             </span>
             <h1 className="mt-4 text-4xl font-extrabold leading-[1.1] tracking-tight text-white md:text-6xl">
               We&apos;re building the carbon{" "}
-              <span className="bg-gradient-to-r from-lime-300 to-emerald-300 bg-clip-text text-transparent">
+              <span className="bg-gradient-to-r from-lime-100 to-emerald-100 bg-clip-text text-transparent">
                 intelligence layer
               </span>
             </h1>
@@ -50,7 +50,7 @@ export default function AboutPage() {
             {VALUES.map((v) => (
               <div
                 key={v.title}
-                className="rounded-2xl border border-white/10 bg-white/[0.02] p-6 transition-colors hover:border-emerald-400/30"
+                className="rounded-2xl border border-white/10 bg-white/[0.02] p-6 transition-colors hover:border-emerald-200/30"
               >
                 <h3 className="text-lg font-semibold text-white">{v.title}</h3>
                 <p className="mt-2 text-sm leading-relaxed text-white/60">{v.body}</p>
@@ -63,7 +63,7 @@ export default function AboutPage() {
       <CtaBanner
         variant="minimal"
         heading="Join the mission"
-        highlight={<span className="block text-lime-300">Build a better future with us.</span>}
+        highlight={<span className="block text-lime-100">Build a better future with us.</span>}
         body="We're hiring engineers, climate scientists, and designers who care about impact."
         primary={{ label: "See Open Roles" }}
       />

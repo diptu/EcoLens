@@ -1,4 +1,4 @@
-"""Tests for ecolens.ingestion.sources.bom.historical_transformers."""
+"""Tests for ecolens.ingestion.service.bom.historical_transformers."""
 
 from __future__ import annotations
 
@@ -6,11 +6,11 @@ from datetime import datetime, timezone
 
 import pytest
 
-from ecolens.ingestion.sources.bom.historical_transformers import (
+from ecolens.ingestion.service.bom.historical_transformers import (
     build_open_meteo_url,
     parse_open_meteo_response,
 )
-from ecolens.ingestion.sources.bom.schema import (
+from ecolens.ingestion.schema.bom import (
     DEFAULT_BOM_STATIONS,
     PARAM_MAP,
     STATION_COORDS,

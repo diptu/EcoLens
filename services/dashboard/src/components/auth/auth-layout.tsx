@@ -233,8 +233,13 @@ export function AuthField({
   rightHint,
   name,
   defaultValue,
+  value,
+  onChange,
   autoComplete,
+  required,
+  disabled,
   icon,
+  "data-testid": testId,
 }: {
   label: string;
   type?: string;
@@ -242,9 +247,19 @@ export function AuthField({
   rightHint?: React.ReactNode;
   name?: string;
   defaultValue?: string;
+  /** Controlled value. If provided, the input becomes controlled. */
+  value?: string;
+  /** Controlled change handler. */
+  onChange?: React.ChangeEventHandler<HTMLInputElement>;
   autoComplete?: string;
+  required?: boolean;
+  disabled?: boolean;
   icon?: React.ReactNode;
+  "data-testid"?: string;
 }) {
+  // Controlled vs uncontrolled: pass `value` only if it's defined, otherwise
+  // fall back to defaultValue so the existing pages keep working.
+  const controlled = value !== undefined;
   return (
     <label className="block">
       <span className="mb-1.5 block text-xs font-medium text-white/70">{label}</span>
@@ -257,12 +272,17 @@ export function AuthField({
         <input
           type={type}
           name={name}
-          defaultValue={defaultValue}
+          {...(controlled ? { value } : { defaultValue })}
+          onChange={onChange}
           placeholder={placeholder}
           autoComplete={autoComplete}
+          required={required}
+          disabled={disabled}
+          data-testid={testId}
           className={cn(
             "w-full rounded-md border border-white/10 bg-white/[0.04] px-3 py-2.5 text-sm text-white placeholder:text-white/35",
-            "focus:border-emerald-400/60 focus:outline-none focus:ring-1 focus:ring-emerald-400/30",
+            "focus:border-emerald-200/60 focus:outline-none focus:ring-1 focus:ring-emerald-200/30",
+            "disabled:cursor-not-allowed disabled:opacity-60",
             icon && "pl-9",
           )}
         />
@@ -279,31 +299,34 @@ export function AuthButton({
   variant = "primary",
   className,
   fullWidth = true,
-  disabled = false,
   onClick,
+  disabled,
+  "data-testid": testId,
 }: {
   children: React.ReactNode;
   type?: "button" | "submit";
   variant?: "primary" | "outline";
   className?: string;
   fullWidth?: boolean;
-  disabled?: boolean;
   onClick?: () => void;
+  disabled?: boolean;
+  "data-testid"?: string;
 }) {
   const base =
     variant === "primary"
-      ? "bg-lime-300 text-black hover:bg-lime-200"
+      ? "bg-lime-100 text-black hover:bg-lime-100"
       : "border border-white/10 bg-white/[0.04] text-white/80 hover:bg-white/[0.07] hover:text-white";
   return (
     <button
       type={type}
       onClick={onClick}
       disabled={disabled}
+      data-testid={testId}
       className={cn(
         "inline-flex items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm font-semibold transition-colors",
-        "disabled:cursor-not-allowed disabled:opacity-60",
         fullWidth && "w-full",
         base,
+        "disabled:cursor-not-allowed disabled:opacity-60",
         className,
       )}
     >
@@ -360,7 +383,7 @@ export function AuthHeader({
       <h1 className="text-2xl font-bold text-white">{title}</h1>
       <Link
         href={breadcrumb.href}
-        className="text-xs text-emerald-300 hover:text-emerald-200"
+        className="text-xs text-emerald-100 hover:text-emerald-100"
       >
         {breadcrumb.label}
       </Link>
@@ -373,7 +396,7 @@ export function AuthFooter({ text, linkLabel, linkHref }: { text: string; linkLa
   return (
     <p className="mt-6 text-center text-xs text-white/50">
       {text}{" "}
-      <Link href={linkHref} className="text-emerald-300 hover:text-emerald-200">
+      <Link href={linkHref} className="text-emerald-100 hover:text-emerald-100">
         {linkLabel}
       </Link>
     </p>

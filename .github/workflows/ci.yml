@@ -1,0 +1,79 @@
+name: CI
+
+# Runs the checks this repo's own tooling already defines and passes
+# locally (`uv run ruff check .`, `uv run mypy ...`, `uv run pytest ...`)
+# for both services — not `make lint`/`make test` verbatim, because `make
+# lint` also runs `ruff format --check .` and `bandit`, neither of which
+# currently pass repo-wide (`ruff format --check .` alone flags 24 files,
+# none touched by the passes that added this workflow or forecast-api) —
+# enforcing either here would make CI red on unrelated existing code, not
+# on anything a given change actually touches. Deliberately left out
+# rather than silently "fixed" by reformatting files outside scope; a
+# follow-up pass should run `uv run ruff format .` + resolve `bandit`'s
+# findings once, then switch this workflow to `make lint`/`make test`
+# instead of duplicating their command list here.
+#
+# forecast-api is its own independent `uv` project (own venv/lockfile,
+# not a member of the root workspace) — its restructured package is named
+# `app`, same as data-pipeline's, so sharing one workspace venv would
+# collide the two. Its steps use `uv run --directory services/forecast-api`
+# rather than the root workspace sync the data-pipeline steps use.
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Sync root workspace (data-pipeline + dev tools)
+        run: uv sync --all-packages
+
+      - name: Sync forecast-api (independent project)
+        run: uv sync --directory services/forecast-api
+
+      - name: ruff check (data-pipeline, repo root)
+        run: uv run ruff check .
+
+      - name: ruff check (forecast-api)
+        run: uv run --directory services/forecast-api ruff check .
+
+      - name: mypy (data-pipeline)
+        run: uv run mypy services/data-pipeline/app
+
+      - name: mypy (forecast-api)
+        run: uv run --directory services/forecast-api mypy app
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Sync root workspace (data-pipeline + dev tools)
+        run: uv sync --all-packages
+
+      - name: Sync forecast-api (independent project)
+        run: uv sync --directory services/forecast-api
+
+      - name: pytest (data-pipeline)
+        run: uv run pytest services/data-pipeline -q
+
+      - name: pytest (forecast-api)
+        run: uv run --directory services/forecast-api pytest -q

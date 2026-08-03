@@ -1,31 +1,81 @@
 /**
  * /dashboard/operations — Operations Dashboard (Ops Manager view)
+ *
+ * Real data where it exists, honest placeholders where it doesn't:
+ *   forecast-api /v1/readyz, data-pipeline /v1/readyz, IAM / + /db_health
+ *     (lib/health.ts)
+ *   GET /v1/model (lib/emissions.ts, forecast-api)
+ *
+ * data-pipeline has no "list pipelines with schedule/health", scheduler
+ * status, or failed-runs-list endpoint (only a trigger+poll API — see
+ * `lib/ingestion.ts`), so the pipeline inventory shown here is the
+ * static real-source catalog (`PIPELINE_CATALOG`) with no live
+ * status — trigger/monitor a run from the Ingestion Pipeline or
+ * Operational Tasks pages instead of here.
  */
 "use client";
 
-import { useMemo } from "react";
-import { Activity, Server, Cpu, AlertTriangle, Check } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Server } from "lucide-react";
 
 import { Card } from "@/components/dashboard/card";
 import { SectionPage } from "@/components/dashboard/section-page";
-import { getOpsKpis, getOpsPipelines, getOpsServices } from "@/lib/dashboards";
 import { cn } from "@/lib/utils";
+import { fetchModelInfo, type ModelInfo } from "@/lib/emissions";
+import { fetchAllServicesHealth, type ServiceHealth } from "@/lib/health";
+import { PIPELINE_CATALOG } from "@/lib/ingestion";
 
 export default function OperationsDashboardPage() {
-  const kpis = useMemo(() => getOpsKpis(), []);
-  const pipelines = useMemo(() => getOpsPipelines(), []);
-  const services = useMemo(() => getOpsServices(), []);
+  const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null);
+  const [servicesHealth, setServicesHealth] = useState<ServiceHealth[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchModelInfo()
+      .then((r) => {
+        if (!cancelled) setModelInfo(r);
+      })
+      .catch(() => {});
+    fetchAllServicesHealth().then((r) => {
+      if (!cancelled) setServicesHealth(r);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const kpis = useMemo(() => {
+    const healthyCount = servicesHealth?.filter((s) => s.ready).length ?? null;
+    return [
+      {
+        label: "Ingestion Pipelines",
+        value: `${PIPELINE_CATALOG.length}`,
+        sub: "trigger from Ingestion Pipeline page",
+      },
+      {
+        label: "Model Status",
+        value: modelInfo ? (modelInfo.status === "loaded" ? "OK" : "not loaded") : "—",
+        sub: modelInfo?.stage ? `${modelInfo.name}@${modelInfo.stage}` : modelInfo?.name,
+      },
+      {
+        label: "Services Healthy",
+        value: healthyCount != null ? `${healthyCount}/${servicesHealth!.length}` : "…",
+        sub: servicesHealth
+          ?.filter((s) => !s.ready)
+          .map((s) => s.service)
+          .join(", ") || (healthyCount != null ? "all ready" : undefined),
+      },
+    ];
+  }, [modelInfo, servicesHealth]);
 
   return (
     <SectionPage
       icon={<Server className="h-6 w-6" />}
       title="Operations Dashboard"
-      description="Ops Manager view: pipeline health, service uptime, ingestion status."
+      description="Ops Manager view: service readiness and the ingestion pipeline inventory."
       tabs={[
         { id: "overview",   label: "Overview"   },
-        { id: "pipelines",  label: "Pipelines"  },
         { id: "services",   label: "Services"   },
-        { id: "incidents",  label: "Incidents"  },
       ]}
       defaultTab="overview"
       kpis={kpis}
@@ -33,89 +83,94 @@ export default function OperationsDashboardPage() {
         overview: (
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             <Card>
-              <h2 className="mb-3 text-base font-semibold text-white">Active Pipelines</h2>
+              <h2 className="mb-3 text-base font-semibold text-white">Ingestion Pipelines</h2>
               <ul className="space-y-1.5 text-sm">
-                {pipelines.slice(0, 4).map((p) => (
+                {PIPELINE_CATALOG.map((p) => (
                   <li key={p.id} className="flex items-center justify-between rounded-md border border-white/5 bg-white/[0.02] p-2.5">
-                    <span className="text-white/85">{p.name}</span>
-                    <div className="flex items-center gap-2 text-[11px]">
-                      <span className="text-white/50">{p.last_run}</span>
-                      <HealthChip health={p.health} />
-                    </div>
+                    <span className="text-white/85">{p.label}</span>
+                    {!p.triggerable && <span className="text-[11px] text-white/40">dbt build</span>}
                   </li>
                 ))}
               </ul>
+              <a
+                href="/dashboard/ingestion/"
+                className="mt-3 inline-flex w-full items-center justify-center gap-1 text-xs text-emerald-100 hover:underline"
+              >
+                Trigger or monitor runs on the Ingestion Pipeline page
+              </a>
             </Card>
             <Card>
               <h2 className="mb-3 text-base font-semibold text-white">Service Health</h2>
-              <ul className="space-y-1.5 text-sm">
-                {services.slice(0, 4).map((s) => (
-                  <li key={s.name} className="flex items-center justify-between rounded-md border border-white/5 bg-white/[0.02] p-2.5">
-                    <span className="text-white/85">{s.name}</span>
-                    <div className="flex items-center gap-2 text-[11px]">
-                      <span className="text-white/50">{s.latency_p95}</span>
-                      <HealthChip health={s.status} />
-                    </div>
-                  </li>
-                ))}
-              </ul>
+              {servicesHealth === null ? (
+                <p className="text-sm text-white/40">Checking…</p>
+              ) : (
+                <ul className="space-y-1.5 text-sm">
+                  {servicesHealth.map((s) => (
+                    <li key={s.service} className="flex items-center justify-between rounded-md border border-white/5 bg-white/[0.02] p-2.5">
+                      <span className="text-white/85">{s.service}</span>
+                      <div className="flex items-center gap-2 text-[11px]">
+                        <span className="text-white/50">
+                          {s.latencyMs != null ? `${s.latencyMs}ms` : "—"}
+                        </span>
+                        <HealthChip health={s.reachable ? (s.ready ? "healthy" : "down") : "unreachable"} />
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </Card>
           </div>
-        ),
-        pipelines: (
-          <Card>
-            <h2 className="mb-3 text-base font-semibold text-white">All Pipelines</h2>
-            <table className="w-full text-left text-sm">
-              <thead className="border-b border-white/5 text-[11px] uppercase tracking-wide text-white/40">
-                <tr>
-                  <th className="py-2">Pipeline</th>
-                  <th className="py-2">Last Run</th>
-                  <th className="py-2">Records</th>
-                  <th className="py-2">Health</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-white/5">
-                {pipelines.map((p) => (
-                  <tr key={p.id} className="text-white/85">
-                    <td className="py-2">{p.name}</td>
-                    <td className="py-2 text-white/60">{p.last_run}</td>
-                    <td className="py-2 text-white/60 tabular-nums">{p.records_today.toLocaleString()}</td>
-                    <td className="py-2"><HealthChip health={p.health} /></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </Card>
         ),
         services: (
           <Card>
             <h2 className="mb-3 text-base font-semibold text-white">Service Components</h2>
-            <table className="w-full text-left text-sm">
-              <thead className="border-b border-white/5 text-[11px] uppercase tracking-wide text-white/40">
-                <tr>
-                  <th className="py-2">Service</th>
-                  <th className="py-2">Uptime</th>
-                  <th className="py-2">P95 Latency</th>
-                  <th className="py-2">Status</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-white/5">
-                {services.map((s) => (
-                  <tr key={s.name} className="text-white/85">
-                    <td className="py-2">{s.name}</td>
-                    <td className="py-2 text-white/60">{s.uptime}</td>
-                    <td className="py-2 text-white/60">{s.latency_p95}</td>
-                    <td className="py-2"><HealthChip health={s.status} /></td>
+            {servicesHealth === null ? (
+              <p className="py-6 text-center text-sm text-white/40">Checking service health…</p>
+            ) : (
+              <table className="w-full text-left text-sm">
+                <thead className="border-b border-white/5 text-[11px] uppercase tracking-wide text-white/40">
+                  <tr>
+                    <th className="py-2">Service</th>
+                    <th className="py-2">Components</th>
+                    <th className="py-2">Latency (this check)</th>
+                    <th className="py-2">Status</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </Card>
-        ),
-        incidents: (
-          <Card>
-            <h2 className="mb-3 text-base font-semibold text-white">Recent Incidents</h2>
-            <p className="text-sm text-white/70">No active incidents. See the Alert Rules section for threshold configuration.</p>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {servicesHealth.map((s) => (
+                    <tr key={s.service} className="text-white/85">
+                      <td className="py-2">{s.service}</td>
+                      <td className="py-2">
+                        {s.components.length === 0 ? (
+                          <span className="text-white/40">—</span>
+                        ) : (
+                          <div className="flex flex-wrap gap-1">
+                            {s.components.map((c) => (
+                              <span
+                                key={c.name}
+                                title={c.detail ?? undefined}
+                                className={cn(
+                                  "rounded-md border px-1.5 py-0.5 text-[10px] font-medium",
+                                  c.healthy
+                                    ? "border-emerald-200/30 bg-emerald-200/10 text-emerald-100"
+                                    : "border-rose-300/30 bg-rose-500/10 text-rose-200",
+                                )}
+                              >
+                                {c.name}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </td>
+                      <td className="py-2 text-white/60">{s.latencyMs != null ? `${s.latencyMs}ms` : "—"}</td>
+                      <td className="py-2">
+                        <HealthChip health={s.reachable ? (s.ready ? "healthy" : "down") : "unreachable"} />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
           </Card>
         ),
       }}
@@ -125,13 +180,16 @@ export default function OperationsDashboardPage() {
 
 function HealthChip({ health }: { health: string }) {
   const map: Record<string, string> = {
-    healthy:  "border-emerald-200/40 bg-emerald-200/10 text-emerald-100",
-    degraded: "border-amber-300/40 bg-amber-300/10 text-amber-200",
-    down:     "border-rose-300/40 bg-rose-300/10 text-rose-200",
-    failed:   "border-rose-300/40 bg-rose-300/10 text-rose-200",
-    success:  "border-emerald-200/40 bg-emerald-200/10 text-emerald-100",
-    running:  "border-cyan-300/40 bg-cyan-300/10 text-cyan-200",
-    queued:   "border-amber-300/40 bg-amber-300/10 text-amber-200",
+    healthy:     "border-emerald-200/40 bg-emerald-200/10 text-emerald-100",
+    degraded:    "border-amber-300/40 bg-amber-300/10 text-amber-200",
+    down:        "border-rose-300/40 bg-rose-300/10 text-rose-200",
+    unreachable: "border-rose-300/40 bg-rose-300/10 text-rose-200",
+    failed:      "border-rose-300/40 bg-rose-300/10 text-rose-200",
+    success:     "border-emerald-200/40 bg-emerald-200/10 text-emerald-100",
+    running:     "border-cyan-300/40 bg-cyan-300/10 text-cyan-200",
+    queued:      "border-amber-300/40 bg-amber-300/10 text-amber-200",
+    paused:      "border-white/10 bg-white/5 text-white/60",
+    idle:        "border-white/10 bg-white/5 text-white/60",
   };
   return (
     <span className={cn("rounded-md border px-2 py-0.5 text-[11px] font-medium", map[health] ?? "border-white/10 bg-white/5 text-white/60")}>

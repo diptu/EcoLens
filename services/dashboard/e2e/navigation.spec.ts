@@ -4,7 +4,7 @@
  */
 import { test, expect } from "@playwright/test";
 
-const PAGES = ["/", "/product", "/resources", "/solutions", "/pricing", "/about"];
+const PAGES = ["/", "/product", "/resources", "/solutions", "/about"];
 
 for (const route of PAGES) {
   test(`navbar is visible on ${route}`, async ({ page }) => {

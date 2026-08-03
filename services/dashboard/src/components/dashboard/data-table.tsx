@@ -91,7 +91,7 @@ export function NameCell({
 }: {
   icon?: React.ReactNode;
   name: string;
-  sub?: string;
+  sub?: React.ReactNode;
 }) {
   return (
     <div className="flex items-center gap-3">

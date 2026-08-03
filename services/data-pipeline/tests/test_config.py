@@ -1,52 +1,78 @@
-"""Tests for ecolens.config.Settings / get_settings."""
+import pytest
 
-from __future__ import annotations
-
-from pathlib import Path
-
-from ecolens.config import Settings, get_settings
+from app.core.config import Settings, get_settings
 
 
-class TestGetSettings:
-    def test_cached_singleton(self):
-        get_settings.cache_clear()
-        first = get_settings()
-        second = get_settings()
-        assert first is second
-        get_settings.cache_clear()
+@pytest.fixture(autouse=True)
+def _reset_cache():
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
-class TestSettingsDefaults:
-    def test_default_field_values(self, monkeypatch):
-        # Isolate from any ambient env vars / .env so defaults are exercised.
-        monkeypatch.chdir(Path(__file__).parent)  # no .env file here
-        settings = Settings(_env_file=None)  # type: ignore[call-arg]
+def test_defaults_cover_all_groups():
+    s = Settings()
+    assert s.api_port == 8001
+    assert s.postgres_db == "ecolens"
+    assert s.redis_db == 0
+    assert s.s3_bucket == "ecolens"
+    assert s.mlflow_tracking_uri == "http://localhost:5000"
+    assert set(s.bom_stations) == {"NSW1", "QLD1", "VIC1", "SA1", "TAS1", "WEM"}
+    assert s.bom_stations["NSW1"] == "066037"
+    assert s.model_train_epochs == 50
+    assert s.model_train_lr == pytest.approx(1e-3)
+    assert s.default_lookback_minutes == 30
+    assert s.circuit_breaker_failure_threshold == 5
+    assert s.circuit_breaker_reset_timeout == pytest.approx(60.0)
+    assert s.hostname
 
-        assert settings.service_name == "ecolens-data-pipeline"
-        assert settings.env == "dev"
-        assert settings.log_level == "INFO"
-        assert settings.oe_api_key is None
-        assert settings.model_lookback == 48
-        assert settings.optuna_n_trials == 50
-        assert settings.conformal_alpha == 0.1
 
-    def test_bom_stations_default_factory(self, monkeypatch):
-        settings = Settings(_env_file=None)  # type: ignore[call-arg]
-        assert settings.bom_stations["NSW1"] == "066037"
-        assert settings.bom_stations["WEM"] == "009225"
+def test_database_url_assembles_asyncpg_dsn(monkeypatch):
+    monkeypatch.setenv(
+        "DATABASE_URL", ""
+    )  # else the real .env's DATABASE_URL would win
+    s = Settings(
+        postgres_user="u",
+        postgres_password="p",
+        postgres_host="h",
+        postgres_port=1,
+        postgres_db="d",
+    )
+    assert s.database_url == "postgresql+asyncpg://u:p@h:1/d"
 
-    def test_api_cors_origins_default_factory(self):
-        settings = Settings(_env_file=None)  # type: ignore[call-arg]
-        assert settings.api_cors_origins == [
-            "http://localhost:3000",
-            "http://localhost:8000",
-        ]
 
-    def test_derived_paths(self):
-        settings = Settings(_env_file=None)  # type: ignore[call-arg]
-        assert settings.dbt_project_dir == Path("/app/dbt/ecolens")
-        assert settings.migrations_dir.name == "migrations"
+def test_database_url_env_overrides_decomposed_fields(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@h:1/d")
+    s = Settings()
+    assert s.database_url == "postgresql+asyncpg://u:p@h:1/d"
 
-    def test_oe_api_key_overridable_via_constructor(self):
-        settings = Settings(_env_file=None, oe_api_key="my-test-key")  # type: ignore[call-arg]
-        assert settings.oe_api_key == "my-test-key"
+
+def test_database_url_env_normalizes_sslmode_to_ssl_for_asyncpg(monkeypatch):
+    # asyncpg doesn't understand `sslmode` (libpq/psycopg's query-param
+    # name) -- Neon and most managed Postgres providers hand you a DSN
+    # with `sslmode=require`, which fails at connect time with
+    # `connect() got an unexpected keyword argument 'sslmode'` unless
+    # rewritten to `ssl=require`.
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@h:1/d?sslmode=require")
+    s = Settings()
+    assert s.database_url == "postgresql+asyncpg://u:p@h:1/d?ssl=require"
+
+
+def test_redis_url_env_overrides_decomposed_fields(monkeypatch):
+    monkeypatch.setenv("REDIS_URL", "rediss://default:secret@my-redis.upstash.io:6380")
+    s = Settings()
+    assert s.redis_url == "rediss://default:secret@my-redis.upstash.io:6380"
+
+
+def test_redis_url_assembles_dsn():
+    s = Settings(redis_host="h", redis_port=1, redis_db=2)
+    assert s.redis_url == "redis://h:1/2"
+
+
+def test_env_var_overrides_default(monkeypatch):
+    monkeypatch.setenv("API_PORT", "9999")
+    assert get_settings().api_port == 9999
+
+
+def test_get_settings_is_cached():
+    assert get_settings() is get_settings()

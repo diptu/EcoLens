@@ -54,11 +54,10 @@ for (const route of DASHBOARD_PAGES) {
 }
 
 test.describe("/dashboard/executive", () => {
-  test("renders KPIs and initiatives", async ({ page }) => {
+  test("renders KPIs", async ({ page }) => {
     await page.goto("/dashboard/executive");
     await expect(page.getByRole("heading", { name: /Executive Dashboard/ })).toBeVisible();
     await expect(page.getByText(/Total CO₂e/).first()).toBeVisible();
-    await expect(page.getByText("Sustainability Initiatives", { exact: true })).toBeVisible();
   });
 });
 

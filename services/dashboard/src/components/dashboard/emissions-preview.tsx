@@ -1,45 +1,38 @@
 /**
  * EmissionsPreview — small inline widget for the home page.
  *
- * Shows the last 24h of NEM-wide emissions as a sparkline, plus
- * a current "kgCO₂e per MWh" intensity KPI and a "View details"
- * link to /dashboard/carbon.
+ * Shows the last hour's NEM-wide emissions total, a 24h sparkline, and
+ * the current grid intensity (kgCO₂e/MWh) — real data from
+ * forecast-api's `GET /v1/emissions/current` and
+ * `GET /v1/emissions/timeseries` (`lib/emissions.ts`), same endpoints
+ * the Executive Dashboard already uses. No "vs prior period" delta or
+ * renewable-share figure here — neither endpoint exposes them, and
+ * this widget doesn't fabricate numbers to fill the gap.
  *
- * Server-rendered (no "use client") so the SSR HTML matches the
- * initial client paint.
+ * Async Server Component (no "use client") — fetched at request time,
+ * not client-side, so there's no loading flash on the home page.
  */
-import { ArrowUpRight, Factory, Gauge, TrendingDown, TrendingUp } from "lucide-react";
+import { ArrowUpRight, Factory, Gauge } from "lucide-react";
 import Link from "next/link";
 
 import { Card } from "@/components/dashboard/card";
 import { Sparkline } from "@/components/dashboard/fan-chart";
-import {
-  formatIntensity,
-  formatTco2e,
-  generateMockEmissionsTimeseries,
-  generateMockNationalEmissions,
-  summarizeEmissions,
-} from "@/lib/emissions";
+import { fetchCurrentEmissions, fetchEmissionsTimeseries, formatIntensity, formatTco2e } from "@/lib/emissions";
 
-export function EmissionsPreview() {
-  const now = new Date();
-  const since = new Date(now);
-  since.setDate(since.getDate() - 1);
-  const sinceIso = since.toISOString();
-  const untilIso = now.toISOString();
+export async function EmissionsPreview() {
+  const [current, ts] = await Promise.all([
+    fetchCurrentEmissions().catch(() => null),
+    fetchEmissionsTimeseries("hour", 1).catch(() => null),
+  ]);
 
-  const national = generateMockNationalEmissions(sinceIso, untilIso, "scope2");
-  const ts = generateMockEmissionsTimeseries("NSW1" as never, sinceIso, untilIso, "hour");
-  const summary = summarizeEmissions(national, ts);
-
-  const sparkValues = ts.points.map((p) => p.kgco2e);
+  const sparkValues = ts?.points.map((p) => p.total_emissions_kgco2e ?? 0) ?? [];
 
   return (
     <Card
       title={
         <span className="flex items-center gap-2">
           <Factory className="h-4 w-4 text-emerald-200" />
-          Last 24h emissions · NEM-wide
+          Emissions · NEM-wide
         </span>
       }
       actions={
@@ -56,28 +49,13 @@ export function EmissionsPreview() {
       <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
         <div className="md:col-span-1">
           <div className="text-[10px] font-semibold uppercase tracking-wider text-white/40">
-            Total (Scope 2)
+            Total (this hour)
           </div>
           <div className="mt-1 flex items-baseline gap-1">
             <span className="text-3xl font-bold text-white">
-              {formatTco2e(national.total_kgco2e)}
+              {formatTco2e(current?.total_emissions_kgco2e)}
             </span>
             <span className="text-sm text-white/50">CO₂e</span>
-          </div>
-          <div
-            className={`mt-0.5 flex items-center gap-1 text-[11px] ${
-              summary.vsPriorPct >= 0 ? "text-rose-300" : "text-emerald-100"
-            }`}
-          >
-            {summary.vsPriorPct >= 0 ? (
-              <TrendingUp className="h-3 w-3" />
-            ) : (
-              <TrendingDown className="h-3 w-3" />
-            )}
-            {summary.vsPriorPct >= 0 ? "↑" : "↓"} {Math.abs(summary.vsPriorPct).toFixed(1)}% vs prior 24h
-          </div>
-          <div className="mt-2 text-[10px] text-white/40">
-            across {national.regions.length} NEM regions + WEM
           </div>
         </div>
 
@@ -89,15 +67,9 @@ export function EmissionsPreview() {
           <div className="text-[10px] font-semibold uppercase tracking-wider text-white/40">
             Grid intensity
           </div>
-          <div className="mt-1 flex items-baseline justify-end gap-1 md:justify-end">
-            <span className="text-3xl font-bold text-white">
-              {Math.round(national.intensity_kgco2e_per_mwh ?? 0)}
-            </span>
-            <span className="text-sm text-white/50">kg/MWh</span>
-          </div>
-          <div className="mt-0.5 flex items-center justify-end gap-1 text-[11px] text-white/55">
-            <Gauge className="h-3 w-3" />
-            {summary.renewablePct}% renewable share
+          <div className="mt-1 flex items-center justify-end gap-1 text-3xl font-bold text-white">
+            <Gauge className="h-4 w-4 text-white/50" />
+            {formatIntensity(current?.intensity_kgco2e_per_mwh)}
           </div>
         </div>
       </div>

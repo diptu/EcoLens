@@ -14,20 +14,21 @@
 [![Type-checked: mypy](https://img.shields.io/badge/type%20checked-mypy-blue.svg)](http://mypy-lang.org/)
 [![FastAPI](https://img.shields.io/badge/API-FastAPI-009688.svg)](https://fastapi.tiangolo.com)
 [![Next.js 15](https://img.shields.io/badge/Frontend-Next.js%2015-black.svg)](https://nextjs.org)
-[![MongoDB 8.0+](https://img.shields.io/badge/mongodb-8.0%2B-green.svg)](https://www.mongodb.com/try/download/community)
 [![Prefect](https://img.shields.io/badge/Orchestration-Prefect-024dfd.svg)](https://prefect.io)
 [![PyTorch 2.x](https://img.shields.io/badge/ML-PyTorch%202.x-ee4c2c.svg)](https://pytorch.org)
 [![MLflow](https://img.shields.io/badge/Tracking-MLflow-0194E2.svg)](https://mlflow.org)
 [![dbt](https://img.shields.io/badge/Transform-dbt-FF694B.svg)](https://www.getdbt.com)
-[![PostgreSQL 16](https://img.shields.io/badge/DB-PostgreSQL%2016-336791.svg)](https://www.postgresql.org)
+[![NeonDB](https://img.shields.io/badge/Warehouse-NeonDB%20(Postgres%2016)-336791.svg)](https://neon.tech)
+[![DuckDB](https://img.shields.io/badge/Staging-DuckDB-FFF000.svg)](https://duckdb.org)
+[![RabbitMQ](https://img.shields.io/badge/Events-RabbitMQ-FF6600.svg)](https://www.rabbitmq.com)
 [![Redis 7](https://img.shields.io/badge/Cache-Redis%207-DC382D.svg)](https://redis.io)
 [![Security: bandit](https://img.shields.io/badge/security-bandit-yellow.svg)](https://github.com/PyCQA/bandit)
 [![OpenSSF](https://img.shields.io/badge/OpenSSF-Scorecard-blue.svg)](https://scorecard.dev/viewer/?uri=github.com/diptu/ecoLens)
 
 **ecoLens** turns raw AEMO and OpenElectricity data into operational carbon intelligence:
 a PyTorch-LSTM demand forecaster, an emissions engine grounded in the live NEM/WEM
-energy-mix, an end-to-end MLOps pipeline (dbt → MLflow → FastAPI → Redis → Postgres),
-and a real-time Next.js dashboard.
+energy-mix, an end-to-end MLOps pipeline (DuckDB staging → RabbitMQ → NeonDB/Postgres
+raw → dbt marts → MLflow → FastAPI → Redis), and a real-time Next.js dashboard.
 
 [Overview](#-overview) ·
 [Architecture](#-architecture) ·
@@ -115,9 +116,15 @@ deployable.
   every 5 min from OpenElectricity's NEM endpoint, with WEM/SWIS fallback.
 - 🧮 **Carbon footprint calculator** — user-entered kWh → kgCO₂e using the
   regional intensity at the time of consumption (or a chosen historical window).
-- 📊 **Marts & analytics** — dbt models give you
-  `fct_energy_demand`, `fct_emissions_5min`, `fct_carbon_intensity`,
-  `dim_energy_mix`, `dim_facility` — queryable, tested, documented.
+- 🗄️ **Event-driven raw landing** — each fetch stages into embedded, local
+  **DuckDB** first (no MongoDB, no MinIO/S3 needed for this), then a
+  RabbitMQ event decouples ingestion from the warehouse write, which copies
+  the staged data into **NeonDB/PostgreSQL** `raw.*` as an unmodified audit
+  copy.
+- 📊 **Marts & analytics** — dbt transforms `raw.*` into curated
+  **NeonDB/PostgreSQL** marts, producing `fct_energy_demand`,
+  `fct_emissions_5min`, `fct_carbon_intensity`, `dim_energy_mix`,
+  `dim_facility` — queryable, tested, documented.
 - 🛰️ **Real-time service** — FastAPI + Redis cache (60 s TTL on read paths)
   + Postgres (history) + Pydantic v2 schemas + OpenAPI 3.1.
 - 🖥️ **Next.js 15 dashboard** — App Router, React Server Components,
@@ -135,147 +142,73 @@ ecoLens is a **3-service micro-service system** — no more, no less. Two
 user-facing services (the API and the dashboard) sit on an `edge` Docker
 network; the data-pipeline worker is on the `internal` network only and is
 never reachable from the public internet. All three share a small platform
-of infra dependencies (Postgres, Redis, MinIO, MLflow, observability).
+of infra dependencies (Postgres/NeonDB, RabbitMQ, Redis, MinIO, MLflow, observability).
+No MongoDB — `data-pipeline` stages locally in embedded, file-backed **DuckDB**
+instead (no separate database server needed for that layer).
 
-```txt
-                      ┌────────────────────────────────────────────────────┐
+```
+                ┌────────────────────────────────────────────────────┐
                 │                       USERS                         │
                 └─────────────────────────┬──────────────────────────┘
-                                          │ HTTPS  (Nginx :443)
+                                          │ HTTPS
                                           ▼
                             ┌──────────────────────────┐
                             │  ③  dashboard  (Next.js) │
-                            │  :3000   • public         │
-                            │  BFF routes → all APIs    │
+                            │  :3000  • public         │
+                            │  BFF routes → forecast-api│
                             └─────────────┬────────────┘
-                                          │  /v1/* JSON
+                                          │ /v1/* JSON
                                           ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                                                                         │
-│  ① forecast-api  (FastAPI)         ② data-pipeline  (Prefect)          │
-│  :8000   • public                   headless   • internal                 │
-│  • /v1/forecast, emissions,        • ingest AEMO / BoM / OE             │
-│    footprint, healthz              • stage → DuckDB  (local)            │
-│  • LSTM + TFT + TimesFM            • anomaly detection                  │
-│  • P10 / P50 / P90 quantiles         (rule + ML with explanation)       │
-│  • conformal calibration           • publish → RabbitMQ event           │
-│  • seasonal-naïve fallback         • consume event → load raw.* →       │
-│  • Redis cache, Postgres read        dbt (DuckDB engine) → Postgres     │
-│                                    • train LSTM/TFT, register in MLflow │
+│  ① forecast-api   (FastAPI)              ② data-pipeline  (Prefect)    │
+│  :8000  • public / dev-only              headless  • internal only      │
+│  • /v1/forecast, /v1/emissions,          • ingest AEMO/BoM/OE → DuckDB │
+│    /v1/footprint, /v1/healthz              (local staging)              │
+│  • loads LSTM from MLflow on boot        • DuckDB → RabbitMQ event →    │
+│  • Redis cache, Postgres read              Postgres raw.* (async sync)  │
+│                                           • dbt build (Postgres raw →    │
+│                                             marts)                      │
+│                                           • train PyTorch LSTM           │
+│                                           • register model in MLflow     │
 │                                                                         │
-│  ④ iam-service  (FastAPI)          ⑤ notification-service  (FastAPI)   │
-│  :8001   • public                   :8002   • internal                   │
-│  • /v1/auth/{login,refresh,…}      • /v1/notify/{email,webhook}         │
-│  • /v1/users, /v1/orgs             • SMTP + SendGrid backend            │
-│  • JWT (RS256) + bcrypt            • webhooks (Slack / Teams)           │
-│  • RBAC (admin / analyst / viewer) • Redis-backed queue + retry          │
-│                                                                         │
-│  ⑥ reporting-service  (FastAPI + Worker)        [ STANDALONE BOUNDED CTX ]
-│  :8003   • internal                                                       │
-│  ┌────────────────────────────────────────────────────────────────────┐  │
-│  │ API layer        │  /v1/reports/generate  (POST, 202)              │  │
-│  │                  │  /v1/reports/{id}       (GET metadata)           │  │
-│  │                  │  /v1/reports/{id}/download  (GET → X-Accel)     │  │
-│  │                  │  /v1/reports/schedules   (CRUD)                  │  │
-│  │                  │  /v1/reports/templates   (GET)                    │  │
-│  │                  └────────────────────────────────────────────────┘  │
-│  │                                                                     │
-│  │ Worker loop      │  APScheduler pulls from Redis queue              │
-│  │                  │  renders template → writes file → saves metadata │
-│  │                  └────────────────────────────────────────────────┘  │
-│  │                                                                     │
-│  │ Renderers        │  PDF  : Jinja2 + WeasyPrint (HTML→PDF)           │
-│  │                  │  XLSX : openpyxl                                  │
-│  │                  │  CSV  : Python csv stdlib                        │
-│  │                  └────────────────────────────────────────────────┘  │
-│  │                                                                     │
-│  │ Template engine  │  /templates/ghg.j2, esg.j2, cdp.j2, custom.j2   │
-│  │                  │  shared partials: header.j2, footer.j2, css.j2  │
-│  │                  └────────────────────────────────────────────────┘  │
-│  │                                                                     │
-│  │ Data fetcher     │  queries Postgres marts via asyncpg              │
-│  │                  │  (reads from data-pipeline's curated schemas)     │
-│  │                  └────────────────────────────────────────────────┘  │
-│  │                                                                     │
-│  │ Signed-URL gen   │  PyJWT, 5-min TTL, scoped to one report          │
-│  │                  └────────────────────────────────────────────────┘  │
-│  └────────────────────────────────────────────────────────────────────┘  │
-│                                                                         │
-└────────────────────────────────────┬────────────────────────────────────┘
-                                     │
-                ┌────────────────────┼────────────────────┐
-                │                    │                    │
-                ▼                    ▼                    ▼
-     ┌──────────────┐        ┌──────────────┐      ┌──────────────┐
-     │   reports    │        │   reports    │      │   reports    │
-     │   metadata   │        │  job queue   │      │  file store  │
-     │  (postgres)  │        │   (redis)    │      │ (local FS)   │
-     │              │        │              │      │              │
-     │ ecolens_     │        │ ZSET:        │      │ /var/lib/    │
-     │ reports:     │        │  reports:    │      │ ecoLens/     │
-     │  • reports   │        │  pending     │      │ reports/     │
-     │  • schedules │        │  running     │      │  2024/       │
-     │  • templates │        │  done        │      │   10/        │
-     │  • renders   │        │              │      │    rep-*.pdf │
-     └──────────────┘        └──────────────┘      └──────────────┘
-                                                           │
-                                                           │  X-Accel-Redirect
-                                                           ▼
-                                                    ┌──────────────┐
-                                                    │   Nginx      │
-                                                    │  (serves     │
-                                                    │  files only  │
-                                                    │  after JWT   │
-                                                    │  validates)  │
-                                                    └──────────────┘
+└────────────┬──────────────────┬────────────────┬──────────────────┬────┘
+             │                  │                │                  │
+             ▼                  ▼                ▼                  ▼
+       ┌──────────┐       ┌──────────┐    ┌──────────┐        ┌──────────┐
+       │ rabbitmq │       │ postgres │    │  redis   │        │  minio   │
+       │ (events) │       │ (NeonDB) │    │ (cache)  │        │  (S3)    │
+       └──────────┘       └────┬─────┘    └──────────┘        └────┬─────┘
+                                │                                   │
+                                └────────────────┬──────────────────┘
+                                                 ▼
+                                           ┌──────────┐
+                                           │  mlflow  │  ← model artifacts, params, metrics
+                                           │ (track)  │  ← forecast-api watches this; pipeline writes it
+                                           └──────────┘
 
-────────────────────── shared platform infra ──────────────────────────────
-                                                                         │
-     ┌──────────┐       ┌──────────┐        ┌──────────┐    ┌──────────┐ │
-     │ postgres │       │  redis   │        │  DuckDB  │    │ RabbitMQ │ │
-     │(NeonDB)  │       │ (cache + │        │  (local  │    │ (events) │ │
-     │ raw.* +  │       │  queue)  │        │ staging +│    │          │ │
-     │ curated  │       │          │        │ dbt exec)│    │          │ │
-     │ marts    │       │          │        │          │    │          │ │
-     └────┬─────┘       └──────────┘        └──────────┘    └──────────┘ │
-          │                                                             │
-          └────────────────┬────────────────────────────────────────────┘
-                           ▼
-                     ┌──────────┐
-                     │  dbt     │  ← runs in DuckDB, writes to Postgres
-                     │(transform│
-                     │ + test)  │
-                     └────┬─────┘
-                          │
-                          ▼
-                    ┌──────────┐
-                    │  mlflow  │  ← model artifacts, params, metrics
-                    │ (track)  │  ← forecast-api watches; pipeline writes
-                    └──────────┘
-
-  Platform infra  (NOT services — no app code, no release cadence):
-    postgres (NeonDB) · redis · duckdb (embedded) · rabbitmq · mlflow
-    · prometheus · grafana · loki
-
-  Filesystem  (no service — just a directory on the host):
-    /var/lib/ecoLens/reports/   ← reporting-service writes here
-                                  served via Nginx X-Accel-Redirect
   Platform infra (NOT services — no app code, no release cadence):
-    postgres · redis · minio · mlflow · prometheus · grafana · loki
+    postgres (NeonDB) · rabbitmq · redis · minio · mlflow · prometheus · grafana · loki
+    (DuckDB is embedded inside data-pipeline, not a separate infra container)
 ```
-| # | Service | Port | Tier | Owns | Talks to | Status |
-|---|---|---|---|---|---|---|
-| 1 | `forecast-api` | 8000 | edge | LSTM + TFT + TimesFM serving, P10/P50/P90 quantiles, conformal calibration, seasonal-naïve fallback, Redis cache, `/v1/*` contract | `postgres`, `redis`, `mlflow` | ✅ built |
-| 2 | `data-pipeline` | — | worker | AEMO/BoM/OE ingest → DuckDB staging → anomaly detection (rule + ML) → RabbitMQ event → dbt (DuckDB engine) → Postgres curated → train LSTM/TFT → calibrate TimesFM → register in MLflow | `postgres`, `redis`, `duckdb`, `rabbitmq`, `mlflow`, external APIs, `notification-service` | ✅ built |
-| 3 | `dashboard` | 3000 | edge | Next.js UI, BFF routes, charts, modals, role-aware nav, all 15 dashboard pages | `forecast-api`, `iam-service`, `data-pipeline`, `reporting-service` | ✅ built |
-| 4 | `iam-service` | 8001 | edge | JWT (RS256) auth, users, orgs, RBAC (admin / analyst / viewer), audit log, password reset, email verify | `postgres`, `redis`, `notification-service` | 🚧 planned |
-| 5 | `notification-service` | 8002 | internal | email (SMTP / SendGrid), webhooks (Slack / Teams / PagerDuty), Redis-backed queue + retry + DLQ | `redis`, `smtp`/`sendgrid`, `slack/teams webhooks` | ⏳ to build |
-| 6 | `reporting-service` | 8003 | internal | PDF (Jinja2 + WeasyPrint), Excel (openpyxl), CSV, async job queue, signed short-lived download URLs, local FS storage, template registry | `postgres` (curated marts), `redis` (queue), `nginx` (X-Accel-Redirect), `notification-service` (on completion) | ⏳ to build |
 
+| # | Service | Port | Tier | Owns | Talks to |
+|---|---|---|---|---|---|
+| 1 | **`forecast-api`** | 8000 | edge | model serving, `/v1/*` contract, Redis cache, Postgres reads | `postgres`, `redis`, `mlflow` |
+| 2 | **`data-pipeline`** | — | worker | AEMO/BoM/OE ingest → DuckDB staging → RabbitMQ event → Postgres `raw.*`, dbt transforms, training, MLflow registration | `postgres`, `rabbitmq`, `redis`, `minio`, `mlflow`, external APIs |
+| 3 | **`dashboard`** | 3000 | edge | Next.js UI, BFF routes | `forecast-api` only |
 
 **Key boundary rules:**
 
-- `dashboard` never touches Postgres, Redis, or MLflow. It only calls `forecast-api`.
+- `dashboard` never touches Postgres, Redis, RabbitMQ, or MLflow. It only calls `forecast-api`.
+- Only `data-pipeline` writes to the warehouse, and it does so in two decoupled
+  steps: each fetch lands in local DuckDB first, then a RabbitMQ event tells
+  the warehousing side of `data-pipeline` to copy that staged data into
+  Postgres `raw.*` as an unmodified audit copy — see `overview.md` for why
+  ingestion and warehousing are deliberately decoupled this way. No MongoDB
+  or MinIO/S3 dependency is involved in this path; MinIO is only used as
+  MLflow's artifact store, a separate concern. `forecast-api` never writes to
+  the warehouse — it only reads the dbt-built Postgres marts.
 - `data-pipeline` never serves HTTP user traffic. It writes to the warehouse
   and registers the model in MLflow; `forecast-api` watches MLflow and
   hot-reloads the model. **No direct API call between the two.**
@@ -295,10 +228,12 @@ A bigger Mermaid diagram lives in [`docs/architecture.md`](docs/architecture.md)
 | Language | **python 3.12**, **TypeScript 5.x** | Strict typing end-to-end |
 | ML | **PyTorch 2.x**, **Optuna**, **PyTorch Lightning** | LSTM + structured training loops |
 | Data | **pandas 2**, **polars**, **numpy** | Polars for ingest, pandas for modeling |
-| Warehouse | **PostgreSQL 16** + **TimescaleDB** | Time-series optimised hypertables |
-| Transform | **dbt-core** + **dbt-postgres** | Tested, versioned SQL models |
+| Raw staging | **DuckDB** (embedded, file-backed) | Lightweight local staging before warehousing — no MongoDB, no separate DB server for this layer |
+| Events | **RabbitMQ** | Decouples ingestion from warehousing — a "new data staged" event lets the warehouse sync run independently of the ingest cadence |
+| Warehouse | **NeonDB** (managed **PostgreSQL 16**) + **TimescaleDB** where available | Serverless Postgres; `raw.*` holds the unmodified audit copy synced from DuckDB via RabbitMQ; time-series hypertables for the transformed marts |
+| Transform | **dbt-core** + **dbt-postgres** | Tested, versioned SQL models against `raw.*` in NeonDB, builds staging → intermediate → marts |
 | Tracking | **MLflow 2.x** | Experiment tracking + model registry |
-| Orchestration | **Prefect 2** (or Airflow) | Schedules ingest, dbt, training, deploy |
+| Orchestration | **Prefect 2** (or Airflow) | Schedules ingest, DuckDB→RabbitMQ→Postgres sync, dbt, training, deploy |
 | Serving | **FastAPI**, **Uvicorn**, **Pydantic v2** | Async, OpenAPI 3.1 |
 | Cache | **Redis 7** | Forecast hot-path cache |
 | Frontend | **Next.js 15**, **React 19**, **TanStack Query**, **Recharts**, **Tailwind 4**, **shadcn/ui** | RSC + streaming |
@@ -314,12 +249,21 @@ A bigger Mermaid diagram lives in [`docs/architecture.md`](docs/architecture.md)
 
 | Source | What | Licence | How we ingest |
 | --- | --- | --- | --- |
-| [AEMO WEM](https://data.wa.aemo.com.au/) | Historical SWIS demand, generation, prices | AEMO open data | Scheduled CSV pull → S3 → dbt seed/staging |
-| [AEMO NEM](https://aemo.com.au/energy-systems/electricity/national-electricity-market-nem/data-nem) | NEM dispatch (5-min) | AEMO open data | REST + MMS polling |
-| [OpenElectricity (OpenNEM)](https://explore.openelectricity.org.au/energy/nem/) | Generation mix, emissions, price | CC BY-NC 4.0 | Official `openelectricity` Python SDK |
-| [BoM](http://www.bom.gov.au/climate/data/) | Temperature, radiation | CC BY 3.0 AU | Scheduled API pull |
-| [DCCEEW / NGER](https://www.dcceew.gov.au/energy/energy-data/national-greenhouse-and-energy-reporting) | Facility emissions factors | CC BY 4.0 | Seeded into `seeds/emissions_factors.csv` |
-| [Electricity Maps – AU-WA](https://app.electricitymaps.com/datasets/AU-WA) | Hourly carbon intensity, WA | ODbL | Optional enrichment |
+| [AEMO WEM](https://data.wa.aemo.com.au/) | Historical SWIS demand, generation, prices | AEMO open data | Scheduled CSV pull → **DuckDB** (staging) → RabbitMQ → **Postgres `raw.*`** → dbt staging |
+| [AEMO NEM](https://aemo.com.au/energy-systems/electricity/national-electricity-market-nem/data-nem) | NEM dispatch (5-min) | AEMO open data | REST + MMS polling → **DuckDB** (staging) → RabbitMQ → **Postgres `raw.*`** → dbt staging |
+| [OpenElectricity (OpenNEM)](https://explore.openelectricity.org.au/energy/nem/) | Generation mix, emissions, price | CC BY-NC 4.0 | Official `openelectricity` Python SDK → **DuckDB** (staging) → RabbitMQ → **Postgres `raw.*`** → dbt staging |
+| [BoM](http://www.bom.gov.au/climate/data/) | Temperature, radiation | CC BY 3.0 AU | Scheduled API pull → **DuckDB** (staging) → RabbitMQ → **Postgres `raw.*`** → dbt staging |
+| [DCCEEW / NGER](https://www.dcceew.gov.au/energy/energy-data/national-greenhouse-and-energy-reporting) | Facility emissions factors | CC BY 4.0 | Seeded directly into `seeds/emissions_factors.csv` (dbt seed, not an API fetch) |
+| [Electricity Maps – AU-WA](https://app.electricitymaps.com/datasets/AU-WA) | Hourly carbon intensity, WA | ODbL | Optional enrichment → **DuckDB** (staging) → RabbitMQ → **Postgres `raw.*`** → dbt staging |
+
+Every source above except the DCCEEW/NGER seed follows the same shape: each
+fetch lands in embedded, local **DuckDB** first (no MongoDB, no separate
+database server for this layer); once staged, a RabbitMQ event decouples
+ingestion from warehousing, so the warehouse sync copies that data into a
+`raw.*` table in **NeonDB/PostgreSQL** as an unmodified audit copy —
+independently of the ingest cadence. From `raw.*`, dbt's staging →
+intermediate → marts layers take over. See `overview.md` for the full
+mechanism.
 
 > **Attribution:** Wherever we publish a derived number, the upstream source is
 > credited. See [`docs/data-sources.md`](docs/data-sources.md) for the full
@@ -352,16 +296,14 @@ ecoLens/
 │   │   ├── uv.lock
 │   │   ├── README.md
 │   │   ├── tests/
-│   │   └── src/ecolens/
-│   │       ├── api/                   main.py + routes + schemas + deps
-│   │       ├── ml/                    model loading + inference
-│   │       │   ├── models/lstm.py
-│   │       │   └── registry.py        ← MLflow model loader (watches registry)
-│   │       ├── emissions/             carbon math (factors, calculator, OE wrapper)
-│   │       ├── db/                    SQLAlchemy 2.0 async (read-only role)
-│   │       ├── cache/                 Redis client
-│   │       ├── observability/         OTel, logging, metrics
-│   │       └── cli.py                 `ecolens-api` console script
+│   │   └── app/                       ← own venv/lockfile (not a uv workspace member)
+│   │       ├── api/v1/                routers (emissions, footprint, forecast, model, regions, stream, health)
+│   │       ├── core/                  config, errors, logging
+│   │       ├── db/                    Postgres session (read-only), Redis client
+│   │       ├── models/ml.py           DemandLSTM definition (duplicated from data-pipeline)
+│   │       ├── schemas/               per-resource base/create/entities/response
+│   │       ├── service/ml/            conformal, data, features, registry (MLflow loader/hot-reload)
+│   │       └── main.py                FastAPI app factory
 │   │
 │   ├── data-pipeline/                 ② SERVICE 2 / 3   — Prefect worker
 │   │   ├── pyproject.toml             (own deps: prefect, dbt, pytorch, mlflow, oe-sdk)
@@ -374,13 +316,18 @@ ecoLens/
 │   │   │       ├── models/{staging,intermediate,marts}/
 │   │   │       └── seeds/emissions_factors.csv
 │   │   ├── mlflow/projects/           MLflow Project entries for training runs
-│   │   └── src/ecolens/
-│   │       ├── pipeline/              Prefect flows + tasks
-│   │       │   ├── flows/             daily_demand, retrain, drift_check
-│   │       │   └── tasks/             ingest_aemo, ingest_bom, ingest_oe, …
-│   │       ├── mlops/                 training, evaluation, registry promotion
-│   │       ├── worker/                Prefect worker entrypoint + health server
-│   │       ├── observability/
+│   │   └── app/
+│   │       ├── api/v1/                routers (auth, dbt, ingest, datasources, …)
+│   │       ├── core/                  config, security, logging, metrics, ratelimit
+│   │       ├── db/                    Postgres session, Mongo, Redis, RabbitMQ clients
+│   │       ├── models/                data-source/pipeline catalogs, LSTM model def
+│   │       ├── schemas/               per-resource base/create/entities/response
+│   │       ├── service/
+│   │       │   ├── pipeline/          ingest tasks + flows, DuckDB staging, landing
+│   │       │   ├── ml/, mlops/        training, evaluation, registry promotion
+│   │       │   ├── worker.py          warehouse-sync consumer
+│   │       │   └── training_worker.py training-trigger consumer
+│   │       ├── main.py                FastAPI app factory
 │   │       └── cli.py                 `ecolens-pipeline` console script
 │   │
 │   └── dashboard/                     ③ SERVICE 3 / 3   — Next.js 15 + TS
@@ -460,7 +407,8 @@ ecoLens/
 git clone https://github.com/diptu/ecoLens.git
 cd ecoLens
 cp .env.example .env
-# Edit .env — at minimum: OPENELECTRICITY_API_KEY
+# Edit .env — at minimum: OPENELECTRICITY_API_KEY,
+# DATABASE_URL (NeonDB/Postgres — dbt's transform target)
 ```
 
 ### 2. Bring up all 3 services + infra
@@ -469,16 +417,21 @@ cp .env.example .env
 make up
 ```
 
-One command starts **`forecast-api` (port 8000)**, **`data-pipeline`
-(headless worker)**, and **`dashboard` (port 3000)** — plus the platform
-infra (postgres, redis, minio, mlflow, prometheus, grafana, loki).
+One command starts **`forecast-api` (port 8000)**, **`data-pipeline`**
+(its API on port 8001, plus a headless `warehouse-sync` consumer), and
+**`dashboard` (port 3000)** — plus the platform infra (postgres,
+rabbitmq, redis, minio, mlflow, prometheus, grafana, loki).
 
 ```text
-  forecast-api  → http://localhost:8000    (OpenAPI: /docs)
-  data-pipeline → running headless          (logs: make logs-pipeline)
-  dashboard     → http://localhost:3000
-  mlflow        → http://localhost:5000
-  grafana       → http://localhost:3001     (admin / admin)
+  data-pipeline  → http://localhost:8001    (OpenAPI: /docs)
+  forecast-api   → http://localhost:8002    (OpenAPI: /docs)
+
+
+  warehouse-sync → running headless          (logs: make logs-warehouse-sync)
+  dashboard      → http://localhost:3000
+  mlflow         → http://localhost:5000
+  grafana        → http://localhost:3001     (admin / admin)
+  rabbitmq       → http://localhost:15672    (guest / guest)
 ```
 
 ### 3. Build the warehouse (dbt)
@@ -577,8 +530,14 @@ See [`docs/model-card.md`](docs/model-card.md) for the full model card
 
 ### Feature engineering (dbt)
 
-We don't compute features in pandas and then lose them. Features live as
-**dbt models** in `dbt/ecolens/models/intermediate/`:
+We don't compute features in pandas and then lose them. Each ingest task
+stages its fetch in embedded, local **DuckDB** first (no MongoDB, no
+separate database server for this layer); a RabbitMQ event then decouples
+ingestion from warehousing, so the warehouse sync copies the staged data
+into `raw.*` tables in **NeonDB/PostgreSQL** as an unmodified audit copy —
+independently of the ingest cadence. From `raw.*`, features live as **dbt
+models** in `dbt/ecolens/models/intermediate/`, entirely in SQL against
+NeonDB:
 
 ```sql
 -- models/intermediate/int_demand_with_weather.sql
@@ -620,12 +579,12 @@ run — the model never trains on a live Postgres connection.
 ### Orchestration (Prefect)
 
 ```python
-# services/data-pipeline/src/ecolens/pipeline/flows.py
+# services/data-pipeline/app/service/pipeline/flows/__init__.py
 @flow(name="daily-demand")
 def daily_demand():
-    raw    = ingest_aemo_nem()          # land in S3
-    load   = load_raw_to_postgres(raw)  # → raw schema
-    dbt_build(target="prod")            # → analytics schema
+    raw  = ingest_aemo_nem()             # land in DuckDB (local staging)
+    sync = sync_duckdb_to_postgres(raw)  # RabbitMQ event -> NeonDB `raw.*`
+    dbt_build(target="prod")             # NeonDB raw -> analytics schema
     if training_due():
         train_and_register("lstm_demand", region="NEM")
 ```
@@ -689,7 +648,7 @@ content-type: application/json
 }
 ```
 
-Schemas live in `src/ecolens/api/schemas/` and are exported as JSON Schema in
+Schemas live in `app/schemas/` and are exported as JSON Schema in
 the OpenAPI doc. All endpoints are rate-limited (Redis token bucket,
 default 60 req/min per token).
 
@@ -818,9 +777,11 @@ make up
 # = docker compose -f docker-compose.yml up -d
 ```
 
-This brings up the **3 application services + 7 platform-infra
-dependencies** (postgres, redis, minio, mlflow, prometheus, grafana, loki).
-Use `make down`, `make logs`, and `make ps` to manage it.
+This brings up the **3 application services** (`forecast-api`,
+`data-pipeline` — API + `warehouse-sync` consumer, `dashboard`) **+ 8
+platform-infra dependencies** (postgres, rabbitmq, redis, minio, mlflow,
+prometheus, grafana, loki). Use `make down`, `make logs`, and `make ps`
+to manage it.
 
 ### Production
 

@@ -1,190 +1,149 @@
-"""Tests for ecolens.ingestion.core.circuit_breaker."""
-
-from __future__ import annotations
+import asyncio
 
 import pytest
 
-from conftest import FakeRedis
-
-from ecolens.ingestion.core.circuit_breaker import (
+from app.service.pipeline.circuit_breaker import (
+    CLOSED,
+    HALF_OPEN,
+    OPEN,
     CircuitBreaker,
-    CircuitBreakerOpen,
-    retry_with_backoff,
+    CircuitOpenError,
+    CircuitState,
 )
-from ecolens.ingestion.core.settings import IngestionSettings
 
-
-async def _no_sleep(*_args: object, **_kwargs: object) -> None:
-    return None
-
-
-class TestRetryWithBackoff:
-    @pytest.mark.asyncio
-    async def test_succeeds_first_try_no_retry(self):
-        calls = 0
-
-        async def fn():
-            nonlocal calls
-            calls += 1
-            return "ok"
-
-        result = await retry_with_backoff(fn, max_retries=3, backoff_base=1.5)
-        assert result == "ok"
-        assert calls == 1
-
-    @pytest.mark.asyncio
-    async def test_max_retries_zero_tries_once_and_propagates(self):
-        calls = 0
-
-        async def fn():
-            nonlocal calls
-            calls += 1
-            raise ConnectionError("down")
-
-        with pytest.raises(ConnectionError, match="down"):
-            await retry_with_backoff(fn, max_retries=0, backoff_base=1.5)
-        assert calls == 1
-
-    @pytest.mark.asyncio
-    async def test_succeeds_after_transient_failures(self, monkeypatch):
-        monkeypatch.setattr("asyncio.sleep", _no_sleep)
-        calls = 0
-
-        async def fn():
-            nonlocal calls
-            calls += 1
-            if calls < 3:
-                raise ConnectionError("down")
-            return "ok"
-
-        result = await retry_with_backoff(fn, max_retries=5, backoff_base=1.5)
-        assert result == "ok"
-        assert calls == 3
-
-    @pytest.mark.asyncio
-    async def test_raises_last_exception_after_exhausting_retries(self, monkeypatch):
-        monkeypatch.setattr("asyncio.sleep", _no_sleep)
-
-        async def fn():
-            raise ConnectionError("still down")
-
-        with pytest.raises(ConnectionError, match="still down"):
-            await retry_with_backoff(fn, max_retries=3, backoff_base=1.5)
-
-    @pytest.mark.asyncio
-    async def test_on_retry_callback_invoked_per_attempt(self, monkeypatch):
-        monkeypatch.setattr("asyncio.sleep", _no_sleep)
-        attempts_seen: list[int] = []
-
-        async def fn():
-            raise ConnectionError("down")
-
-        with pytest.raises(ConnectionError):
-            await retry_with_backoff(
-                fn,
-                max_retries=3,
-                backoff_base=1.5,
-                on_retry=lambda attempt, exc, delay: attempts_seen.append(attempt),
-            )
-        # 3 max_retries -> 2 retry callbacks (not called after the final attempt)
-        assert attempts_seen == [1, 2]
+pytestmark = pytest.mark.anyio
 
 
 @pytest.fixture
-def settings() -> IngestionSettings:
-    return IngestionSettings(
-        ingest_circuit_breaker_threshold=3, ingest_circuit_breaker_timeout_seconds=60
-    )
+def anyio_backend():
+    return "asyncio"
 
 
-class TestCircuitBreaker:
-    @pytest.mark.asyncio
-    async def test_closed_by_default(self, settings: IngestionSettings):
-        breaker = CircuitBreaker("test_source", FakeRedis(), settings=settings)
-        await breaker.before_call()  # no raise
+class FakeRedis:
+    """Minimal in-memory stand-in for the subset of redis.asyncio.Redis
+    that CircuitBreaker uses — no live Redis needed for these tests."""
 
-    @pytest.mark.asyncio
-    async def test_opens_after_threshold_failures(self, settings: IngestionSettings):
-        breaker = CircuitBreaker("test_source", FakeRedis(), settings=settings)
-        for _ in range(settings.ingest_circuit_breaker_threshold):
-            await breaker.record_failure()
-        with pytest.raises(CircuitBreakerOpen):
-            await breaker.before_call()
+    def __init__(self):
+        self.store: dict[str, str] = {}
 
-    @pytest.mark.asyncio
-    async def test_stays_closed_below_threshold(self, settings: IngestionSettings):
-        breaker = CircuitBreaker("test_source", FakeRedis(), settings=settings)
-        for _ in range(settings.ingest_circuit_breaker_threshold - 1):
-            await breaker.record_failure()
-        await breaker.before_call()  # no raise
+    async def get(self, key):
+        return self.store.get(key)
 
-    @pytest.mark.asyncio
-    async def test_success_resets_failure_count(self, settings: IngestionSettings):
-        breaker = CircuitBreaker("test_source", FakeRedis(), settings=settings)
-        await breaker.record_failure()
-        await breaker.record_failure()
-        await breaker.record_success()
-        await breaker.record_failure()
-        await breaker.before_call()  # only 1 failure since reset, still closed
+    async def set(self, key, value):
+        self.store[key] = str(value)
 
-    @pytest.mark.asyncio
-    async def test_half_open_after_timeout_elapses(
-        self, settings: IngestionSettings, monkeypatch
-    ):
-        redis = FakeRedis()
-        breaker = CircuitBreaker("test_source", redis, settings=settings)
-        for _ in range(settings.ingest_circuit_breaker_threshold):
-            await breaker.record_failure()
-        with pytest.raises(CircuitBreakerOpen):
-            await breaker.before_call()
+    async def incr(self, key):
+        self.store[key] = str(int(self.store.get(key, 0)) + 1)
+        return int(self.store[key])
 
-        # Simulate time passing beyond the timeout window.
-        import time as time_module
+    async def delete(self, *keys):
+        for k in keys:
+            self.store.pop(k, None)
 
-        real_time = time_module.time
-        monkeypatch.setattr(
-            "ecolens.ingestion.core.circuit_breaker.time.time",
-            lambda: real_time() + settings.ingest_circuit_breaker_timeout_seconds + 1,
-        )
-        await breaker.before_call()  # half-open: no raise
 
-    @pytest.mark.asyncio
-    async def test_call_records_success(self, settings: IngestionSettings):
-        breaker = CircuitBreaker("test_source", FakeRedis(), settings=settings)
-        await breaker.record_failure()
+@pytest.fixture
+def redis():
+    return FakeRedis()
 
-        async def fn():
-            return "ok"
 
-        result = await breaker.call(fn)
-        assert result == "ok"
-        await breaker.before_call()  # failure count was reset by the success
+async def _fail():
+    raise ValueError("boom")
 
-    @pytest.mark.asyncio
-    async def test_call_records_failure_and_reraises(self, settings: IngestionSettings):
-        breaker = CircuitBreaker("test_source", FakeRedis(), settings=settings)
 
-        async def fn():
-            raise ValueError("boom")
+async def _ok():
+    return "ok"
 
-        with pytest.raises(ValueError, match="boom"):
-            await breaker.call(fn)
 
-    @pytest.mark.asyncio
-    async def test_call_raises_circuit_breaker_open_without_calling_fn(
-        self, settings: IngestionSettings
-    ):
-        breaker = CircuitBreaker("test_source", FakeRedis(), settings=settings)
-        for _ in range(settings.ingest_circuit_breaker_threshold):
-            await breaker.record_failure()
+async def test_starts_closed(redis):
+    cb = CircuitBreaker("svc", redis)
+    assert await cb.state == CLOSED
 
-        called = False
 
-        async def fn():
-            nonlocal called
-            called = True
-            return "ok"
+async def test_stays_closed_below_failure_threshold(redis):
+    cb = CircuitBreaker("svc", redis, failure_threshold=3)
+    for _ in range(2):
+        with pytest.raises(ValueError):
+            await cb.call(_fail)
+    assert await cb.state == CLOSED
 
-        with pytest.raises(CircuitBreakerOpen):
-            await breaker.call(fn)
-        assert called is False
+
+async def test_opens_at_failure_threshold(redis):
+    cb = CircuitBreaker("svc", redis, failure_threshold=2)
+    for _ in range(2):
+        with pytest.raises(ValueError):
+            await cb.call(_fail)
+    assert await cb.state == OPEN
+
+
+async def test_open_breaker_rejects_calls_without_invoking_fn(redis):
+    cb = CircuitBreaker("svc", redis, failure_threshold=1, reset_timeout=999)
+    with pytest.raises(ValueError):
+        await cb.call(_fail)
+    assert await cb.state == OPEN
+
+    calls = []
+
+    async def tracked():
+        calls.append(1)
+        return "ok"
+
+    with pytest.raises(CircuitOpenError):
+        await cb.call(tracked)
+    assert calls == []
+
+
+async def test_transitions_to_half_open_after_reset_timeout(redis):
+    cb = CircuitBreaker("svc", redis, failure_threshold=1, reset_timeout=0)
+    with pytest.raises(ValueError):
+        await cb.call(_fail)
+    assert await cb.state == HALF_OPEN
+
+
+async def test_successful_half_open_trial_closes_the_breaker(redis):
+    cb = CircuitBreaker("svc", redis, failure_threshold=1, reset_timeout=0)
+    with pytest.raises(ValueError):
+        await cb.call(_fail)
+    assert await cb.state == HALF_OPEN
+
+    result = await cb.call(_ok)
+
+    assert result == "ok"
+    assert await cb.state == CLOSED
+
+
+async def test_failed_half_open_trial_reopens_the_breaker(redis):
+    cb = CircuitBreaker("svc", redis, failure_threshold=1, reset_timeout=0.2)
+    with pytest.raises(ValueError):
+        await cb.call(_fail)
+    await asyncio.sleep(0.25)
+    assert await cb.state == HALF_OPEN
+
+    with pytest.raises(ValueError):
+        await cb.call(_fail)
+
+    # opened_at was just reset, so we're immediately back inside the
+    # reset_timeout window -> open, not half_open again.
+    assert await cb.state == OPEN
+
+
+async def test_state_value_is_the_plain_string():
+    # CircuitState is a str-Enum, so `.value` gives back the raw string
+    # (this is exactly how app.service.pipeline.tasks._common consumes it).
+    assert CircuitState.OPEN.value == "open"
+    assert CircuitState.CLOSED.value == "closed"
+    assert CircuitState.HALF_OPEN.value == "half_open"
+
+
+async def test_call_forwards_positional_and_keyword_args(redis):
+    cb = CircuitBreaker("svc", redis)
+    seen = {}
+
+    async def fetch(region, *, lookback_minutes):
+        seen["region"] = region
+        seen["lookback_minutes"] = lookback_minutes
+        return "ok"
+
+    result = await cb.call(fetch, "NSW1", lookback_minutes=30)
+
+    assert result == "ok"
+    assert seen == {"region": "NSW1", "lookback_minutes": 30}

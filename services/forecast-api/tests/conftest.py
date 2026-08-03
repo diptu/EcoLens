@@ -1,98 +1,40 @@
-"""Shared pytest fixtures/test doubles for the forecast-api test suite."""
+import pytest
+from fastapi.testclient import TestClient
 
-from __future__ import annotations
-
-from typing import Any
-
-
-class FakeConnectionPool:
-    """Duck-typed stand-in for `ecolens_forecast_api.db.ConnectionPool`."""
-
-    def __init__(
-        self,
-        *,
-        fetchrow_result: dict[str, Any] | None = None,
-        fetch_result: list[dict[str, Any]] | None = None,
-        connected: bool = True,
-    ) -> None:
-        self.is_connected = connected
-        self._fetchrow_result = fetchrow_result
-        self._fetch_result = fetch_result if fetch_result is not None else []
-        self.calls: list[tuple[str, tuple[Any, ...]]] = []
-
-    async def fetchrow(self, query: str, *args: Any) -> dict[str, Any] | None:
-        self.calls.append((query, args))
-        return self._fetchrow_result
-
-    async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
-        self.calls.append((query, args))
-        return self._fetch_result
+from app.main import app
+from app.service.ml.registry import ModelRegistry
+from app.core import logging as logging_module
 
 
-class FakeCache:
-    """Duck-typed stand-in for `ecolens_forecast_api.cache.Cache`."""
+@pytest.fixture(autouse=True)
+def _no_real_mlflow_calls(monkeypatch):
+    """The app's lifespan calls `ModelRegistry.refresh()` on startup and
+    keeps polling in the background (`ml/registry.py`) -- a real network
+    call to whatever `MLFLOW_TRACKING_URI` resolves to (its own default
+    fallback if unset). Router tests don't want that: it's slow/flaky
+    depending on the test machine's network state (a connection attempt
+    to an unreachable host can hang for a long time under retry/backoff,
+    not fail fast), and every test that needs a *loaded* bundle already
+    overrides `get_model_registry` directly (see `test_model_endpoint.py`/
+    `test_forecast.py`). Route MLflow entirely out of the picture for the
+    ones that don't."""
 
-    def __init__(self, *, enabled: bool = False) -> None:
-        self.enabled = enabled
-        self.connected = enabled
-        self._store: dict[str, Any] = {}
-        self.get_calls: list[str] = []
-        self.set_calls: list[tuple[str, Any]] = []
-
-    async def get(self, key: str) -> Any | None:
-        self.get_calls.append(key)
-        return self._store.get(key)
-
-    async def set(self, key: str, value: Any, ttl: int | None = None) -> None:
-        self.set_calls.append((key, value))
-        self._store[key] = value
-
-
-class FakeAsyncpgConn:
-    """Duck-typed stand-in for an asyncpg connection."""
-
-    def __init__(
-        self,
-        *,
-        fetchrow_results: list[dict[str, Any] | None] | None = None,
-        fetchval_results: list[Any] | None = None,
-        raises: Exception | None = None,
-    ) -> None:
-        self._fetchrow_results = list(fetchrow_results or [])
-        self._fetchval_results = list(fetchval_results or [])
-        self._raises = raises
-
-    async def fetchrow(self, query: str, *args: Any) -> dict[str, Any] | None:
-        if self._raises:
-            raise self._raises
-        return self._fetchrow_results.pop(0) if self._fetchrow_results else None
-
-    async def fetchval(self, query: str, *args: Any) -> Any:
-        if self._raises:
-            raise self._raises
-        return self._fetchval_results.pop(0) if self._fetchval_results else None
-
-
-class FakeAsyncpgAcquire:
-    def __init__(self, conn: FakeAsyncpgConn) -> None:
-        self._conn = conn
-
-    async def __aenter__(self) -> FakeAsyncpgConn:
-        return self._conn
-
-    async def __aexit__(self, *exc: Any) -> bool:
+    async def _fake_refresh(self):
         return False
 
+    monkeypatch.setattr(ModelRegistry, "refresh", _fake_refresh)
 
-class FakeAsyncpgPool:
-    """Duck-typed stand-in for `asyncpg.Pool`."""
 
-    def __init__(self, conn: FakeAsyncpgConn | None = None) -> None:
-        self.conn = conn or FakeAsyncpgConn()
-        self.closed = False
+@pytest.fixture
+def client():
+    with TestClient(app) as c:
+        yield c
 
-    def acquire(self) -> FakeAsyncpgAcquire:
-        return FakeAsyncpgAcquire(self.conn)
 
-    async def close(self) -> None:
-        self.closed = True
+@pytest.fixture(autouse=True)
+def _fresh_structlog_config():
+    """Same rationale as data-pipeline's identical fixture: force a fresh
+    `configure_logging()` before every test so no test's logging depends
+    on what ran (or what closed `sys.stdout`) before it."""
+    logging_module._configured = False
+    logging_module.configure_logging()

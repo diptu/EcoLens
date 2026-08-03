@@ -8,43 +8,38 @@ authors = [
     { name = "Nazmul Alam", email = "diptunazmulalam@gmail.com" }
 ]
 dependencies = [
+    "data-pipeline",
     "fastapi[standard]>=0.139.2",
     "gunicorn>=26.0.0",
     "pre-commit>=4.6.0",
     "pydantic>=2.13.4",
+    "pytest-cov>=7.1.0",
     "uvicorn>=0.51.0",
 ]
+
+[tool.uv.sources]
+data-pipeline = { workspace = true }
 
 
 [dependency-groups]
 dev = [
     "mypy>=2.3.0",
-    "pip-audit>=2.9.0",
+    "pip-audit>=2.7",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
     "ruff>=0.15.22",
 ]
-
-[tool.pytest.ini_options]
-# `scripts/` holds standalone CLI utilities (e.g. test_mongo_connection.py is
-# run directly, not via pytest) — their test_*.py naming otherwise gets
-# swept up by pytest's default collection and fails on missing imports.
-# `.claude/` holds Claude Code tooling state, including git worktrees under
-# `.claude/worktrees/` that can contain their own full copies of a service's
-# tree (e.g. a not-yet-merged services/forecast-api/tests/) -- without this
-# exclusion, pytest collects both copies of same-named test modules (no
-# __init__.py disambiguates them) and errors with "import file mismatch".
-norecursedirs = ["scripts", ".venv", "node_modules", ".git", ".claude"]
 
 [tool.mypy]
 # Set the base for each service
 python_version = "3.12"
 namespace_packages = true
 explicit_package_bases = true
-# Mypy will now look for packages relative to these directories
+# Mypy will now look for packages relative to these directories.
+# forecast-api has its own venv + local [tool.mypy] config now (like
+# IAM), so it's deliberately not listed here.
 mypy_path = [
-    "services/forecast-api/src",
-    "services/data-pipeline/src"
+    "services/data-pipeline"
 ]
 
 # Tell Mypy to ignore the top-level directory and focus on src/
@@ -52,79 +47,17 @@ mypy_path = [
 module = "tests.*"
 ignore_missing_imports = true
 
-# pandas' type-stub story is still immature project-wide (pandas-stubs
-# is a separate, partially-complete package) — standard practice for
-# pandas-heavy codebases is to treat it as untyped rather than either
-# blocking on "stubs not installed" or chasing full stub-driven
-# type-precision across every DataFrame call site.
+# No type stubs published for these — safe to ignore rather than pull in
+# pandas-stubs / aioboto3-stubs for a service still in early scaffolding.
 [[tool.mypy.overrides]]
-module = "pandas.*"
-ignore_missing_imports = true
-
-# asyncpg ships no py.typed marker / stub package as of the pinned version.
-[[tool.mypy.overrides]]
-module = "asyncpg.*"
-ignore_missing_imports = true
-
-# psycopg2-binary doesn't bundle a types-psycopg2 stub package either.
-[[tool.mypy.overrides]]
-module = "psycopg2.*"
-ignore_missing_imports = true
-
-# scipy's own stubs are split into a separate scipy-stubs package we don't
-# currently depend on; only mlops/drift.py's ks_2samp call needs scipy at all.
-[[tool.mypy.overrides]]
-module = "scipy.*"
-ignore_missing_imports = true
-
-# mlflow-skinny ships partial/best-effort type hints that don't fully agree
-# with its own runtime API surface (e.g. optional fields typed as required
-# in older stub revisions) -- treated the same as the other untyped-ish
-# infra clients above rather than fighting each mismatch as mlflow evolves.
-[[tool.mypy.overrides]]
-module = "mlflow.*"
-ignore_missing_imports = true
-
-# PyYAML's separate types-PyYAML stub package isn't a dependency here --
-# same "ignore rather than chase a separate stub package" treatment as
-# the untyped infra clients above; only search_space.py's safe_load call
-# needs it at all.
-[[tool.mypy.overrides]]
-module = "yaml.*"
-ignore_missing_imports = true
-
-# pika (RabbitMQ producer client, ecolens.shared.events.rabbitmq) has no
-# py.typed marker or stub package -- same "ignore rather than chase a
-# separate stub package" treatment as the other untyped infra clients
-# above.
-[[tool.mypy.overrides]]
-module = "pika.*"
-ignore_missing_imports = true
-
-# timesfm (forecasting/service/timesfm_backbone.py) ships no py.typed
-# marker or stub package -- same "ignore rather than chase a separate
-# stub package" treatment as the other untyped infra clients above.
-[[tool.mypy.overrides]]
-module = "timesfm.*"
-ignore_missing_imports = true
-
-# scikit-learn's own stub coverage is still partial project-wide (a
-# separate scikit-learn-stubs package exists but isn't a dependency
-# here) -- same treatment as pandas/scipy above.
-[[tool.mypy.overrides]]
-module = "sklearn.*"
-ignore_missing_imports = true
-
-# statsmodels ships no py.typed marker either (forecasting/service/
-# feature_selection.py's Step 3 PACF + notebooks/data-pipeline.ipynb's
-# own prototype both use tsa.stattools.pacf).
-[[tool.mypy.overrides]]
-module = "statsmodels.*"
+module = ["aioboto3.*", "pandas.*", "openelectricity.*", "sklearn.*", "croniter.*", "joblib.*"]
 ignore_missing_imports = true
 
 [tool.uv.workspace]
+# forecast-api deliberately isn't a member anymore -- it now uses its own
+# independent venv/lockfile (like IAM), since both it and data-pipeline's
+# restructured packages are named `app`, which would collide if both were
+# installed into one shared workspace venv.
 members = [
     "services/data-pipeline",
-    "services/forecast-api",
-    "services/iam",
 ]

@@ -33,7 +33,6 @@ import {
   getRecentUsers,
   getUpcomingDeadlines,
   getComplianceItems,
-  getPipelineOps,
   getModelOps,
   getActiveTasks,
   getTrainingConfigOptions,
@@ -55,7 +54,6 @@ export {
   getRecentUsers,
   getUpcomingDeadlines,
   getComplianceItems,
-  getPipelineOps,
   getModelOps,
   getActiveTasks,
   getTrainingConfigOptions,
@@ -72,7 +70,11 @@ export {
 export interface ExecutiveKpi {
   label: string;
   value: string;
-  delta_pct: number;
+  /** `null` when there's no real prior-period comparison to show (the
+   * KPI is backed by a live API call with no baseline computed yet) —
+   * `KpiCard` hides the delta row entirely rather than render a
+   * leftover mock number next to a real value. */
+  delta_pct: number | null;
   trend: "up" | "down" | "flat";
   good_when: "up" | "down";
   unit?: string;
@@ -80,32 +82,12 @@ export interface ExecutiveKpi {
 
 export function getExecutiveKpis(): ExecutiveKpi[] {
   return [
-    { label: "Total CO₂e (YTD)", value: "12,840",  unit: "tCO₂e", delta_pct: -4.2,  trend: "down", good_when: "down" },
-    { label: "Carbon Intensity",  value: "612",    unit: "g/kWh", delta_pct: -2.8,  trend: "down", good_when: "down" },
-    { label: "Renewable Share",   value: "38.6",   unit: "%",     delta_pct:  6.1,  trend: "up",   good_when: "up"   },
-    { label: "Cost Savings",      value: "$1.42M", unit: "YTD",   delta_pct: 11.3,  trend: "up",   good_when: "up"   },
-    { label: "Compliance Score",  value: "92",     unit: "/100",  delta_pct:  1.4,  trend: "up",   good_when: "up"   },
-    { label: "Open Risks",        value: "3",      unit: "high",  delta_pct: -25.0, trend: "down", good_when: "down" },
-  ];
-}
-
-export interface ExecutiveInitiative {
-  id: string;
-  name: string;
-  status: "on-track" | "at-risk" | "blocked" | "completed";
-  progress_pct: number;
-  due: string;
-  owner: string;
-  impact: string;
-}
-
-export function getExecutiveInitiatives(): ExecutiveInitiative[] {
-  return [
-    { id: "i-1", name: "Net-Zero Roadmap 2030",     status: "on-track",  progress_pct: 68, due: "Q4 2026", owner: "CSO",          impact: "-45% scope 1+2 by 2030" },
-    { id: "i-2", name: "Solar PPA — 200 MW",        status: "at-risk",   progress_pct: 42, due: "Q2 2026", owner: "Procurement",  impact: "12k tCO₂e/yr avoided" },
-    { id: "i-3", name: "Scope 3 Supplier Disclosure",status: "blocked",  progress_pct: 18, due: "Q3 2026", owner: "Sustainability", impact: "Regulatory (CSRD)" },
-    { id: "i-4", name: "EV Fleet Transition",        status: "on-track", progress_pct: 81, due: "Q1 2026", owner: "Facilities",   impact: "-1.8k tCO₂e/yr" },
-    { id: "i-5", name: "LED Retrofit — All Sites",   status: "completed",progress_pct: 100, due: "Done",  owner: "Facilities",   impact: "-320 tCO₂e/yr" },
+    { label: "Total CO₂e (YTD)", value: "—",  unit: "tCO₂e", delta_pct: null, trend: "flat", good_when: "down" },
+    { label: "Carbon Intensity",  value: "—",    unit: "g/kWh", delta_pct: null, trend: "flat", good_when: "down" },
+    { label: "Renewable Share",   value: "—",   unit: "%",     delta_pct: null, trend: "flat",   good_when: "up"   },
+    { label: "Avg Wholesale Price (YTD)", value: "—", unit: "$/MWh",   delta_pct: null,  trend: "flat",   good_when: "down"   },
+    { label: "Data Quality Score", value: "—",     unit: "%",  delta_pct: null,  trend: "flat",   good_when: "up"   },
+    { label: "Open Risks",        value: "—",      unit: "high+",  delta_pct: null, trend: "flat", good_when: "down" },
   ];
 }
 
@@ -132,45 +114,6 @@ export function getEmissionsBySource(): SourceSlice[] {
     { name: "Refrigerants (Scope 1)",     pct:  4.1, tco2e:  5_140, color: "#a78bfa" },
     { name: "Supply Chain (Scope 3)",     pct:  5.0, tco2e:  6_280, color: "#22d3ee" },
     { name: "Travel (Scope 3)",           pct:  2.7, tco2e:  3_360, color: "#f472b6" },
-  ];
-}
-
-// ────────────────────────────────────────────────────────────────────
-// Operations Dashboard
-// ────────────────────────────────────────────────────────────────────
-
-export function getOpsKpis() {
-  return [
-    { label: "Active Pipelines",  value: "12",  sub: "5 running" },
-    { label: "Pending Jobs",      value: "23",  sub: "1 retry"   },
-    { label: "Last Ingestion",    value: "2m",  sub: "AEMO NEM"  },
-    { label: "Model Status",      value: "OK",  sub: "v7 prod"   },
-    { label: "Next Retrain",      value: "11d", sub: "Apr 9"     },
-    { label: "System Load",       value: "62%", sub: "8/16 cores"},
-  ];
-}
-
-export function getOpsPipelines() {
-  return [
-    { id: "op-1", name: "AEMO NEM 5-min",   status: "running",  last_run: "2 min ago",  records_today: 8_640,  health: "healthy"  },
-    { id: "op-2", name: "BoM Observations", status: "success",  last_run: "12 min ago", records_today: 4_320,  health: "healthy"  },
-    { id: "op-3", name: "Carbon Intensity", status: "success",  last_run: "28 min ago", records_today: 1_440,  health: "healthy"  },
-    { id: "op-4", name: "Fuel Mix",         status: "queued",   last_run: "1h ago",     records_today: 720,    health: "healthy"  },
-    { id: "op-5", name: "Distributed PV",   status: "failed",   last_run: "3h ago",     records_today: 0,      health: "degraded" },
-    { id: "op-6", name: "WEM Dispatch",     status: "success",  last_run: "5 min ago",  records_today: 1_280,  health: "healthy"  },
-  ];
-}
-
-export function getOpsServices() {
-  return [
-    { name: "Forecast API",  status: "healthy",  uptime: "99.97%", latency_p95: "82ms"  },
-    { name: "Emissions API", status: "healthy",  uptime: "99.99%", latency_p95: "54ms"  },
-    { name: "Warehouse API", status: "healthy",  uptime: "99.92%", latency_p95: "120ms" },
-    { name: "Admin API",     status: "degraded", uptime: "98.10%", latency_p95: "210ms" },
-    { name: "PostgreSQL",    status: "healthy",  uptime: "100%",   latency_p95: "12ms"  },
-    { name: "MongoDB",       status: "healthy",  uptime: "100%",   latency_p95: "8ms"   },
-    { name: "MLflow",        status: "healthy",  uptime: "99.95%", latency_p95: "44ms"  },
-    { name: "Redis",         status: "healthy",  uptime: "100%",   latency_p95: "2ms"   },
   ];
 }
 
@@ -219,84 +162,6 @@ export function getSourceCategories() {
     { id: "carbon",  label: "Carbon",         count: 1 },
     { id: "fuel",    label: "Fuel Markets",   count: 1 },
     { id: "custom",  label: "Custom REST",    count: 1 },
-  ];
-}
-
-// ────────────────────────────────────────────────────────────────────
-// Data Ingestion Pipelines
-// ────────────────────────────────────────────────────────────────────
-
-export type PipelineState = "running" | "success" | "failed" | "queued" | "paused";
-
-export interface Pipeline {
-  id: string;
-  name: string;
-  source: string;
-  schedule: string;
-  cron: string;
-  last_run: string;
-  duration: string;
-  records: number;
-  state: PipelineState;
-  triggered_by: string;
-}
-
-export function getPipelines(): Pipeline[] {
-  return [
-    { id: "pl-1", name: "Grid Operations Data", source: "ENTSO-E API",          schedule: "Every 5 min",   cron: "*/5 * * * *",  last_run: "2 min ago",  duration: "4.2s", records:    288, state: "running", triggered_by: "Cron"  },
-    { id: "pl-2", name: "Weather Data",         source: "Open-Meteo API",      schedule: "Every 15 min",  cron: "*/15 * * * *", last_run: "12 min ago", duration: "8.1s", records:  1_440, state: "success", triggered_by: "Cron"  },
-    { id: "pl-3", name: "Generation Mix",       source: "EIA API",             schedule: "Every hour",    cron: "0 */1 * * *",  last_run: "28 min ago", duration: "12.0s",records:     48, state: "success", triggered_by: "Cron"  },
-    { id: "pl-4", name: "Carbon Intensity",     source: "Carbon Intensity API",schedule: "Every hour",    cron: "0 */1 * * *",  last_run: "31 min ago", duration: "9.7s", records:     24, state: "success", triggered_by: "Cron"  },
-    { id: "pl-5", name: "Fuel Prices",          source: "ICE API",             schedule: "Every 2 hours", cron: "0 */2 * * *",  last_run: "1 hr ago",   duration: "—",     records:      0, state: "failed",  triggered_by: "Cron"  },
-    { id: "pl-6", name: "WEM Dispatch",         source: "AEMO WEM",            schedule: "Every 30 min",  cron: "*/30 * * * *", last_run: "5 min ago",  duration: "3.4s", records:     16, state: "success", triggered_by: "Cron"  },
-    { id: "pl-7", name: "Distributed PV",       source: "APVI",                schedule: "Daily 06:00",   cron: "0 6 * * *",    last_run: "3 hr ago",   duration: "—",     records:      0, state: "failed",  triggered_by: "Cron"  },
-    { id: "pl-8", name: "Site Meters",          source: "Custom REST",         schedule: "Every 5 min",   cron: "*/5 * * * *",  last_run: "3 min ago",  duration: "2.1s", records:    120, state: "success", triggered_by: "Cron"  },
-  ];
-}
-
-export interface PipelineRun {
-  id: string;
-  pipeline_id: string;
-  started_at: string;
-  duration: string;
-  records: number;
-  state: PipelineState;
-  triggered_by: string;
-}
-
-export function getPipelineRuns(limit = 12): PipelineRun[] {
-  const states: PipelineState[] = ["success", "success", "success", "failed", "success", "success"];
-  const trigs = ["Cron", "Cron", "Admin", "Cron", "Cron", "API"];
-  const out: PipelineRun[] = [];
-  for (let i = 0; i < limit; i++) {
-    const state = states[i % states.length];
-    out.push({
-      id: `run-${1000 + i}`,
-      pipeline_id: `pl-${(i % 8) + 1}`,
-      started_at: `${(i + 1) * 5} min ago`,
-      duration: `${(2 + (i % 4) * 1.3).toFixed(1)}s`,
-      records: ((i * 137) % 1500),
-      state,
-      triggered_by: trigs[i % trigs.length],
-    });
-  }
-  return out;
-}
-
-export interface FailedJob {
-  id: string;
-  pipeline: string;
-  error_code: string;
-  error_message: string;
-  occurred_at: string;
-  retryable: boolean;
-}
-
-export function getFailedJobs(): FailedJob[] {
-  return [
-    { id: "fj-1", pipeline: "Fuel Prices",    error_code: "HTTP 503", error_message: "Service Unavailable from upstream ICE API", occurred_at: "1 hr ago",  retryable: true  },
-    { id: "fj-2", pipeline: "Distributed PV", error_code: "TIMEOUT",  error_message: "No response within 30s",                  occurred_at: "3 hr ago",  retryable: true  },
-    { id: "fj-3", pipeline: "Site Meters",    error_code: "AUTH 401", error_message: "Token expired",                           occurred_at: "1 day ago", retryable: false },
   ];
 }
 
@@ -471,44 +336,6 @@ export function getMlflowRuns(limit = 8): MlflowRun[] {
   ];
 }
 
-// ────────────────────────────────────────────────────────────────────
-// Users, Settings, Orgs, API Keys
-// ────────────────────────────────────────────────────────────────────
-
-export type UserRole = "admin" | "analyst" | "viewer" | "owner";
-
-export interface UserAccount {
-  id: string;
-  email: string;
-  name: string;
-  role: UserRole;
-  org: string;
-  status: "active" | "invited" | "suspended";
-  last_active: string;
-  mfa_enabled: boolean;
-}
-
-export function getUsers(): UserAccount[] {
-  return [
-    { id: "u-1", email: "diptu@ecolens.com", name: "Diptu",        role: "admin",   org: "Acme Energy", status: "active",  last_active: "now",       mfa_enabled: true  },
-    { id: "u-2", email: "diptu@ecolens.app", name: "Diptu (app)",  role: "admin",   org: "Acme Energy", status: "active",  last_active: "2 hr ago",  mfa_enabled: true  },
-    { id: "u-3", email: "demo@ecolens.app",  name: "Demo User",    role: "analyst", org: "Acme Energy", status: "active",  last_active: "1 day ago", mfa_enabled: false },
-    { id: "u-4", email: "kelly@acme.com",    name: "Kelly Zhao",   role: "analyst", org: "Acme Energy", status: "active",  last_active: "3 hr ago",  mfa_enabled: true  },
-    { id: "u-5", email: "nimal@acme.com",    name: "Nimal Perera", role: "analyst", org: "Acme Energy", status: "active",  last_active: "yesterday", mfa_enabled: false },
-    { id: "u-6", email: "raj@acme.com",      name: "Raj Patel",    role: "viewer",  org: "Acme Energy", status: "active",  last_active: "1 wk ago",  mfa_enabled: false },
-    { id: "u-7", email: "li@acme.com",       name: "Li Zhang",     role: "viewer",  org: "Acme Energy", status: "invited", last_active: "—",         mfa_enabled: false },
-  ];
-}
-
-export function getOrganizations() {
-  return [
-    { id: "org-1", name: "Acme Energy",     industry: "Energy",     region: "AU NEM", members: 142, emissions_tco2e: 125_430, plan: "Enterprise", created_at: "2024-08-12" },
-    { id: "org-2", name: "Northwind Power", industry: "Generation", region: "AU NEM", members:  48, emissions_tco2e:  62_180, plan: "Pro",        created_at: "2025-01-04" },
-    { id: "org-3", name: "Contoso Solar",   industry: "Solar",      region: "AU NEM", members:  18, emissions_tco2e:   4_220, plan: "Starter",    created_at: "2025-09-18" },
-    { id: "org-4", name: "Watt Utilities",  industry: "Utility",    region: "AU WEM", members:  62, emissions_tco2e:  28_440, plan: "Pro",        created_at: "2024-11-22" },
-  ];
-}
-
 export function getAPIKeys() {
   return [
     { id: "k-1", name: "Production",   prefix: "eco_live_3a2b…", created_at: "2024-09-12", last_used: "2 min ago",  scopes: ["read:*", "write:forecast"], created_by: "diptu@ecolens.com" },
@@ -548,5 +375,370 @@ export function getSettings(): SettingField[] {
     { key: "auto_backup",       label: "Auto-backup",       type: "boolean", value: true,                                    category: "backup"    },
     { key: "beta_ai_recs",      label: "Beta: AI Recs",     type: "boolean", value: false,                                   category: "flags"     },
     { key: "new_forecast_ui",   label: "New Forecast UI",   type: "boolean", value: true,                                    category: "flags"     },
+  ];
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// Integrations — third-party data destinations (Google Sheets, Excel, etc.)
+// ───────────────────────────────────────────────────────────────────────
+
+export type IntegrationProvider =
+  | "google_sheets"
+  | "microsoft_excel"
+  | "notion"
+  | "airtable"
+  | "slack"
+  | "pagerduty"
+  | "webhook";
+
+export type IntegrationStatus = "connected" | "disconnected" | "expired" | "error";
+
+export interface Integration {
+  id: string;
+  provider: IntegrationProvider;
+  name: string;
+  description: string;
+  category: "spreadsheet" | "chat" | "incident" | "webhook" | "doc";
+  status: IntegrationStatus;
+  connected_account?: string;     // e.g. "alice@acme.com"
+  connected_at?: string;          // ISO 8601
+  scopes?: string[];              // OAuth scopes granted
+  config_url?: string;            // external URL (e.g. Google Cloud Console)
+  icon_color: string;             // tailwind accent for the card
+  available: boolean;             // whether the integration is built/shipped
+  coming_soon?: boolean;          // shown as "Coming soon"
+  docs_url?: string;
+}
+
+/** All known integrations. Google Sheets is shipped; the rest are placeholders. */
+export function getIntegrations(): Integration[] {
+  return [
+    {
+      id: "int-google-sheets",
+      provider: "google_sheets",
+      name: "Google Sheets",
+      description:
+        "Export emissions, forecasts, and demand data to a Google Sheet — for sharing with stakeholders, custom analysis, or feeding into existing BI workflows.",
+      category: "spreadsheet",
+      status: "connected",
+      connected_account: "diptu@ecolens.com",
+      connected_at: "2026-07-20T10:30:00Z",
+      scopes: [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive.file",
+      ],
+      config_url: "https://console.cloud.google.com/apis/credentials",
+      icon_color: "emerald-200",
+      available: true,
+      docs_url: "/docs/integrations/google-sheets",
+    },
+    {
+      id: "int-microsoft-excel",
+      provider: "microsoft_excel",
+      name: "Microsoft Excel Online",
+      description:
+        "Same as Google Sheets, but writes to an Excel workbook in OneDrive. Best for orgs on the Microsoft 365 stack.",
+      category: "spreadsheet",
+      status: "disconnected",
+      icon_color: "cyan-300",
+      available: false,
+      coming_soon: true,
+      docs_url: "/docs/integrations/microsoft-excel",
+    },
+    {
+      id: "int-notion",
+      provider: "notion",
+      name: "Notion Database",
+      description:
+        "Append rows to a Notion database. Useful for sustainability OKR tracking and team-level reporting.",
+      category: "doc",
+      status: "disconnected",
+      icon_color: "white",
+      available: false,
+      coming_soon: true,
+    },
+    {
+      id: "int-airtable",
+      provider: "airtable",
+      name: "Airtable",
+      description: "Push emissions and forecast data into an Airtable base.",
+      category: "spreadsheet",
+      status: "disconnected",
+      icon_color: "amber-300",
+      available: false,
+      coming_soon: true,
+    },
+    {
+      id: "int-slack",
+      provider: "slack",
+      name: "Slack",
+      description:
+        "Send alert messages to a Slack channel (anomalies, pipeline failures, low-accuracy forecasts).",
+      category: "chat",
+      status: "disconnected",
+      icon_color: "purple-300",
+      available: false,
+      coming_soon: true,
+    },
+    {
+      id: "int-pagerduty",
+      provider: "pagerduty",
+      name: "PagerDuty",
+      description: "Page on-call engineers when a critical pipeline fails or accuracy drops below threshold.",
+      category: "incident",
+      status: "disconnected",
+      icon_color: "rose-300",
+      available: false,
+      coming_soon: true,
+    },
+    {
+      id: "int-webhook",
+      provider: "webhook",
+      name: "Custom Webhook",
+      description:
+        "POST any ecoLens payload to a URL you control. For custom dashboards, internal tools, or downstream automation.",
+      category: "webhook",
+      status: "disconnected",
+      icon_color: "lime-100",
+      available: true,
+    },
+  ];
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// Google Sheets export — configured exports + history
+// ───────────────────────────────────────────────────────────────────────
+
+export type ExportDataSource =
+  | "emissions_total"
+  | "emissions_by_region"
+  | "emissions_by_source"
+  | "emissions_by_scope"
+  | "forecast_quantiles"
+  | "demand_timeseries"
+  | "renewable_mix"
+  | "carbon_intensity"
+  | "anomalies"
+  | "data_quality_issues"
+  | "system_health";
+
+export type ExportFormat = "raw" | "summary" | "pivot";
+export type ExportSchedule = "manual" | "hourly" | "daily" | "weekly" | "monthly";
+
+export interface GoogleSheetExport {
+  id: string;
+  name: string;
+  data_source: ExportDataSource;
+  region: "NEM" | "WEM" | "NSW1" | "QLD1" | "VIC1" | "SA1" | "TAS1" | "ALL";
+  period: "24h" | "7d" | "30d" | "90d" | "ytd" | "custom";
+  format: ExportFormat;
+  destination: {
+    spreadsheet_id: string;
+    spreadsheet_name: string;
+    sheet_tab: string;            // e.g. "Sheet1" or "raw"
+    cell_range?: string;          // e.g. "A1" or "raw!A1:Z1000"
+  };
+  schedule: ExportSchedule;
+  next_run_at?: string;
+  last_run_at?: string;
+  last_status?: "success" | "failed" | "running" | "queued";
+  last_rows_written?: number;
+  notify_on_failure: boolean;
+  enabled: boolean;
+  created_by: string;
+  created_at: string;
+}
+
+export function getGoogleSheetExports(): GoogleSheetExport[] {
+  return [
+    {
+      id: "exp-001",
+      name: "NEM Daily Emissions Summary",
+      data_source: "emissions_total",
+      region: "NEM",
+      period: "7d",
+      format: "summary",
+      destination: {
+        spreadsheet_id: "1BxN3M_pQaVc...",
+        spreadsheet_name: "Acme Sustainability KPIs 2026",
+        sheet_tab: "Emissions",
+        cell_range: "A1",
+      },
+      schedule: "daily",
+      next_run_at: "2026-08-02T01:00:00Z",
+      last_run_at: "2026-08-01T01:00:00Z",
+      last_status: "success",
+      last_rows_written: 168,
+      notify_on_failure: true,
+      enabled: true,
+      created_by: "diptu@ecolens.com",
+      created_at: "2026-07-20T10:35:00Z",
+    },
+    {
+      id: "exp-002",
+      name: "VIC1 Forecast — P10/P50/P90 (next 24h)",
+      data_source: "forecast_quantiles",
+      region: "VIC1",
+      period: "24h",
+      format: "raw",
+      destination: {
+        spreadsheet_id: "1BxN3M_pQaVc...",
+        spreadsheet_name: "Acme Sustainability KPIs 2026",
+        sheet_tab: "Forecast_VIC1",
+        cell_range: "A1",
+      },
+      schedule: "hourly",
+      next_run_at: "2026-08-01T20:00:00Z",
+      last_run_at: "2026-08-01T19:00:00Z",
+      last_status: "success",
+      last_rows_written: 48,
+      notify_on_failure: true,
+      enabled: true,
+      created_by: "diptu@ecolens.com",
+      created_at: "2026-07-25T14:22:00Z",
+    },
+    {
+      id: "exp-003",
+      name: "Carbon Intensity — All regions (monthly)",
+      data_source: "carbon_intensity",
+      region: "ALL",
+      period: "30d",
+      format: "pivot",
+      destination: {
+        spreadsheet_id: "1BxN3M_pQaVc...",
+        spreadsheet_name: "Acme Sustainability KPIs 2026",
+        sheet_tab: "Intensity_Monthly",
+        cell_range: "A1",
+      },
+      schedule: "weekly",
+      next_run_at: "2026-08-03T00:00:00Z",
+      last_run_at: "2026-07-27T00:00:00Z",
+      last_status: "failed",
+      last_rows_written: 0,
+      notify_on_failure: true,
+      enabled: true,
+      created_by: "diptu@ecolens.app",
+      created_at: "2026-07-15T09:00:00Z",
+    },
+    {
+      id: "exp-004",
+      name: "Anomalies (last 7d) — Ops review",
+      data_source: "anomalies",
+      region: "ALL",
+      period: "7d",
+      format: "raw",
+      destination: {
+        spreadsheet_id: "1CyO5L_qRbWd...",
+        spreadsheet_name: "Ops Anomaly Tracker",
+        sheet_tab: "Sheet1",
+        cell_range: "A1",
+      },
+      schedule: "manual",
+      last_run_at: "2026-07-30T11:15:00Z",
+      last_status: "success",
+      last_rows_written: 23,
+      notify_on_failure: false,
+      enabled: false,
+      created_by: "diptu@ecolens.com",
+      created_at: "2026-07-22T16:40:00Z",
+    },
+  ];
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// Export history (most-recent first)
+// ───────────────────────────────────────────────────────────────────────
+
+export interface ExportHistoryEntry {
+  id: string;
+  export_id: string;
+  export_name: string;
+  started_at: string;
+  finished_at: string;
+  duration_ms: number;
+  status: "success" | "failed" | "running" | "cancelled";
+  rows_written: number;
+  bytes_written: number;
+  destination: string;          // human-readable
+  error?: {
+    code: string;
+    message: string;
+    retryable: boolean;
+  };
+  trigger: "schedule" | "manual" | "retry";
+}
+
+export function getGoogleSheetHistory(): ExportHistoryEntry[] {
+  return [
+    {
+      id: "hist-2026-08-01-19-00",
+      export_id: "exp-002",
+      export_name: "VIC1 Forecast — P10/P50/P90 (next 24h)",
+      started_at: "2026-08-01T19:00:00Z",
+      finished_at: "2026-08-01T19:00:01.342Z",
+      duration_ms: 1342,
+      status: "success",
+      rows_written: 48,
+      bytes_written: 5420,
+      destination: "Acme Sustainability KPIs 2026 › Forecast_VIC1",
+      trigger: "schedule",
+    },
+    {
+      id: "hist-2026-08-01-01-00",
+      export_id: "exp-001",
+      export_name: "NEM Daily Emissions Summary",
+      started_at: "2026-08-01T01:00:00Z",
+      finished_at: "2026-08-01T01:00:08.221Z",
+      duration_ms: 8221,
+      status: "success",
+      rows_written: 168,
+      bytes_written: 18432,
+      destination: "Acme Sustainability KPIs 2026 › Emissions",
+      trigger: "schedule",
+    },
+    {
+      id: "hist-2026-07-31-19-00",
+      export_id: "exp-002",
+      export_name: "VIC1 Forecast — P10/P50/P90 (next 24h)",
+      started_at: "2026-07-31T19:00:00Z",
+      finished_at: "2026-07-31T19:00:01.298Z",
+      duration_ms: 1298,
+      status: "success",
+      rows_written: 48,
+      bytes_written: 5420,
+      destination: "Acme Sustainability KPIs 2026 › Forecast_VIC1",
+      trigger: "schedule",
+    },
+    {
+      id: "hist-2026-07-30-11-15",
+      export_id: "exp-004",
+      export_name: "Anomalies (last 7d) — Ops review",
+      started_at: "2026-07-30T11:15:00Z",
+      finished_at: "2026-07-30T11:15:00.872Z",
+      duration_ms: 872,
+      status: "success",
+      rows_written: 23,
+      bytes_written: 3120,
+      destination: "Ops Anomaly Tracker › Sheet1",
+      trigger: "manual",
+    },
+    {
+      id: "hist-2026-07-27-00-00",
+      export_id: "exp-003",
+      export_name: "Carbon Intensity — All regions (monthly)",
+      started_at: "2026-07-27T00:00:00Z",
+      finished_at: "2026-07-27T00:00:02.143Z",
+      duration_ms: 2143,
+      status: "failed",
+      rows_written: 0,
+      bytes_written: 0,
+      destination: "Acme Sustainability KPIs 2026 › Intensity_Monthly",
+      error: {
+        code: "permission_denied",
+        message: "The Google account no longer has edit access to this sheet. Reconnect or pick a new sheet.",
+        retryable: false,
+      },
+      trigger: "schedule",
+    },
   ];
 }

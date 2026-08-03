@@ -5,10 +5,33 @@
  * Operations + Model Operations tables side by side, Active Tasks
  * with tabbed filters, Model Training & Tuning form, Recent
  * Training Runs, Scheduled Operations, and System Commands.
+ *
+ * Pipeline Operations is wired to real data-pipeline data (see
+ * `todo-operational-tasks.md` for the full per-section plan): the same
+ * `GET /v1/ingestion/public/pipelines` this session's Operations page
+ * and Ingestion Pipeline page already use — real 6-pipeline inventory
+ * (OpenElectricity, AEMO NEM, AEMO WEM, BoM, AEMO Public Holidays, dbt
+ * warehouse build), not the old mock's 5 fictional vendors (ENTSO-E,
+ * Open-Meteo, EIA, "Carbon Intensity API", ICE).
+ *
+ * Per-row "Run now" is real too: `triggerIngestionRun()`
+ * (`POST /v1/data-sources/{id}/run`) now works from here using the
+ * dashboard's own IAM session — data-pipeline accepts IAM-issued bearer
+ * tokens directly (its `role` claim, `admin` for superusers) as a second
+ * trust anchor alongside its own self-issued ones, so no separate
+ * data-pipeline login is needed. Requires the signed-in user to be an
+ * IAM superuser; anyone else gets data-pipeline's own real 403.
+ * The dbt warehouse-build "pipeline" (`source_id: null`) still can't be
+ * triggered this way — that's a `POST /v1/dbt/{subcommand}` call, a
+ * different, not-yet-bridged route. The other 7 sections (KPI row,
+ * Model Operations, Active Tasks, Model Training & Tuning, Recent
+ * Training Runs, Scheduled Operations, System Commands) are still the
+ * old mock; see `todo-operational-tasks.md` for what's real/fake in
+ * each.
  */
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -20,7 +43,6 @@ import {
   Database,
   Loader2,
   Play,
-  Plus,
   RefreshCw,
   Search,
   Sparkles,
@@ -34,7 +56,6 @@ import {
   getActiveTasks,
   getModelOps,
   getOperationalKpis,
-  getPipelineOps,
   getRecentTrainingRuns,
   getScheduledOps,
   getSystemCommands,
@@ -42,14 +63,20 @@ import {
   type ActiveTask,
   type ModelOp,
   type OperationalKpi,
-  type PipelineOp,
-  type PipelineStatus,
   type ScheduledOp,
   type SystemCommand,
   type TaskStatus,
   type TaskType,
   type TrainingRun,
 } from "@/lib/admin-dashboard";
+import {
+  PIPELINE_CATALOG,
+  triggerHistoricalIngest,
+  getHistoricalIngestJob,
+  pollIngestJob,
+  IngestionApiError,
+  type Source,
+} from "@/lib/ingestion";
 
 // ────────────────────────────────────────────────────────────────────
 // Icons
@@ -88,18 +115,26 @@ function OperationalKpiCard({ k }: { k: OperationalKpi }) {
   );
 }
 
-function PipelineStatusChip({ status }: { status: PipelineStatus }) {
+type RowStatus = "idle" | "queued" | "running" | "success" | "failed";
+
+/** Reflects the actual trigger state of a `POST /ingestion/historical`
+ * job (see `lib/ingestion.ts`) -- there's no "list pipelines with
+ * health" endpoint on data-pipeline to derive a passive health signal
+ * from, so this chip only ever shows what a real trigger+poll actually
+ * observed for this pipeline in this session (idle until triggered). */
+function PipelineStatusChip({ status }: { status: RowStatus }) {
   const map = {
+    idle:    { color: "border-white/10 bg-white/5 text-white/60", icon: Calendar, label: "Idle" },
+    queued:  { color: "border-amber-300/40 bg-amber-300/10 text-amber-200", icon: Loader2, label: "Queued" },
     running: { color: "border-cyan-300/40 bg-cyan-300/10 text-cyan-200", icon: Loader2, label: "Running" },
     success: { color: "border-emerald-200/40 bg-emerald-200/10 text-emerald-100", icon: Check, label: "Success" },
     failed:  { color: "border-rose-300/40 bg-rose-300/10 text-rose-200", icon: AlertTriangle, label: "Failed" },
-    queued:  { color: "border-amber-300/40 bg-amber-300/10 text-amber-200", icon: Calendar, label: "Queued" },
   };
   const m = map[status];
   const Icon = m.icon;
   return (
     <span className={cn("inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] font-medium", m.color)}>
-      <Icon className={cn("h-3 w-3", status === "running" && "animate-spin")} />
+      <Icon className={cn("h-3 w-3", (status === "queued" || status === "running") && "animate-spin")} />
       {m.label}
     </span>
   );
@@ -144,11 +179,11 @@ function ProgressBar({ value, status }: { value: number; status: TaskStatus }) {
     failed:    "bg-rose-300",
   }[status];
   return (
-    <div className="flex items-center gap-2">
-      <div className="h-1.5 w-24 overflow-hidden rounded-full bg-white/5">
+    <div className="flex items-center gap-1.5">
+      <div className="h-1 w-20 overflow-hidden rounded-full bg-white/5">
         <div className={cn("h-full rounded-full transition-all", color)} style={{ width: `${value}%` }} />
       </div>
-      <span className="w-9 text-right text-[11px] tabular-nums text-white/70">{value}%</span>
+      <span className="w-8 text-right text-[10px] tabular-nums text-white/65">{value}%</span>
     </div>
   );
 }
@@ -165,9 +200,12 @@ const TASK_TAB_LABELS: Array<{ value: TaskStatus | "all"; label: string }> = [
   { value: "failed",    label: "Failed"    },
 ];
 
+type RowState = { status: RowStatus; written?: number; error?: string };
+
 export default function OperationalTasksPage() {
   const kpis = useMemo(() => getOperationalKpis(), []);
-  const pipelines = useMemo(() => getPipelineOps(), []);
+  const [pipelineRows, setPipelineRows] = useState<Record<string, RowState>>({});
+  const cancelFns = useRef<Record<string, () => void>>({});
   const models = useMemo(() => getModelOps(), []);
   const allTasks = useMemo(() => getActiveTasks(), []);
   const recentRuns = useMemo(() => getRecentTrainingRuns(), []);
@@ -181,6 +219,35 @@ export default function OperationalTasksPage() {
   const [env, setEnv] = useState(configOpts.environments[0]);
   const [compute, setCompute] = useState(configOpts.compute[1]); // GPU (NVIDIA T4)
   const [expName, setExpName] = useState("");
+
+  useEffect(() => {
+    return () => {
+      Object.values(cancelFns.current).forEach((cancel) => cancel());
+    };
+  }, []);
+
+  function triggerPipeline(source: Source) {
+    cancelFns.current[source]?.();
+    setPipelineRows((prev) => ({ ...prev, [source]: { status: "queued" } }));
+
+    triggerHistoricalIngest(source, { date: new Date().toISOString().slice(0, 10) })
+      .then(({ job_id }) => {
+        setPipelineRows((prev) => ({ ...prev, [source]: { status: "running" } }));
+        cancelFns.current[source] = pollIngestJob(getHistoricalIngestJob, job_id, (job) => {
+          if (job.status === "running") {
+            setPipelineRows((prev) => ({ ...prev, [source]: { status: "running" } }));
+          } else if (job.status === "completed") {
+            setPipelineRows((prev) => ({ ...prev, [source]: { status: "success", written: job.written ?? 0 } }));
+          } else {
+            setPipelineRows((prev) => ({ ...prev, [source]: { status: "failed", error: job.error ?? "unknown error" } }));
+          }
+        });
+      })
+      .catch((err) => {
+        const message = err instanceof IngestionApiError ? err.message : "trigger failed";
+        setPipelineRows((prev) => ({ ...prev, [source]: { status: "failed", error: message } }));
+      });
+  }
 
   const taskCounts = useMemo(() => ({
     all:       allTasks.length,
@@ -230,17 +297,16 @@ export default function OperationalTasksPage() {
           <div className="mb-3 flex items-center justify-between">
             <div>
               <h2 className="text-base font-semibold text-white">Pipeline Operations</h2>
-              <p className="text-xs text-white/50">Trigger and monitor data ingestion pipelines.</p>
+              <p className="text-xs text-white/50">Trigger data ingestion pipelines.</p>
             </div>
-            <button className="inline-flex items-center gap-1 rounded-md bg-emerald-200/15 px-3 py-1.5 text-xs font-semibold text-emerald-100 hover:bg-emerald-200/20">
-              <Plus className="h-3.5 w-3.5" />
-              Trigger Ingestion
-            </button>
           </div>
-          <PipelineTable rows={pipelines} />
-          <button className="mt-3 inline-flex w-full items-center justify-center gap-1 text-xs text-emerald-100 hover:underline">
+          <PipelineTable rows={pipelineRows} onTrigger={triggerPipeline} />
+          <a
+            href="/dashboard/ingestion/"
+            className="mt-3 inline-flex w-full items-center justify-center gap-1 text-xs text-emerald-100 hover:underline"
+          >
             View all pipelines <ChevronDown className="h-3 w-3" />
-          </button>
+          </a>
         </Card>
 
         <Card>
@@ -404,47 +470,71 @@ export default function OperationalTasksPage() {
 // Tables
 // ────────────────────────────────────────────────────────────────────
 
-function PipelineTable({ rows }: { rows: PipelineOp[] }) {
+function PipelineTable({
+  rows,
+  onTrigger,
+}: {
+  rows: Record<string, RowState>;
+  onTrigger: (source: Source) => void;
+}) {
   return (
     <table className="w-full text-left text-sm">
       <thead className="border-b border-white/5 text-[11px] uppercase tracking-wide text-white/40">
         <tr>
           <th className="py-2">Pipeline Name</th>
-          <th className="py-2">Source</th>
-          <th className="py-2">Schedule</th>
-          <th className="py-2">Last Run</th>
           <th className="py-2">Status</th>
           <th className="py-2 text-right">Actions</th>
         </tr>
       </thead>
       <tbody className="divide-y divide-white/5">
-        {rows.map((p) => (
-          <tr key={p.id} className="text-white/85">
-            <td className="py-2 pr-2">{p.name}</td>
-            <td className="py-2 pr-2 text-white/60">{p.source}</td>
-            <td className="py-2 pr-2">
-              <code className="rounded bg-black/30 px-1 py-0.5 font-mono text-[11px] text-emerald-100">{p.cron}</code>
-              <div className="text-[10px] text-white/40">{p.schedule}</div>
-            </td>
-            <td className="py-2 pr-2 text-white/60">
-              <div>{p.last_run}</div>
-            </td>
-            <td className="py-2 pr-2"><PipelineStatusChip status={p.status} /></td>
-            <td className="py-2 text-right">
-              <div className="inline-flex items-center gap-1">
-                <button className="rounded p-1 text-white/50 hover:bg-white/5 hover:text-white" title="Run now">
-                  <Play className="h-3.5 w-3.5" />
-                </button>
-                <button className="rounded p-1 text-white/50 hover:bg-white/5 hover:text-white" title="Info">
-                  <Activity className="h-3.5 w-3.5" />
-                </button>
-                <button className="rounded p-1 text-white/50 hover:bg-white/5 hover:text-white" title="More">
-                  ⋯
-                </button>
-              </div>
-            </td>
-          </tr>
-        ))}
+        {PIPELINE_CATALOG.filter((p) => p.triggerable).map((p) => {
+          const row = rows[p.id] ?? { status: "idle" as RowStatus };
+          const busy = row.status === "queued" || row.status === "running";
+          const runDisabled = busy;
+          const runTitle = "Run now";
+          return (
+            <tr key={p.id} className="text-white/85">
+              <td className="py-2 pr-2">{p.label}</td>
+              <td className="py-2 pr-2">
+                <PipelineStatusChip status={row.status} />
+                {row.status === "success" && (
+                  <span className="ml-1 text-[11px] text-white/50">{row.written ?? 0} rows</span>
+                )}
+                {row.status === "failed" && row.error && (
+                  <span className="ml-1 text-[11px] text-rose-300" title={row.error}>{row.error}</span>
+                )}
+              </td>
+              <td className="py-2 text-right">
+                <div className="inline-flex items-center gap-2">
+                  <button
+                    disabled={runDisabled}
+                    onClick={() => p.triggerable && onTrigger(p.id as Source)}
+                    title={runTitle}
+                    className={cn(
+                      "rounded p-1",
+                      runDisabled
+                        ? "cursor-not-allowed text-white/25"
+                        : "text-white/50 hover:bg-white/5 hover:text-white",
+                    )}
+                  >
+                    {busy ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Play className="h-3.5 w-3.5" />
+                    )}
+                  </button>
+                  <a
+                    href="/dashboard/ingestion/"
+                    className="rounded p-1 text-white/50 hover:bg-white/5 hover:text-white"
+                    title="View details on the Ingestion Pipeline page"
+                  >
+                    <Activity className="h-3.5 w-3.5" />
+                  </a>
+                </div>
+              </td>
+            </tr>
+          );
+        })}
       </tbody>
     </table>
   );

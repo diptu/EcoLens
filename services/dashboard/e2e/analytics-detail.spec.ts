@@ -7,13 +7,10 @@
  */
 import { test, expect } from "@playwright/test";
 
+import { loginAs } from "./_helpers/auth";
+
 test.beforeEach(async ({ page }) => {
-  // Sign in as admin
-  await page.goto("/login/");
-  await page.getByLabel(/Email or username/i).fill("diptu@ecolens.com");
-  await page.locator('input[name="password"]').fill("Hello123");
-  await page.getByTestId("login-submit").click();
-  await page.waitForURL(/\/dashboard\//, { timeout: 10000 });
+  await loginAs(page, "diptu");
   await page.goto("/dashboard/analytics/");
 });
 

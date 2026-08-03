@@ -1,0 +1,75 @@
+name: Ingest — AEMO (NEM + WEM)
+
+# Cadence per task.md: every 15 min for both. Run as a matrix so NEM and
+# WEM ingest in parallel and a failure in one doesn't block the other —
+# they're independent sources landing in independent tables.
+#
+# Requires secrets — see docs/runbooks/github-actions-secrets.md.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      lookback_minutes:
+        description: "Override the default lookback window (minutes)"
+        required: false
+        type: string
+
+concurrency:
+  group: ingest-aemo
+  cancel-in-progress: false
+
+env:
+  DATABASE_URL: ${{ secrets.DATABASE_URL }}
+  REDIS_URL: ${{ secrets.REDIS_URL }}
+  S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
+  S3_BUCKET: ${{ secrets.S3_BUCKET }}
+  S3_ACCESS_KEY: ${{ secrets.S3_ACCESS_KEY }}
+  S3_SECRET_KEY: ${{ secrets.S3_SECRET_KEY }}
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        source: [aemo-nem, aemo-wem]
+
+    steps:
+      - name: Verify required secrets are configured
+        run: |
+          missing=()
+          [ -z "$DATABASE_URL" ] && missing+=("DATABASE_URL")
+          [ -z "$REDIS_URL" ] && missing+=("REDIS_URL")
+          [ -z "$S3_ENDPOINT_URL" ] && missing+=("S3_ENDPOINT_URL")
+          [ -z "$S3_BUCKET" ] && missing+=("S3_BUCKET")
+          [ -z "$S3_ACCESS_KEY" ] && missing+=("S3_ACCESS_KEY")
+          [ -z "$S3_SECRET_KEY" ] && missing+=("S3_SECRET_KEY")
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing required repo secrets: ${missing[*]}. See docs/runbooks/github-actions-secrets.md."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Sync data-pipeline dependencies
+        run: uv sync --package data-pipeline
+
+      - name: Run ingest ${{ matrix.source }}
+        env:
+          TRIGGERED_BY: ${{ github.event_name == 'schedule' && 'schedule' || 'manual' }}
+        run: |
+          if [ -n "${{ github.event.inputs.lookback_minutes }}" ]; then
+            uv run --package data-pipeline ecolens-pipeline ingest ${{ matrix.source }} \
+              --lookback-minutes "${{ github.event.inputs.lookback_minutes }}" \
+              --triggered-by "$TRIGGERED_BY"
+          else
+            uv run --package data-pipeline ecolens-pipeline ingest ${{ matrix.source }} \
+              --triggered-by "$TRIGGERED_BY"
+          fi

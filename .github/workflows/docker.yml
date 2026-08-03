@@ -1,0 +1,81 @@
+name: Docker (data-pipeline + forecast-api)
+
+# Builds both real Dockerfiles (`infra/docker/{data-pipeline,forecast-
+# api}.Dockerfile`) on every push/PR so a broken image is caught before
+# merge; pushes to GHCR only on `main`/version tags. Uses the repo's
+# built-in `GITHUB_TOKEN` — no externally-provisioned registry
+# credentials needed, same "works out of the box on any fork" property
+# the ingest-*.yml workflows' `workflow_dispatch` inputs have. `web` has
+# no Dockerfile yet (see `docker-compose.yml`'s `web` service and
+# `TODO.md`'s Frontend section, 0% built) — this workflow builds the two
+# images that actually exist.
+
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*"]
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "infra/docker/data-pipeline.Dockerfile"
+      - "infra/docker/forecast-api.Dockerfile"
+      - "services/data-pipeline/**"
+      - "services/forecast-api/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/docker.yml"
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: data-pipeline
+            dockerfile: infra/docker/data-pipeline.Dockerfile
+          - image: forecast-api
+            dockerfile: infra/docker/forecast-api.Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image tags/labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.image }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=sha,prefix=
+
+      - name: Build (and push on main/tags)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}

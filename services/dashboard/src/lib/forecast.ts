@@ -21,8 +21,6 @@
  * decides whether to use this generator or call the real API.
  */
 
-import type { User } from "./auth";
-
 export type Region = "NSW1" | "QLD1" | "VIC1" | "SA1" | "TAS1" | "WEM";
 
 export const ALL_REGIONS: Region[] = ["NSW1", "QLD1", "VIC1", "SA1", "TAS1", "WEM"];
@@ -274,6 +272,3 @@ export function formatStepLabel(tsIso: string, stepIndex: number, total: number)
   }
   return "";
 }
-
-// Re-export for pages that already import the User type from auth
-export type { User };

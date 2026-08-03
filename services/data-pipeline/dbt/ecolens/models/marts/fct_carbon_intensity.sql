@@ -1,0 +1,24 @@
+-- Hourly, generation-weighted carbon intensity per region — distinct
+-- from fct_emissions_5min's row-level detail: this is the "time-weighted
+-- average intensity" README's Emissions model section describes the
+-- footprint calculator using, pre-aggregated so `/v1/footprint` doesn't
+-- have to re-weight raw 5-/30-min rows on every request. Table-materialized
+-- (dbt_project.yml).
+
+with detail as (
+    select * from {{ ref('int_carbon_intensity') }}
+)
+
+select
+    date_trunc('hour', ts) as hour,
+    network_code,
+    region,
+    sum(total_generation_mwh) as total_generation_mwh,
+    sum(total_emissions_kgco2e) as total_emissions_kgco2e,
+    case
+        when sum(total_generation_mwh) is null or sum(total_generation_mwh) = 0 then null
+        else sum(total_emissions_kgco2e) / sum(total_generation_mwh)
+    end as intensity_kgco2e_per_mwh,
+    max(factors_version) as factors_version
+from detail
+group by date_trunc('hour', ts), network_code, region

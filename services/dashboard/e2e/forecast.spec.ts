@@ -1,6 +1,7 @@
 /**
- * E2E tests for the new /dashboard/forecast page and the
- * ForecastPreview widget on /dashboard/executive.
+ * E2E tests for /dashboard/forecast (wired to forecast-api's real
+ * GET /v1/forecast + GET /v1/model) and the inline forecast preview
+ * widget on /dashboard/executive.
  */
 import { test, expect } from "@playwright/test";
 
@@ -9,18 +10,13 @@ test.describe("/dashboard/forecast", () => {
     await page.goto("/dashboard/forecast/");
   });
 
-  test("renders the page with a fan chart, KPI row, and source badge", async ({ page }) => {
+  test("renders the page with a fan chart and KPI row", async ({ page }) => {
     await expect(page.getByRole("heading", { name: "Demand Forecast" })).toBeVisible();
-    // Source badge
-    await expect(page.getByTestId("forecast-source")).toBeVisible();
-    await expect(page.getByTestId("forecast-source")).toContainText(/mock/i);
-    // Region tabs
-    for (const r of ["NSW1", "QLD1", "VIC1", "SA1", "TAS1", "WEM"]) {
+    // Region tabs (NEM aggregate + 6 NEM/WEM regions) -- no Horizon tabs
+    // anymore, since the real /v1/forecast endpoint always returns the
+    // model's own fixed native horizon, not an arbitrary requested one.
+    for (const r of ["NEM", "NSW1", "QLD1", "VIC1", "SA1", "TAS1", "WEM"]) {
       await expect(page.getByTestId(`region-${r}`)).toBeVisible();
-    }
-    // Horizon tabs
-    for (const h of [4, 48, 168]) {
-      await expect(page.getByTestId(`horizon-${h}`)).toBeVisible();
     }
     // Fan chart SVG (scoped to the fan-chart container)
     const chart = page.getByTestId("fan-chart");
@@ -28,28 +24,18 @@ test.describe("/dashboard/forecast", () => {
     await expect(chart.locator("svg")).toBeVisible();
   });
 
-  test("switching region re-renders the chart and changes the model info", async ({ page }) => {
-    // Default is NSW1
-    const nswButton = page.getByTestId("region-NSW1");
-    await expect(nswButton).toHaveAttribute("aria-selected", "true");
+  test("switching region re-renders the chart and endpoint snippet", async ({ page }) => {
+    // Default is NEM
+    const nemButton = page.getByTestId("region-NEM");
+    await expect(nemButton).toHaveAttribute("aria-selected", "true");
 
     // Switch to QLD1
     await page.getByTestId("region-QLD1").click();
     await expect(page.getByTestId("region-QLD1")).toHaveAttribute("aria-selected", "true");
-    await expect(page.getByTestId("region-NSW1")).toHaveAttribute("aria-selected", "false");
+    await expect(page.getByTestId("region-NEM")).toHaveAttribute("aria-selected", "false");
 
-    // The endpoint snippet should now show QLD1
-    await expect(page.getByText(/forecast\/QLD1/)).toBeVisible();
-  });
-
-  test("switching horizon re-renders the chart and updates the table count", async ({ page }) => {
-    // Default horizon is 48
-    await expect(page.getByTestId("horizon-48")).toHaveAttribute("aria-selected", "true");
-
-    // Switch to 168
-    await page.getByTestId("horizon-168").click();
-    await expect(page.getByTestId("horizon-168")).toHaveAttribute("aria-selected", "true");
-    await expect(page.getByText(/next 168 steps/i)).toBeVisible();
+    // The endpoint snippet should now show the QLD1 query param
+    await expect(page.getByText(/forecast\?region=QLD1/)).toBeVisible();
   });
 
   test("5 KPI cards are visible (peak, trough, mean, total, uncertainty)", async ({ page }) => {

@@ -1,38 +1,37 @@
 /**
  * Dashboard sidebar — persistent left nav with logo, items grouped
- * by section, a Premium upsell card at the bottom, and the small
- * brand/footer.
+ * by section, and the small brand/footer.
  *
  * Sticky on desktop (>= lg), drawer-style overlay on mobile.
  *
  * Active route is detected from `usePathname()` and highlighted
  * with a green border + lime text.
  *
- * Nav structure mirrors the ecoLens 15-page taxonomy:
- *   1. Login                          (auth)                    — outside sidebar
- *   2. Executive Dashboard            /dashboard/executive      — executives
- *   3. Operations Dashboard           /dashboard/operations     — data engineers
- *   4. Data Sources                   /dashboard/data-sources   — data engineers
- *   5. Ingestion Pipeline             /dashboard/ingestion      — data engineers
- *   6. Data Quality & Anomalies       /dashboard/data-quality   — data engineers
- *   7. Forecast Explorer              /dashboard/forecast       — analysts
- *   8. Carbon Intelligence            /dashboard/carbon         — sustainability
- *   9. Energy Analytics               /dashboard/analytics      — analysts
- *  10. Model Registry                 /dashboard/models         — ML engineers
- *  11. Model Training & Experiments   /dashboard/training       — ML engineers
- *  12. Operational Tasks              /dashboard/operational-tasks — platform eng
- *  13. System Health                  /dashboard/system-health  — platform eng
- *  14. Reports                        /dashboard/reports        — executives
- *  15. Settings & Users               /dashboard/settings       — administrators
+ * Nav structure mirrors the ecoLens page taxonomy (Settings & Users
+ * and Reports still exist as pages, just aren't linked from the
+ * sidebar nav):
+ *   1. Executive Dashboard            /dashboard/executive      — executives
+ *   2. Operations Dashboard           /dashboard/operations     — data engineers
+ *   3. Data Sources                   /dashboard/data-sources   — data engineers
+ *   4. Ingestion Pipeline             /dashboard/ingestion      — data engineers
+ *   5. Data Quality & Anomalies       /dashboard/data-quality   — data engineers
+ *   6. Forecast Explorer              /dashboard/forecast       — analysts
+ *   7. Carbon Intelligence            /dashboard/carbon         — sustainability
+ *   8. Energy Analytics               /dashboard/analytics      — analysts
+ *   9. Model Registry                 /dashboard/models         — ML engineers
+ *  10. Model Training & Experiments   /dashboard/training       — ML engineers
+ *  11. Operational Tasks              /dashboard/operational-tasks — platform eng
+ *  12. System Health                  /dashboard/system-health  — platform eng
+ *  13. Architecture                   /dashboard/architecture   — all users (about)
  */
 "use client";
 
 import { useState } from "react";
 import { AnimatePresence, m } from "framer-motion";
 import {
-  Activity, BarChart3, Beaker, Cpu, Database, FileText,
-  Gauge, Leaf, Menu, Server, Settings as SettingsIcon, Shield,
-  Sparkles, TrendingUp, Webhook, X, Zap,
+  Activity, BarChart3, Beaker, Cpu, Database,
+  Gauge, Leaf, Menu, Server, Shield,
+  TrendingUp, Webhook, Workflow, X, Zap,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -89,10 +88,9 @@ const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
     ],
   },
   {
-    label: "Account",
+    label: "About",
     items: [
-      { label: "Reports",          href: "/dashboard/reports",  icon: FileText },
-      { label: "Settings & Users", href: "/dashboard/settings", icon: SettingsIcon },
+      { label: "Architecture", href: "/dashboard/architecture", icon: Workflow },
     ],
   },
 ];
@@ -217,23 +215,6 @@ function SidebarBody({
         ))}
       </nav>
 
-      {/* Premium upsell */}
-      <div className="m-3 rounded-xl border border-emerald-200/20 bg-emerald-200/5 p-4">
-        <div className="flex items-center gap-1.5 text-sm font-semibold text-white">
-          Go Premium
-          <Sparkles className="h-3.5 w-3.5 text-emerald-100" />
-        </div>
-        <p className="mt-1 text-xs leading-relaxed text-white/60">
-          Unlock advanced insights, custom reports &amp; more.
-        </p>
-        <button
-          type="button"
-          className="mt-3 w-full rounded-md bg-lime-100 px-3 py-1.5 text-xs font-semibold text-black transition-colors hover:bg-lime-100"
-        >
-          Upgrade Now
-        </button>
-      </div>
-
       {/* Brand footer */}
       <div className="border-t border-white/5 px-5 py-4">
         <div className="flex items-center gap-2">
@@ -262,3 +243,4 @@ function MobileToggle({ onOpen }: { onOpen: () => void }) {
     </button>
   );
 }
+

@@ -23,7 +23,6 @@ import { cn } from "@/lib/utils";
 const NAV_LINKS: Array<{ label: string; href: string; hasMenu?: boolean }> = [
   { label: "Product",   href: "/product",   hasMenu: true },
   { label: "Solutions", href: "/solutions", hasMenu: true },
-  { label: "Pricing",   href: "/pricing" },
   { label: "Resources", href: "/resources", hasMenu: true },
   { label: "About",     href: "/about" },
 ];
@@ -95,17 +94,13 @@ export function Navbar() {
           ))}
         </nav>
 
-        {/* Desktop CTAs */}
+        {/* Desktop CTA */}
         <div className="hidden items-center gap-3 md:flex">
-          <Link
-            href="/login"
-            className="text-sm text-white/80 transition-colors hover:text-white"
-          >
-            Log in
+          <Link href="/dashboard/executive">
+            <MotionButton size="sm" iconAfter={<ArrowIcon />}>
+              Open Dashboard
+            </MotionButton>
           </Link>
-          <MotionButton size="sm" iconAfter={<ArrowIcon />}>
-            Get Started
-          </MotionButton>
         </div>
 
         {/* Mobile toggle */}
@@ -141,16 +136,11 @@ export function Navbar() {
                 </Link>
               ))}
               <div className="mt-2 flex flex-col gap-2 border-t border-white/5 pt-3">
-                <Link
-                  href="/login"
-                  className="rounded-md px-3 py-2 text-sm text-white/80"
-                  onClick={() => setMobileOpen(false)}
-                >
-                  Log in
+                <Link href="/dashboard/executive" onClick={() => setMobileOpen(false)}>
+                  <MotionButton size="sm" iconAfter={<ArrowIcon />}>
+                    Open Dashboard
+                  </MotionButton>
                 </Link>
-                <MotionButton size="sm" iconAfter={<ArrowIcon />}>
-                  Get Started
-                </MotionButton>
               </div>
             </div>
           </m.div>

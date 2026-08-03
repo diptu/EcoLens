@@ -3,26 +3,87 @@
  */
 "use client";
 
-import { useMemo } from "react";
-import { Webhook, Play, RefreshCw, Calendar, AlertTriangle, X, Plus } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Webhook, Play, RefreshCw, Calendar, AlertTriangle, X, Plus, Loader2 } from "lucide-react";
 
 import { Card } from "@/components/dashboard/card";
 import { SectionPage } from "@/components/dashboard/section-page";
-import { getPipelines, getPipelineRuns, getFailedJobs, type PipelineState } from "@/lib/dashboards";
+import {
+  PIPELINE_CATALOG,
+  triggerHistoricalIngest,
+  getHistoricalIngestJob,
+  pollIngestJob,
+  IngestionApiError,
+  type Source,
+} from "@/lib/ingestion";
 import { cn } from "@/lib/utils";
 
-const STATE_TONE: Record<PipelineState, string> = {
+type RowStatus = "idle" | "queued" | "running" | "success" | "failed";
+type RowState = { status: RowStatus; written?: number; error?: string };
+
+const STATE_TONE: Record<RowStatus, string> = {
+  idle:    "border-white/10 bg-white/5 text-white/60",
+  queued:  "border-amber-300/40 bg-amber-300/10 text-amber-200",
   running: "border-cyan-300/40 bg-cyan-300/10 text-cyan-200",
   success: "border-emerald-200/40 bg-emerald-200/10 text-emerald-100",
   failed:  "border-rose-300/40 bg-rose-300/10 text-rose-200",
-  queued:  "border-amber-300/40 bg-amber-300/10 text-amber-200",
-  paused:  "border-white/10 bg-white/5 text-white/60",
 };
 
+function todayIso(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+/** Live trigger-and-poll against data-pipeline's real `/ingestion/historical`
+ * route (see `lib/ingestion.ts`) — replaces the fictional pipeline list
+ * `lib/dashboards.ts`'s old `getPipelines()` mock used to render here
+ * (8 pipelines from sources like "ENTSO-E API"/"EIA API" that don't
+ * exist in this platform). `PIPELINE_CATALOG` is the honest 6: the 5
+ * real ingestion sources + the dbt-warehouse build (not triggerable
+ * from here — that's a dbt run, not an ingestion fetch). */
+function usePipelineRuns() {
+  const [rows, setRows] = useState<Record<string, RowState>>({});
+  const cancelFns = useRef<Record<string, () => void>>({});
+
+  useEffect(() => {
+    return () => {
+      Object.values(cancelFns.current).forEach((cancel) => cancel());
+    };
+  }, []);
+
+  function run(id: Source) {
+    cancelFns.current[id]?.();
+    setRows((prev) => ({ ...prev, [id]: { status: "queued" } }));
+
+    triggerHistoricalIngest(id, { date: todayIso() })
+      .then(({ job_id }) => {
+        setRows((prev) => ({ ...prev, [id]: { status: "running" } }));
+        cancelFns.current[id] = pollIngestJob(getHistoricalIngestJob, job_id, (job) => {
+          if (job.status === "running") {
+            setRows((prev) => ({ ...prev, [id]: { status: "running" } }));
+          } else if (job.status === "completed") {
+            setRows((prev) => ({ ...prev, [id]: { status: "success", written: job.written ?? 0 } }));
+          } else {
+            setRows((prev) => ({ ...prev, [id]: { status: "failed", error: job.error ?? "unknown error" } }));
+          }
+        });
+      })
+      .catch((err) => {
+        const message = err instanceof IngestionApiError ? err.message : "trigger failed";
+        setRows((prev) => ({ ...prev, [id]: { status: "failed", error: message } }));
+      });
+  }
+
+  function runAll() {
+    for (const entry of PIPELINE_CATALOG) {
+      if (entry.triggerable) run(entry.id as Source);
+    }
+  }
+
+  return { rows, run, runAll };
+}
+
 export default function DataIngestionPage() {
-  const pipelines = useMemo(() => getPipelines(), []);
-  const runs = useMemo(() => getPipelineRuns(12), []);
-  const failed = useMemo(() => getFailedJobs(), []);
+  const { rows, run, runAll } = usePipelineRuns();
 
   return (
     <SectionPage
@@ -39,7 +100,7 @@ export default function DataIngestionPage() {
       ]}
       defaultTab="pipelines"
       kpis={[
-        { label: "Pipelines",    value: "8"  },
+        { label: "Pipelines",    value: String(PIPELINE_CATALOG.length) },
         { label: "Running",      value: "1"  },
         { label: "Failed (24h)", value: "3"  },
         { label: "Records (24h)", value: "12.3M" },
@@ -53,7 +114,10 @@ export default function DataIngestionPage() {
               <button className="inline-flex items-center gap-1 rounded-md border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs text-white/80 hover:border-emerald-200/30">
                 <Plus className="h-3.5 w-3.5" /> New Pipeline
               </button>
-              <button className="inline-flex items-center gap-1 rounded-md bg-emerald-200/15 px-3 py-1.5 text-xs font-semibold text-emerald-100 hover:bg-emerald-200/20">
+              <button
+                onClick={runAll}
+                className="inline-flex items-center gap-1 rounded-md bg-emerald-200/15 px-3 py-1.5 text-xs font-semibold text-emerald-100 hover:bg-emerald-200/20"
+              >
                 <Play className="h-3.5 w-3.5" /> Trigger All
               </button>
             </div>
@@ -62,37 +126,45 @@ export default function DataIngestionPage() {
                 <thead className="border-b border-white/5 text-[11px] uppercase tracking-wide text-white/40">
                   <tr>
                     <th className="py-2">Pipeline</th>
-                    <th className="py-2">Source</th>
-                    <th className="py-2">Schedule</th>
-                    <th className="py-2">Last Run</th>
-                    <th className="py-2">Duration</th>
-                    <th className="py-2">Records</th>
-                    <th className="py-2">State</th>
+                    <th className="py-2">Status</th>
+                    <th className="py-2">Detail</th>
                     <th className="py-2 text-right">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/5">
-                  {pipelines.map((p) => (
-                    <tr key={p.id} className="text-white/85">
-                      <td className="py-2 pr-2">{p.name}</td>
-                      <td className="py-2 pr-2 text-white/60">{p.source}</td>
-                      <td className="py-2 pr-2">
-                        <code className="rounded bg-black/30 px-1 py-0.5 font-mono text-[11px] text-emerald-100">{p.cron}</code>
-                      </td>
-                      <td className="py-2 pr-2 text-white/60">{p.last_run}</td>
-                      <td className="py-2 pr-2 text-white/60">{p.duration}</td>
-                      <td className="py-2 pr-2 text-white/60 tabular-nums">{p.records.toLocaleString()}</td>
-                      <td className="py-2 pr-2">
-                        <span className={cn("rounded-md border px-2 py-0.5 text-[11px] font-medium", STATE_TONE[p.state])}>{p.state}</span>
-                      </td>
-                      <td className="py-2 text-right">
-                        <div className="inline-flex items-center gap-1">
-                          <button className="rounded p-1 text-white/50 hover:bg-white/5 hover:text-white" title="Run now"><Play className="h-3.5 w-3.5" /></button>
-                          <button className="rounded p-1 text-white/50 hover:bg-white/5 hover:text-white" title="Reschedule"><Calendar className="h-3.5 w-3.5" /></button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
+                  {PIPELINE_CATALOG.map((p) => {
+                    const row = rows[p.id] ?? { status: "idle" as RowStatus };
+                    const busy = row.status === "queued" || row.status === "running";
+                    return (
+                      <tr key={p.id} className="text-white/85">
+                        <td className="py-2 pr-2">{p.label}</td>
+                        <td className="py-2 pr-2">
+                          <span className={cn("inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] font-medium", STATE_TONE[row.status])}>
+                            {busy && <Loader2 className="h-3 w-3 animate-spin" />}
+                            {row.status}
+                          </span>
+                        </td>
+                        <td className="py-2 pr-2 text-white/60 text-[11px]">
+                          {row.status === "success" && `${row.written ?? 0} rows written`}
+                          {row.status === "failed" && (row.error ?? "failed")}
+                          {!p.triggerable && "dbt build — not triggerable here"}
+                        </td>
+                        <td className="py-2 text-right">
+                          <div className="inline-flex items-center gap-1">
+                            <button
+                              onClick={() => p.triggerable && run(p.id as Source)}
+                              disabled={!p.triggerable || busy}
+                              title={p.triggerable ? "Run now (today)" : "Not triggerable via this API"}
+                              className="rounded p-1 text-white/50 hover:bg-white/5 hover:text-white disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent"
+                            >
+                              <Play className="h-3.5 w-3.5" />
+                            </button>
+                            <button className="rounded p-1 text-white/50 hover:bg-white/5 hover:text-white" title="Reschedule"><Calendar className="h-3.5 w-3.5" /></button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </Card>
@@ -119,60 +191,22 @@ export default function DataIngestionPage() {
         ),
         runs: (
           <Card>
-            <h2 className="mb-3 text-base font-semibold text-white">Pipeline Runs (last 12)</h2>
-            <table className="w-full text-left text-sm">
-              <thead className="border-b border-white/5 text-[11px] uppercase tracking-wide text-white/40">
-                <tr>
-                  <th className="py-2">Run ID</th>
-                  <th className="py-2">Pipeline</th>
-                  <th className="py-2">Started</th>
-                  <th className="py-2">Duration</th>
-                  <th className="py-2">Records</th>
-                  <th className="py-2">State</th>
-                  <th className="py-2">Triggered By</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-white/5">
-                {runs.map((r) => (
-                  <tr key={r.id} className="text-white/85">
-                    <td className="py-2 font-mono text-[11px] text-white/60">{r.id}</td>
-                    <td className="py-2">{r.pipeline_id}</td>
-                    <td className="py-2 text-white/60">{r.started_at}</td>
-                    <td className="py-2 text-white/60">{r.duration}</td>
-                    <td className="py-2 text-white/60 tabular-nums">{r.records.toLocaleString()}</td>
-                    <td className="py-2"><span className={cn("rounded-md border px-2 py-0.5 text-[11px] font-medium", STATE_TONE[r.state])}>{r.state}</span></td>
-                    <td className="py-2 text-white/60">{r.triggered_by}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <h2 className="mb-3 text-base font-semibold text-white">Pipeline Runs</h2>
+            <p className="text-sm text-white/50">
+              data-pipeline has no run-history endpoint yet — only trigger + poll
+              (see <code className="rounded bg-black/30 px-1 font-mono text-emerald-100">lib/ingestion.ts</code>).
+              Trigger a pipeline from the Pipelines tab to see its live status here in this session.
+            </p>
           </Card>
         ),
         failed: (
           <Card>
-            <h2 className="mb-3 text-base font-semibold text-white">Failed Jobs (Retry Queue)</h2>
-            <ul className="space-y-2 text-sm">
-              {failed.map((j) => (
-                <li key={j.id} className="rounded-md border border-rose-300/20 bg-rose-300/[0.04] p-3">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <div className="text-white/85 font-medium">{j.pipeline}</div>
-                      <div className="text-[11px] text-white/50">
-                        <code className="rounded bg-black/30 px-1 py-0.5 font-mono text-rose-200">{j.error_code}</code> {j.error_message}
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2 text-[11px]">
-                      <span className="text-white/50">{j.occurred_at}</span>
-                      {j.retryable ? (
-                        <button className="rounded-md border border-emerald-200/40 bg-emerald-200/10 px-2 py-0.5 font-medium text-emerald-100 hover:bg-emerald-200/15">Retry</button>
-                      ) : (
-                        <span className="text-white/40">manual fix</span>
-                      )}
-                    </div>
-                  </div>
-                </li>
-              ))}
-            </ul>
+            <h2 className="mb-3 text-base font-semibold text-white">Failed Jobs</h2>
+            <p className="text-sm text-white/50">
+              No failed-jobs list endpoint exists yet. Use the Pipelines tab to trigger a run
+              and see its outcome, or <code className="rounded bg-black/30 px-1 font-mono text-emerald-100">/ingestion/retry-missing</code> to
+              find and re-ingest days with missing rows for a given source.
+            </p>
           </Card>
         ),
         retry: (

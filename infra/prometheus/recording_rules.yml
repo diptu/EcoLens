@@ -1,0 +1,78 @@
+# Recording rules (pre-aggregated for the Grafana dashboards under
+# infra/grafana/dashboards/) and alerting rules -- both live in one file
+# since docker-compose.yml only mounts this one path as `rule_files`.
+#
+# Metric names/labels match ecolens/observability/metrics.py exactly.
+# task.md's own monitoring checklist names the staleness metric
+# `ecolens_latest_ingest_ts_seconds` -- the real metric is
+# `ecolens_latest_ingest_timestamp_seconds`; this file uses the real one.
+
+groups:
+  - name: ecolens_ingest_recording_rules
+    interval: 1m
+    rules:
+      - record: ecolens:ingest_success_rate_24h
+        expr: >
+          sum(increase(ecolens_ingest_runs_total{outcome="success"}[24h])) by (source)
+          /
+          sum(increase(ecolens_ingest_runs_total[24h])) by (source)
+
+      - record: ecolens:ingest_seconds_since_last_success
+        expr: time() - ecolens_latest_ingest_timestamp_seconds
+
+  - name: ecolens_ingest_alerts
+    rules:
+      # Per-source staleness threshold = 2x the source's own cron cadence
+      # (task.md's own worked example: "> 900" for oe, whose cadence is
+      # 5 min -- 900s = 2x that). aemo-nem/aemo-wem run every 15 min (2x
+      # = 1800s), bom every 30 min (2x = 3600s). `holidays` is
+      # deliberately excluded -- it's an annual snapshot (task.md), not
+      # a continuous source, so "time since last success" isn't a
+      # staleness signal for it the way it is for the other 4.
+      - alert: IngestSourceStale
+        expr: >
+          (ecolens:ingest_seconds_since_last_success{source="openelectricity"} > 600)
+          or
+          (ecolens:ingest_seconds_since_last_success{source=~"aemo_nem|aemo_wem"} > 1800)
+          or
+          (ecolens:ingest_seconds_since_last_success{source="bom"} > 3600)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.source }} hasn't ingested successfully in a while"
+          description: >
+            {{ $labels.source }} last succeeded {{ $value | humanizeDuration }}
+            ago -- more than 2x its expected cron cadence. Check
+            `GET /v1/data-sources/{id}/health` and `meta._ingest_log` for
+            the failure reason (pipeline/tasks/task.md's recovery playbook).
+
+      - alert: IngestSuccessRateLow
+        expr: ecolens:ingest_success_rate_24h < 0.9
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.source }}'s 24h ingest success rate is below 90%"
+          description: >
+            {{ $labels.source }} has succeeded on only
+            {{ $value | humanizePercentage }} of runs in the last 24h.
+
+      - alert: CircuitBreakerOpen
+        expr: ecolens_circuit_breaker_state == 2
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.source }}'s circuit breaker is open"
+          description: >
+            {{ $labels.source }}'s circuit breaker tripped open after
+            repeated failures -- ingestion for this source is currently
+            being skipped rather than retried. See
+            pipeline/tasks/task.md's "Circuit breaker is open" playbook.
+
+      # No alert here for "warehouse-sync consumer is backlogged/down" --
+      # that would need a gauge of open `status='staged'` runs, which
+      # nothing exports yet (pipeline.warehouse_sync/mq.rabbitmq_client
+      # don't track queue depth as a metric). Flagged in TODO.md rather
+      # than shipping a weak proxy alert for it.

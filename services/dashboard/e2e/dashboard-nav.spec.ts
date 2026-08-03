@@ -92,6 +92,12 @@ test.describe("sidebar nav (desktop only)", () => {
     await page.waitForURL(/\/dashboard\/settings/);
   });
 
+  test("Settings -> Architecture (new About group)", async ({ page }) => {
+    await page.goto("/dashboard/settings");
+    await page.locator("aside").getByRole("link", { name: "Architecture", exact: true }).first().click();
+    await page.waitForURL(/\/dashboard\/architecture/);
+  });
+
   test("sidebar Operations link returns to /dashboard/operations", async ({ page }) => {
     await page.goto("/dashboard/forecast");
     await page.locator("aside").getByRole("link", { name: "Operations", exact: true }).first().click();

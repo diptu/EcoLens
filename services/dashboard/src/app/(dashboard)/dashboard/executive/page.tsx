@@ -5,7 +5,7 @@
  */
 "use client";
 
-import { useMemo, useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 import { m, AnimatePresence, useReducedMotion } from "framer-motion";
 import {
@@ -18,7 +18,17 @@ import {
   getExecutiveKpis, getEmissionsBySource, getExecutiveTrend,
   type ExecutiveKpi,
 } from "@/lib/dashboards";
+import {
+  fetchYtdEmissions, fetchCurrentEmissions, fetchEmissionsTimeseries,
+  fetchGenerationMix, fetchDemandSummary, fetchDemandForecast,
+  formatFuelType, fuelColor,
+} from "@/lib/emissions";
+import { fetchPublicDataQualitySummary } from "@/lib/data-quality";
 import type { EmissionsTrendPoint } from "@/lib/admin-dashboard";
+
+function formatHourLabel(iso: string): string {
+  return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
 
 function KpiCard({ k }: { k: ExecutiveKpi }) {
   const isGood = (k.trend === k.good_when) || (k.trend === "flat");
@@ -34,19 +44,193 @@ function KpiCard({ k }: { k: ExecutiveKpi }) {
         <span className="text-2xl font-bold text-white">{k.value}</span>
         {k.unit && <span className="text-xs text-white/50">{k.unit}</span>}
       </div>
-      <div className={cn("mt-1 flex items-center gap-1 text-xs", isGood ? "text-emerald-100" : "text-rose-200")}>
-        {k.trend === "up" ? <ArrowUpRight className="h-3 w-3" /> : k.trend === "down" ? <ArrowDownRight className="h-3 w-3" /> : null}
-        <span>{Math.abs(k.delta_pct).toFixed(1)}%</span>
-        <span className="text-white/40">vs last period</span>
-      </div>
+      {k.delta_pct !== null && (
+        <div className={cn("mt-1 flex items-center gap-1 text-xs", isGood ? "text-emerald-100" : "text-rose-200")}>
+          {k.trend === "up" ? <ArrowUpRight className="h-3 w-3" /> : k.trend === "down" ? <ArrowDownRight className="h-3 w-3" /> : null}
+          <span>{Math.abs(k.delta_pct).toFixed(1)}%</span>
+          <span className="text-white/40">vs last period</span>
+        </div>
+      )}
     </m.div>
   );
 }
 
+const MOCK_FORECAST_PREVIEW = {
+  current: 6840,
+  peak: 8920,
+  min: 4120,
+  sparkline: [6800, 7200, 7600, 8200, 8920, 8500, 7400, 5800],
+  labels: ["now", "+30m", "+1h", "+1h30", "+2h", "+2h30", "+3h", "+4h"],
+  horizonLabel: "next 4 hours",
+};
+
+const MOCK_EMISSIONS_SNAPSHOT = {
+  totalTco2e: 1284,
+  gridIntensity: 612,
+  renewablePct: 38.6,
+  sparkline: [52, 48, 55, 62, 58, 50, 45, 51, 49, 53, 47, 56, 60, 55, 50, 44, 48, 52, 58, 62, 58, 53, 50, 49],
+  labels: ["00h", "02h", "04h", "06h", "08h", "10h", "12h", "14h", "16h", "18h", "20h", "22h", "24h", "", "", "", "", "", "", "", "", "", "", "", ""],
+};
+
 export default function ExecutiveDashboardPage() {
-  const kpis = useMemo(() => getExecutiveKpis(), []);
-  const source = useMemo(() => getEmissionsBySource(), []);
-  const trend = useMemo(() => getExecutiveTrend(), []);
+  const [kpis, setKpis] = useState<ExecutiveKpi[]>(() => getExecutiveKpis());
+  const [source, setSource] = useState(() => getEmissionsBySource());
+  const [sourceTotal, setSourceTotal] = useState("125,340");
+  const [sourceHeading, setSourceHeading] = useState("Emissions by Source");
+  const [trend, setTrend] = useState<EmissionsTrendPoint[]>(() => getExecutiveTrend());
+  const [forecastPreview, setForecastPreview] = useState(MOCK_FORECAST_PREVIEW);
+  const [emissionsSnapshot, setEmissionsSnapshot] = useState(MOCK_EMISSIONS_SNAPSHOT);
+
+  // Every fetch below hits a real backend endpoint (forecast-api, plus
+  // data-pipeline's one unauthenticated data-quality summary). Each is
+  // independent and fails soft -- if the backend is unreachable (e.g.
+  // not running in dev, or during a static e2e preview with no backend
+  // at all) the mock placeholder for that section stays put instead of
+  // showing a broken card. "Data Quality Score"/"Open Risks" are real
+  // ingestion/data-quality signals, not sustainability-regulatory
+  // compliance or a risk register -- no such domain exists anywhere in
+  // this platform, so those numbers are the closest honest substitute,
+  // not what the KPI's old "Compliance Score" label implied. See
+  // TODO.md's Frontend TODO.
+  useEffect(() => {
+    let cancelled = false;
+
+    fetchYtdEmissions()
+      .then((ytd) => {
+        if (cancelled || ytd.total_emissions_tco2e == null) return;
+        setKpis((prev) =>
+          prev.map((k) =>
+            k.label === "Total CO₂e (YTD)"
+              ? { ...k, value: Math.round(ytd.total_emissions_tco2e!).toLocaleString() }
+              : k,
+          ),
+        );
+      })
+      .catch(() => {});
+
+    fetchCurrentEmissions()
+      .then((current) => {
+        if (cancelled || current.intensity_kgco2e_per_mwh == null) return;
+        // kgCO2e/MWh and gCO2e/kWh are the same number (both ratios of
+        // 1000:1 units) -- no conversion needed, just a different label.
+        setKpis((prev) =>
+          prev.map((k) =>
+            k.label === "Carbon Intensity"
+              ? { ...k, value: Math.round(current.intensity_kgco2e_per_mwh!).toLocaleString() }
+              : k,
+          ),
+        );
+      })
+      .catch(() => {});
+
+    fetchDemandSummary()
+      .then((summary) => {
+        if (cancelled) return;
+        setKpis((prev) =>
+          prev.map((k) => {
+            if (k.label === "Renewable Share" && summary.renewable_share_pct != null) {
+              return { ...k, value: summary.renewable_share_pct.toFixed(1) };
+            }
+            if (k.label === "Avg Wholesale Price (YTD)" && summary.avg_price_mwh != null) {
+              return { ...k, value: `$${summary.avg_price_mwh.toFixed(2)}` };
+            }
+            return k;
+          }),
+        );
+      })
+      .catch(() => {});
+
+    fetchPublicDataQualitySummary()
+      .then((dq) => {
+        if (cancelled) return;
+        setKpis((prev) =>
+          prev.map((k) => {
+            if (k.label === "Data Quality Score" && dq.data_quality_score_pct != null) {
+              return { ...k, value: dq.data_quality_score_pct.toFixed(1) };
+            }
+            if (k.label === "Open Risks") {
+              return { ...k, value: dq.open_risks_high_plus.toLocaleString() };
+            }
+            return k;
+          }),
+        );
+      })
+      .catch(() => {});
+
+    fetchGenerationMix()
+      .then((mix) => {
+        if (cancelled || mix.items.length === 0) return;
+        setSource(
+          mix.items.map((item) => ({
+            name: formatFuelType(item.fuel_type),
+            pct: mix.total_emissions_kgco2e
+              ? (item.total_emissions_kgco2e / mix.total_emissions_kgco2e) * 100
+              : 0,
+            tco2e: Math.round(item.total_emissions_kgco2e / 1000),
+            color: fuelColor(item.fuel_type),
+          })),
+        );
+        setSourceTotal(Math.round(mix.total_emissions_kgco2e / 1000).toLocaleString());
+        setSourceHeading("Grid Electricity by Fuel Type");
+      })
+      .catch(() => {});
+
+    fetchEmissionsTimeseries("day", 8)
+      .then((series) => {
+        if (cancelled || series.points.length === 0) return;
+        // Every point here is a measured historical fact, not a
+        // projection -- there's no real day-level forecast to show a
+        // P10-P90 band against (the model's own horizon tops out at
+        // ~24h), so the band collapses to the actual value rather than
+        // fabricate an uncertainty range that doesn't exist.
+        setTrend(
+          series.points.map((p) => {
+            const actual = Math.round((p.total_emissions_kgco2e ?? 0) / 1000);
+            return {
+              date: p.bucket.slice(0, 10),
+              actual,
+              forecast_p10: actual,
+              forecast_p50: actual,
+              forecast_p90: actual,
+            };
+          }),
+        );
+      })
+      .catch(() => {});
+
+    fetchEmissionsTimeseries("hour", 1)
+      .then((series) => {
+        if (cancelled || series.points.length === 0) return;
+        setEmissionsSnapshot((prev) => ({
+          ...prev,
+          totalTco2e: Math.round(
+            series.points.reduce((sum, p) => sum + (p.total_emissions_kgco2e ?? 0), 0) / 1000,
+          ),
+          sparkline: series.points.map((p) => Math.round((p.total_emissions_kgco2e ?? 0) / 1000)),
+          labels: series.points.map((p) => formatHourLabel(p.bucket)),
+        }));
+      })
+      .catch(() => {});
+
+    fetchDemandForecast("NEM")
+      .then((forecast) => {
+        if (cancelled || forecast.points.length === 0) return;
+        const p50s = forecast.points.map((p) => p.p50);
+        setForecastPreview({
+          current: Math.round(p50s[0]),
+          peak: Math.round(Math.max(...p50s)),
+          min: Math.round(Math.min(...p50s)),
+          sparkline: p50s,
+          labels: forecast.points.map((p) => formatHourLabel(p.ts)),
+          horizonLabel: `next ${forecast.horizon}`,
+        });
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   return (
     <div className="space-y-6">
@@ -74,20 +258,20 @@ export default function ExecutiveDashboardPage() {
           <div className="mb-3 flex items-center justify-between">
             <div>
               <h2 className="text-base font-semibold text-white">Demand Forecast Preview</h2>
-              <p className="text-xs text-white/50">next 4 hours · P10 / P50 / P90</p>
+              <p className="text-xs text-white/50">{forecastPreview.horizonLabel} · P10 / P50 / P90</p>
             </div>
             <Link href="/dashboard/forecast/" className="inline-flex items-center gap-1 text-xs text-emerald-100 hover:underline" data-testid="forecast-preview-link">
               View full forecast →
             </Link>
           </div>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-            <KpiMini label="Current (P50)" value="6,840 MW" />
-            <KpiMini label="Peak in next 4h" value="8,920 MW" />
-            <KpiMini label="Min in next 4h" value="4,120 MW" />
+            <KpiMini label="Current (P50)" value={`${forecastPreview.current.toLocaleString()} MW`} />
+            <KpiMini label="Peak in next 4h" value={`${forecastPreview.peak.toLocaleString()} MW`} />
+            <KpiMini label="Min in next 4h" value={`${forecastPreview.min.toLocaleString()} MW`} />
           </div>
           <Sparkline
-            data={[6800, 7200, 7600, 8200, 8920, 8500, 7400, 5800]}
-            labels={["now", "+30m", "+1h", "+1h30", "+2h", "+2h30", "+3h", "+4h"]}
+            data={forecastPreview.sparkline}
+            labels={forecastPreview.labels}
             unit="MW"
             strokeColor="#34d399"
             testId="forecast-sparkline"
@@ -101,20 +285,20 @@ export default function ExecutiveDashboardPage() {
           <div className="mb-3 flex items-center justify-between">
             <div>
               <h2 className="text-base font-semibold text-white">Emissions Snapshot</h2>
-              <p className="text-xs text-white/50">last 24h · Scope 1+2+3</p>
+              <p className="text-xs text-white/50">last 24h · Scope 2 (grid)</p>
             </div>
             <Link href="/dashboard/carbon/" className="inline-flex items-center gap-1 text-xs text-emerald-100 hover:underline" data-testid="emissions-preview-link">
               View details →
             </Link>
           </div>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-            <KpiMini label="Total (Scope 2)" value="1,284 tCO₂e" />
-            <KpiMini label="Grid intensity" value="612 g/kWh" />
-            <KpiMini label="Renewable %" value="38.6%" />
+            <KpiMini label="Total (Scope 2)" value={`${emissionsSnapshot.totalTco2e.toLocaleString()} tCO₂e`} />
+            <KpiMini label="Grid intensity" value={`${Math.round(emissionsSnapshot.gridIntensity).toLocaleString()} g/kWh`} />
+            <KpiMini label="Renewable %" value={`${emissionsSnapshot.renewablePct.toFixed(1)}%`} />
           </div>
           <Sparkline
-            data={[52, 48, 55, 62, 58, 50, 45, 51, 49, 53, 47, 56, 60, 55, 50, 44, 48, 52, 58, 62, 58, 53, 50, 49]}
-            labels={["00h", "02h", "04h", "06h", "08h", "10h", "12h", "14h", "16h", "18h", "20h", "22h", "24h", "", "", "", "", "", "", "", "", "", "", "", ""]}
+            data={emissionsSnapshot.sparkline}
+            labels={emissionsSnapshot.labels}
             unit="tCO₂e/h"
             strokeColor="#34d399"
             testId="emissions-sparkline"
@@ -128,23 +312,20 @@ export default function ExecutiveDashboardPage() {
           <div className="mb-3 flex items-center justify-between">
             <div>
               <h2 className="text-base font-semibold text-white">Emissions Trend</h2>
-              <p className="text-xs text-white/50">8-day rolling tCO₂e (actual + P10-P90)</p>
+              <p className="text-xs text-white/50">8-day rolling tCO₂e, actual</p>
             </div>
           </div>
           <div className="mb-3 flex items-center gap-4 text-xs text-white/60">
             <span className="inline-flex items-center gap-1.5">
               <span className="h-1.5 w-3 rounded-full bg-emerald-300" /> Actual
             </span>
-            <span className="inline-flex items-center gap-1.5">
-              <span className="h-1.5 w-3 rounded-full border border-dashed border-emerald-100/50" /> P10-P90
-            </span>
           </div>
           <MiniChart data={trend} />
         </Card>
 
         <Card>
-          <h2 className="mb-3 text-base font-semibold text-white">Emissions by Source</h2>
-          <DonutSimple slices={source} total="125,340" unit="tCO₂e" />
+          <h2 className="mb-3 text-base font-semibold text-white">{sourceHeading}</h2>
+          <DonutSimple slices={source} total={sourceTotal} unit="tCO₂e" />
         </Card>
       </div>
     </div>

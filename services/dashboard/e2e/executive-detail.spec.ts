@@ -7,13 +7,10 @@
  */
 import { test, expect } from "@playwright/test";
 
+import { loginAs } from "./_helpers/auth";
+
 test.beforeEach(async ({ page }) => {
-  // Sign in as admin
-  await page.goto("/login/");
-  await page.getByLabel(/Email or username/i).fill("diptu@ecolens.com");
-  await page.locator('input[name="password"]').fill("Hello123");
-  await page.getByTestId("login-submit").click();
-  await page.waitForURL(/\/dashboard\//, { timeout: 10000 });
+  await loginAs(page, "diptu");
   await page.goto("/dashboard/executive/");
   await expect(page.getByRole("heading", { name: "Executive Dashboard" })).toBeVisible();
 });
@@ -89,7 +86,7 @@ test("executive page has View details link to carbon", async ({ page }) => {
 
 test("executive page shows 6 KPIs", async ({ page }) => {
   // The 6 KPI cards each have an uppercase label
-  const kpiLabels = ["Total CO₂e (YTD)", "Carbon Intensity", "Renewable Share", "Cost Savings", "Compliance Score", "Open Risks"];
+  const kpiLabels = ["Total CO₂e (YTD)", "Carbon Intensity", "Renewable Share", "Avg Wholesale Price (YTD)", "Data Quality Score", "Open Risks"];
   for (const label of kpiLabels) {
     await expect(page.getByText(label).first()).toBeVisible();
   }

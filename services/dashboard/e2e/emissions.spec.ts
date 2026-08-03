@@ -9,10 +9,9 @@ test.describe("/dashboard/carbon", () => {
     await page.goto("/dashboard/carbon/");
   });
 
-  test("renders the page with KPIs, fuel donut, and source badge", async ({ page }) => {
+  test("renders the page with KPIs, fuel donut, and methodology link", async ({ page }) => {
     await expect(page.getByRole("heading", { name: "Emissions", exact: true })).toBeVisible();
-    await expect(page.getByTestId("emissions-source")).toBeVisible();
-    await expect(page.getByTestId("emissions-source")).toContainText(/mock/i);
+    await expect(page.getByTestId("carbon-methodology-link")).toBeVisible();
 
     // Period tabs
     for (const p of ["24h", "7d", "30d", "90d", "365d"]) {
@@ -57,10 +56,12 @@ test.describe("/dashboard/carbon", () => {
     const toggle = page.getByTestId("methodology-toggle");
     await expect(toggle).toBeVisible();
     await toggle.click();
-    // After expanding, "Emission factors used" should be visible
-    await expect(page.getByText("Emission factors used", { exact: true })).toBeVisible();
-    // And one of the factors
-    await expect(page.getByText("coal_brown_mw", { exact: true })).toBeVisible();
+    // After expanding, the real (computed, not static) factor table heading
+    // should be visible.
+    await expect(
+      page.getByText("Effective emission factors this period", { exact: true }),
+    ).toBeVisible();
+    await expect(page.getByText("Data sources", { exact: true })).toBeVisible();
   });
 });
 

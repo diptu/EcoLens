@@ -21,7 +21,6 @@ import {
   getIngestionStatus,
   getModelOps,
   getOperationalKpis,
-  getPipelineOps,
   getRecentAlerts,
   getRecentReports,
   getRecentTrainingRuns,
@@ -30,7 +29,6 @@ import {
   getSystemCommands,
   getTrainingConfigOptions,
   getUpcomingDeadlines,
-  type PipelineStatus,
   type TaskStatus,
   type ComplianceStatus,
   type AlertLevel,
@@ -94,17 +92,6 @@ describe("admin-dashboard — shape & invariants", () => {
     expect(s.success).toBeGreaterThan(0);
     expect(s.failed).toBeGreaterThanOrEqual(0);
     expect(s.pending).toBeGreaterThanOrEqual(0);
-  });
-
-  it("getPipelineOps has 5 pipelines with valid cron & status", () => {
-    const pipes = getPipelineOps();
-    expect(pipes).toHaveLength(5);
-    const validStatuses: PipelineStatus[] = ["running", "success", "failed", "queued"];
-    for (const p of pipes) {
-      expect(validStatuses).toContain(p.status);
-      expect(p.cron).toMatch(/^[\d*/ ,]+$/); // basic cron shape
-      expect(p.last_run).toBeTruthy();
-    }
   });
 
   it("getModelOps has 5 models with performance metrics", () => {

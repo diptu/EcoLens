@@ -15,7 +15,7 @@ logic so it's unit-testable without a subprocess.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from sqlalchemy import text
 
@@ -62,6 +62,14 @@ async def already_succeeded(source: str, day: date) -> bool:
         return result.first() is not None
 
 
+#  aemo-nem/aemo-wem have a real historical fetch keyed on an actual
+# date range (see ingest_aemo_nem/wem's `_fetch_historical_range`) --
+# route those two through `start`/`end` instead of `lookback_minutes`,
+# which is always "last N minutes from *now*" and structurally can't
+# target a specific past day no matter how many days this loops over.
+_DATE_RANGE_SOURCES: tuple[str, ...] = ("aemo-nem", "aemo-wem")
+
+
 async def backfill_day(
     key: str, day: date, lookback_minutes: int = DEFAULT_LOOKBACK_MINUTES
 ) -> str:
@@ -75,9 +83,18 @@ async def backfill_day(
         return "skipped"
 
     try:
-        rows = await run_source(
-            key, triggered_by="backfill", lookback_minutes=lookback_minutes
-        )
+        if key in _DATE_RANGE_SOURCES:
+            day_start = datetime(day.year, day.month, day.day, tzinfo=UTC)
+            rows = await run_source(
+                key,
+                triggered_by="backfill",
+                start=day_start,
+                end=day_start + timedelta(days=1),
+            )
+        else:
+            rows = await run_source(
+                key, triggered_by="backfill", lookback_minutes=lookback_minutes
+            )
     except Exception as exc:
         log.error("backfill.day_failed", source=key, day=str(day), error=str(exc))
         return f"failed: {exc}"

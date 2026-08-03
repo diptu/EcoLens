@@ -41,6 +41,9 @@ import aio_pika
 from aio_pika.abc import AbstractRobustConnection
 
 from app.core.config import get_settings
+from app.core.logging import get_logger
+
+log = get_logger(__name__)
 
 _connection: AbstractRobustConnection | None = None
 _connection_lock = asyncio.Lock()
@@ -105,6 +108,18 @@ async def consume_landed_events(
     artifact for a manual retry, same role `pipeline/tasks/task.md`'s old
     S3-replay playbook served.
 
+    `message.process()` deliberately re-raises after nacking (so the
+    caller — `handler`, which already recorded `sync_failed` — can't
+    accidentally have its exception silently swallowed at that layer).
+    That re-raise has to be caught *here*, one level up, or it escapes
+    this `async for` and kills the whole consumer process on the very
+    next bad message — confirmed the hard way: a single `sync_failed`
+    (e.g. a staged DuckDB file that's already been cleaned up) used to
+    take the entire worker down, leaving every message behind it in the
+    queue unprocessed until someone noticed and manually restarted it.
+    One bad message must never stop the rest of the queue from being
+    consumed.
+
     `prefetch_count=1` — one in-flight sync at a time, so a slow Postgres
     load doesn't let a backlog of messages pile up unacked in memory.
     """
@@ -116,9 +131,15 @@ async def consume_landed_events(
 
     async with queue.iterator() as queue_iter:
         async for message in queue_iter:
-            async with message.process(requeue=False):
-                payload = json.loads(message.body)
-                await handler(payload)
+            try:
+                async with message.process(requeue=False):
+                    payload = json.loads(message.body)
+                    await handler(payload)
+            except Exception as exc:  # noqa: BLE001 - one bad message must not kill the consumer
+                log.error(
+                    "warehouse_sync.message_handling_failed",
+                    error=str(exc),
+                )
 
 
 async def _declare_training_trigger_topology(

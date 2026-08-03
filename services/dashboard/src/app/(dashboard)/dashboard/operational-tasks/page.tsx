@@ -15,19 +15,24 @@
  * Open-Meteo, EIA, "Carbon Intensity API", ICE).
  *
  * Per-row "Run now" is real too: `triggerIngestionRun()`
- * (`POST /v1/data-sources/{id}/run`) now works from here using the
- * dashboard's own IAM session — data-pipeline accepts IAM-issued bearer
- * tokens directly (its `role` claim, `admin` for superusers) as a second
- * trust anchor alongside its own self-issued ones, so no separate
- * data-pipeline login is needed. Requires the signed-in user to be an
- * IAM superuser; anyone else gets data-pipeline's own real 403.
- * The dbt warehouse-build "pipeline" (`source_id: null`) still can't be
- * triggered this way — that's a `POST /v1/dbt/{subcommand}` call, a
- * different, not-yet-bridged route. The other 7 sections (KPI row,
- * Model Operations, Active Tasks, Model Training & Tuning, Recent
- * Training Runs, Scheduled Operations, System Commands) are still the
- * old mock; see `todo-operational-tasks.md` for what's real/fake in
- * each.
+ * (`POST /v1/data-sources/{id}/run`) — deliberately open, no auth
+ * required (this platform has no sign-in at all; see `lib/ingestion.ts`'s
+ * module docstring). The dbt warehouse-build "pipeline" (`source_id:
+ * null`) still can't be triggered this way — that's a
+ * `POST /v1/dbt/{subcommand}` call, a different, not-yet-bridged route.
+ *
+ * AEMO NEM/WEM additionally get a "Backfill" action
+ * (`triggerBackfill()`, `POST /v1/data-sources/{id}/backfill`) with a
+ * month/year picker — real historical data for the whole selected
+ * month, not the 30-min-lookback "Run now" gets. Only these two:
+ * `PIPELINE_CATALOG[].backfillable` is `false` for the other 3 sources
+ * because their backfill path isn't actually date-anchored yet (see
+ * that flag's own docstring in `lib/ingestion.ts`).
+ *
+ * The other 7 sections (KPI row, Model Operations, Active Tasks, Model
+ * Training & Tuning, Recent Training Runs, Scheduled Operations, System
+ * Commands) are still the old mock; see `todo-operational-tasks.md` for
+ * what's real/fake in each.
  */
 "use client";
 
@@ -71,11 +76,15 @@ import {
 } from "@/lib/admin-dashboard";
 import {
   PIPELINE_CATALOG,
-  triggerHistoricalIngest,
-  getHistoricalIngestJob,
-  pollIngestJob,
-  IngestionApiError,
-  type Source,
+  triggerIngestionRun,
+  pollLatestRun,
+  triggerBackfill,
+  pollBackfillSummary,
+  monthToRange,
+  TriggerIngestionError,
+  type RunStatus,
+  type BackfillTrigger,
+  type BackfillProgress,
 } from "@/lib/ingestion";
 
 // ────────────────────────────────────────────────────────────────────
@@ -115,26 +124,30 @@ function OperationalKpiCard({ k }: { k: OperationalKpi }) {
   );
 }
 
-type RowStatus = "idle" | "queued" | "running" | "success" | "failed";
+type RowStatus = "idle" | RunStatus;
 
-/** Reflects the actual trigger state of a `POST /ingestion/historical`
- * job (see `lib/ingestion.ts`) -- there's no "list pipelines with
- * health" endpoint on data-pipeline to derive a passive health signal
- * from, so this chip only ever shows what a real trigger+poll actually
- * observed for this pipeline in this session (idle until triggered). */
+/** Reflects the actual trigger state of a real `POST /v1/data-sources/
+ * {id}/run` (see `lib/ingestion.ts`'s module docstring — deliberately
+ * open, no auth required) -- there's no "list pipelines with health"
+ * endpoint used here, so this chip only ever shows what a real
+ * trigger+poll actually observed for this pipeline in this session
+ * (idle until triggered). */
 function PipelineStatusChip({ status }: { status: RowStatus }) {
   const map = {
-    idle:    { color: "border-white/10 bg-white/5 text-white/60", icon: Calendar, label: "Idle" },
-    queued:  { color: "border-amber-300/40 bg-amber-300/10 text-amber-200", icon: Loader2, label: "Queued" },
-    running: { color: "border-cyan-300/40 bg-cyan-300/10 text-cyan-200", icon: Loader2, label: "Running" },
-    success: { color: "border-emerald-200/40 bg-emerald-200/10 text-emerald-100", icon: Check, label: "Success" },
-    failed:  { color: "border-rose-300/40 bg-rose-300/10 text-rose-200", icon: AlertTriangle, label: "Failed" },
+    idle:        { color: "border-white/10 bg-white/5 text-white/60", icon: Calendar, label: "Idle" },
+    queued:      { color: "border-amber-300/40 bg-amber-300/10 text-amber-200", icon: Loader2, label: "Queued" },
+    running:     { color: "border-cyan-300/40 bg-cyan-300/10 text-cyan-200", icon: Loader2, label: "Running" },
+    staged:      { color: "border-sky-300/40 bg-sky-300/10 text-sky-200", icon: Loader2, label: "Staged" },
+    success:     { color: "border-emerald-200/40 bg-emerald-200/10 text-emerald-100", icon: Check, label: "Success" },
+    failed:      { color: "border-rose-300/40 bg-rose-300/10 text-rose-200", icon: AlertTriangle, label: "Failed" },
+    sync_failed: { color: "border-rose-300/40 bg-rose-300/10 text-rose-200", icon: AlertTriangle, label: "Sync Failed" },
+    partial:     { color: "border-amber-300/40 bg-amber-300/10 text-amber-200", icon: AlertTriangle, label: "Partial" },
   };
   const m = map[status];
   const Icon = m.icon;
   return (
     <span className={cn("inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] font-medium", m.color)}>
-      <Icon className={cn("h-3 w-3", (status === "queued" || status === "running") && "animate-spin")} />
+      <Icon className={cn("h-3 w-3", (status === "queued" || status === "running" || status === "staged") && "animate-spin")} />
       {m.label}
     </span>
   );
@@ -200,12 +213,20 @@ const TASK_TAB_LABELS: Array<{ value: TaskStatus | "all"; label: string }> = [
   { value: "failed",    label: "Failed"    },
 ];
 
-type RowState = { status: RowStatus; written?: number; error?: string };
+type RowState = { status: RowStatus; records?: number | null; error?: string };
+
+type BackfillState =
+  | { state: "submitting" }
+  | { state: "running"; trigger: BackfillTrigger; progress: BackfillProgress }
+  | { state: "done"; trigger: BackfillTrigger; progress: BackfillProgress }
+  | { state: "error"; message: string };
 
 export default function OperationalTasksPage() {
   const kpis = useMemo(() => getOperationalKpis(), []);
   const [pipelineRows, setPipelineRows] = useState<Record<string, RowState>>({});
   const cancelFns = useRef<Record<string, () => void>>({});
+  const [backfillModal, setBackfillModal] = useState<{ sourceId: string; label: string } | null>(null);
+  const [backfillStatus, setBackfillStatus] = useState<Record<string, BackfillState>>({});
   const models = useMemo(() => getModelOps(), []);
   const allTasks = useMemo(() => getActiveTasks(), []);
   const recentRuns = useMemo(() => getRecentTrainingRuns(), []);
@@ -226,26 +247,70 @@ export default function OperationalTasksPage() {
     };
   }, []);
 
-  function triggerPipeline(source: Source) {
-    cancelFns.current[source]?.();
-    setPipelineRows((prev) => ({ ...prev, [source]: { status: "queued" } }));
+  function triggerPipeline(sourceId: string) {
+    cancelFns.current[sourceId]?.();
+    setPipelineRows((prev) => ({ ...prev, [sourceId]: { status: "queued" } }));
 
-    triggerHistoricalIngest(source, { date: new Date().toISOString().slice(0, 10) })
-      .then(({ job_id }) => {
-        setPipelineRows((prev) => ({ ...prev, [source]: { status: "running" } }));
-        cancelFns.current[source] = pollIngestJob(getHistoricalIngestJob, job_id, (job) => {
-          if (job.status === "running") {
-            setPipelineRows((prev) => ({ ...prev, [source]: { status: "running" } }));
-          } else if (job.status === "completed") {
-            setPipelineRows((prev) => ({ ...prev, [source]: { status: "success", written: job.written ?? 0 } }));
-          } else {
-            setPipelineRows((prev) => ({ ...prev, [source]: { status: "failed", error: job.error ?? "unknown error" } }));
-          }
+    triggerIngestionRun(sourceId)
+      .then(() => {
+        cancelFns.current[sourceId] = pollLatestRun(sourceId, (latest) => {
+          if (!latest) return;
+          setPipelineRows((prev) => ({
+            ...prev,
+            [sourceId]: {
+              status: latest.status,
+              records: latest.records_inserted ?? latest.records_fetched,
+            },
+          }));
         });
       })
       .catch((err) => {
-        const message = err instanceof IngestionApiError ? err.message : "trigger failed";
-        setPipelineRows((prev) => ({ ...prev, [source]: { status: "failed", error: message } }));
+        const message = err instanceof TriggerIngestionError ? err.message : "trigger failed";
+        setPipelineRows((prev) => ({ ...prev, [sourceId]: { status: "failed", error: message } }));
+      });
+  }
+
+  function submitBackfill(sourceId: string, yearMonth: string) {
+    const { start, end } = monthToRange(yearMonth);
+    cancelFns.current[sourceId]?.();
+    setBackfillStatus((prev) => ({ ...prev, [sourceId]: { state: "submitting" } }));
+    setPipelineRows((prev) => ({ ...prev, [sourceId]: { status: "queued" } }));
+
+    triggerBackfill(sourceId, start, end)
+      .then((trigger) => {
+        setBackfillModal(null);
+
+        // A backfill is dozens of independent per-day runs, not one run
+        // -- poll the whole estimated duration (+ buffer), not the 30s
+        // `pollLatestRun` default sized for a single "Run now" click,
+        // and tally real per-day outcomes instead of one flickering
+        // "latest run" status (see `pollBackfillSummary`'s docstring).
+        const timeoutMs = Math.max(30_000, trigger.estimated_duration_seconds * 1000 + 30_000);
+        cancelFns.current[sourceId] = pollBackfillSummary(
+          sourceId,
+          trigger.queued_at,
+          trigger.total_chunks,
+          (progress) => {
+            const isDone = progress.total > 0 && progress.done >= progress.total;
+            setBackfillStatus((prev) => ({
+              ...prev,
+              [sourceId]: { state: isDone ? "done" : "running", trigger, progress },
+            }));
+            setPipelineRows((prev) => ({
+              ...prev,
+              [sourceId]: {
+                status: isDone ? (progress.failed > 0 ? "partial" : "success") : "running",
+              },
+            }));
+          },
+          3000,
+          timeoutMs,
+        );
+      })
+      .catch((err) => {
+        const message = err instanceof TriggerIngestionError ? err.message : "backfill trigger failed";
+        setBackfillStatus((prev) => ({ ...prev, [sourceId]: { state: "error", message } }));
+        setPipelineRows((prev) => ({ ...prev, [sourceId]: { status: "idle" } }));
       });
   }
 
@@ -300,7 +365,12 @@ export default function OperationalTasksPage() {
               <p className="text-xs text-white/50">Trigger data ingestion pipelines.</p>
             </div>
           </div>
-          <PipelineTable rows={pipelineRows} onTrigger={triggerPipeline} />
+          <PipelineTable
+            rows={pipelineRows}
+            onTrigger={triggerPipeline}
+            backfillStatus={backfillStatus}
+            onOpenBackfill={(sourceId, label) => setBackfillModal({ sourceId, label })}
+          />
           <a
             href="/dashboard/ingestion/"
             className="mt-3 inline-flex w-full items-center justify-center gap-1 text-xs text-emerald-100 hover:underline"
@@ -462,6 +532,16 @@ export default function OperationalTasksPage() {
           </div>
         </Card>
       </div>
+
+      {backfillModal && (
+        <BackfillModal
+          sourceId={backfillModal.sourceId}
+          label={backfillModal.label}
+          status={backfillStatus[backfillModal.sourceId]}
+          onClose={() => setBackfillModal(null)}
+          onSubmit={submitBackfill}
+        />
+      )}
     </div>
   );
 }
@@ -473,9 +553,13 @@ export default function OperationalTasksPage() {
 function PipelineTable({
   rows,
   onTrigger,
+  backfillStatus,
+  onOpenBackfill,
 }: {
   rows: Record<string, RowState>;
-  onTrigger: (source: Source) => void;
+  onTrigger: (sourceId: string) => void;
+  backfillStatus: Record<string, BackfillState>;
+  onOpenBackfill: (sourceId: string, label: string) => void;
 }) {
   return (
     <table className="w-full text-left text-sm">
@@ -487,28 +571,47 @@ function PipelineTable({
         </tr>
       </thead>
       <tbody className="divide-y divide-white/5">
-        {PIPELINE_CATALOG.filter((p) => p.triggerable).map((p) => {
-          const row = rows[p.id] ?? { status: "idle" as RowStatus };
-          const busy = row.status === "queued" || row.status === "running";
+        {PIPELINE_CATALOG.filter((p) => p.triggerable && p.sourceId).map((p) => {
+          const sourceId = p.sourceId as string;
+          const row = rows[sourceId] ?? { status: "idle" as RowStatus };
+          const busy = row.status === "queued" || row.status === "running" || row.status === "staged";
           const runDisabled = busy;
           const runTitle = "Run now";
+          const backfill = backfillStatus[sourceId];
           return (
             <tr key={p.id} className="text-white/85">
               <td className="py-2 pr-2">{p.label}</td>
               <td className="py-2 pr-2">
                 <PipelineStatusChip status={row.status} />
-                {row.status === "success" && (
-                  <span className="ml-1 text-[11px] text-white/50">{row.written ?? 0} rows</span>
+                {(row.status === "success" || row.status === "partial") && row.records != null && (
+                  <span className="ml-1 text-[11px] text-white/50">{row.records} records</span>
                 )}
-                {row.status === "failed" && row.error && (
+                {(row.status === "failed" || row.status === "sync_failed") && row.error && (
                   <span className="ml-1 text-[11px] text-rose-300" title={row.error}>{row.error}</span>
+                )}
+                {backfill?.state === "running" && (
+                  <div className="mt-0.5 text-[11px] text-sky-300">
+                    Backfilling — {backfill.progress.done}/{backfill.progress.total} day(s) done
+                    {backfill.progress.failed > 0 && ` (${backfill.progress.failed} failed)`}
+                  </div>
+                )}
+                {backfill?.state === "done" && (
+                  <div className="mt-0.5 text-[11px] text-white/50">
+                    Backfill complete — {backfill.progress.succeeded}/{backfill.progress.total} succeeded
+                    {backfill.progress.failed > 0 && `, ${backfill.progress.failed} failed`}
+                  </div>
+                )}
+                {backfill?.state === "error" && (
+                  <div className="mt-0.5 text-[11px] text-rose-300" title={backfill.message}>
+                    Backfill: {backfill.message}
+                  </div>
                 )}
               </td>
               <td className="py-2 text-right">
                 <div className="inline-flex items-center gap-2">
                   <button
                     disabled={runDisabled}
-                    onClick={() => p.triggerable && onTrigger(p.id as Source)}
+                    onClick={() => onTrigger(sourceId)}
                     title={runTitle}
                     className={cn(
                       "rounded p-1",
@@ -523,6 +626,24 @@ function PipelineTable({
                       <Play className="h-3.5 w-3.5" />
                     )}
                   </button>
+                  {p.backfillable && (() => {
+                    const backfillBusy = backfill?.state === "submitting" || backfill?.state === "running";
+                    return (
+                      <button
+                        disabled={backfillBusy}
+                        onClick={() => onOpenBackfill(sourceId, p.label)}
+                        title={backfillBusy ? "A backfill is already running for this source" : "Backfill a specific month"}
+                        className={cn(
+                          "rounded p-1",
+                          backfillBusy
+                            ? "cursor-not-allowed text-white/25"
+                            : "text-white/50 hover:bg-white/5 hover:text-white",
+                        )}
+                      >
+                        <Database className="h-3.5 w-3.5" />
+                      </button>
+                    );
+                  })()}
                   <a
                     href="/dashboard/ingestion/"
                     className="rounded p-1 text-white/50 hover:bg-white/5 hover:text-white"
@@ -537,6 +658,86 @@ function PipelineTable({
         })}
       </tbody>
     </table>
+  );
+}
+
+/** Defaults to last month, not the current (partial) one — backfilling a
+ * month that's still in progress would silently under-fetch it and look
+ * like a bug. Users can still pick the current month explicitly. */
+function defaultBackfillMonth(): string {
+  const now = new Date();
+  const prev = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+  return `${prev.getUTCFullYear()}-${String(prev.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+function BackfillModal({
+  sourceId,
+  label,
+  status,
+  onClose,
+  onSubmit,
+}: {
+  sourceId: string;
+  label: string;
+  status?: BackfillState;
+  onClose: () => void;
+  onSubmit: (sourceId: string, yearMonth: string) => void;
+}) {
+  const [yearMonth, setYearMonth] = useState(defaultBackfillMonth);
+  const submitting = status?.state === "submitting";
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-sm rounded-xl border border-white/10 bg-[#0a1410] p-5 shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-4 flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-white">Backfill — {label}</h3>
+          <button
+            onClick={onClose}
+            className="rounded p-1 text-white/50 hover:bg-white/5 hover:text-white"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <p className="mb-3 text-xs text-white/60">
+          Fetches real historical data for every day in the selected month from the
+          source's own archive — not a repeated "last 30 min" run.
+        </p>
+        <Field label="Month">
+          <input
+            type="month"
+            value={yearMonth}
+            onChange={(e) => setYearMonth(e.target.value)}
+            className="w-full rounded-md border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-white focus:border-emerald-200/60 focus:outline-none"
+          />
+        </Field>
+        {status?.state === "error" && (
+          <p className="mt-2 text-xs text-rose-300">{status.message}</p>
+        )}
+        <button
+          disabled={submitting || !yearMonth}
+          onClick={() => onSubmit(sourceId, yearMonth)}
+          className={cn(
+            "mt-4 inline-flex w-full items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-semibold",
+            submitting || !yearMonth
+              ? "cursor-not-allowed bg-white/10 text-white/40"
+              : "bg-emerald-200 text-black hover:bg-emerald-100",
+          )}
+        >
+          {submitting ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <Database className="h-4 w-4" />
+          )}
+          Start Backfill
+        </button>
+      </div>
+    </div>
   );
 }
 

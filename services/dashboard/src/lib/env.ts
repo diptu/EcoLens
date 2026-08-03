@@ -29,13 +29,3 @@ export const DATA_PIPELINE_API_URL =
 /** IAM's health routes (`/`, `/db_health`) live at the app root, not
  * under `/api/v1` like every other IAM route this dashboard calls. */
 export const IAM_BASE_URL = IAM_API_URL.replace(/\/api\/v1\/?$/, "");
-
-/** data-pipeline's control API (`ecolens.api.app`, `ecolens/api/app.py`)
- * mounts the real, already-implemented ingestion trigger/poll routes
- * (`/ingestion/historical`, `/ingestion/daily-counts`,
- * `/ingestion/retry-missing`) directly at the app root -- not under
- * `/v1` the way `DATA_PIPELINE_API_URL` is configured for the planned
- * `/v1/data-sources/*` + `/v1/ingestion/public/*` contract (TODO.md rows
- * 1-14), which doesn't exist server-side yet. Strips the `/v1` suffix
- * so callers hit the routes that actually exist today. */
-export const DATA_PIPELINE_CONTROL_API_URL = DATA_PIPELINE_API_URL.replace(/\/v1\/?$/, "");

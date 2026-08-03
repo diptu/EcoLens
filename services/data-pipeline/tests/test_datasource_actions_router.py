@@ -153,10 +153,11 @@ def wired(monkeypatch):
 
 
 class TestTriggerRun:
-    def test_requires_admin_role(self, client, wired):
-        response = client.post("/v1/data-sources/ds-bom/run", headers=_auth("analyst"))
+    def test_no_auth_required(self, client, wired):
+        """Trigger is deliberately open — no bearer token needed at all."""
+        response = client.post("/v1/data-sources/ds-bom/run")
 
-        assert response.status_code == 403
+        assert response.status_code == 202
 
     def test_unknown_id_is_404(self, client, wired):
         response = client.post("/v1/data-sources/ds-nonexistent/run", headers=_auth())
@@ -167,14 +168,14 @@ class TestTriggerRun:
         response = client.post(
             "/v1/data-sources/ds-bom/run",
             json={"force": False, "deduplicate": True},
-            headers={**_auth(sub="diptu"), "X-Reason": "manual check"},
+            headers={"X-Reason": "manual check"},
         )
 
         assert response.status_code == 202
         body = response.json()
         assert body["source_id"] == "ds-bom"
         assert body["status"] == "queued"
-        assert body["triggered_by"] == "diptu"
+        assert body["triggered_by"] == "public"
         assert body["reason"] == "manual check"
         assert body["run_id"].startswith("run-")
 
@@ -228,14 +229,11 @@ class TestTriggerBackfill:
         body.update(overrides)
         return body
 
-    def test_requires_admin_role(self, client, wired):
-        response = client.post(
-            "/v1/data-sources/ds-bom/backfill",
-            json=self._body(),
-            headers=_auth("analyst"),
-        )
+    def test_no_auth_required(self, client, wired):
+        """Trigger is deliberately open — no bearer token needed at all."""
+        response = client.post("/v1/data-sources/ds-bom/backfill", json=self._body())
 
-        assert response.status_code == 403
+        assert response.status_code == 202
 
     def test_successful_trigger_returns_202_with_chunk_count(self, client, wired):
         response = client.post(

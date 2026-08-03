@@ -10,7 +10,9 @@ immediate fetch or a date-range backfill, and inspect higher-resolution
 health/run-history views — powers the dashboard's Data Sources admin
 page. All the merge/filter/sort/pagination/cache/validation logic lives
 in `app.service.datasources.service`/`actions`/`monitoring`; this router is
-just query-param/header plumbing and the role gate.
+just query-param/header plumbing and the role gate (read/edit endpoints
+only — `run`/`backfill` are deliberately open, no auth required, so any
+dashboard visitor can trigger a pipeline).
 """
 
 from __future__ import annotations
@@ -121,10 +123,12 @@ async def trigger_run_endpoint(
     body: RunRequest = RunRequest(),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     reason: str | None = Header(default=None, alias="X-Reason"),
-    principal: Principal = Depends(require_roles("admin")),
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis_client),
 ) -> RunTriggerResponse:
+    # Deliberately open — no role/auth gate. Triggering an ingestion run
+    # is not a privileged action in this platform's current scope; see
+    # `triggered_by="public"` below rather than a real principal's `sub`.
     response = await trigger_run(
         db,
         redis,
@@ -132,11 +136,11 @@ async def trigger_run_endpoint(
         body,
         idempotency_key=idempotency_key,
         reason=reason,
-        triggered_by=principal.sub,
+        triggered_by="public",
     )
     entry = CATALOG_BY_ID[id]
     background_tasks.add_task(
-        run_in_background, entry.registry_key, body.force, principal.sub
+        run_in_background, entry.registry_key, body.force, "public"
     )
     return response
 
@@ -147,11 +151,11 @@ async def trigger_backfill_endpoint(
     background_tasks: BackgroundTasks,
     body: BackfillRequest,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
-    principal: Principal = Depends(require_roles("admin")),
     redis: Redis = Depends(get_redis_client),
 ) -> BackfillTriggerResponse:
+    # Deliberately open — same reasoning as trigger_run_endpoint above.
     response = await trigger_backfill(
-        redis, id, body, idempotency_key=idempotency_key, triggered_by=principal.sub
+        redis, id, body, idempotency_key=idempotency_key, triggered_by="public"
     )
     entry = CATALOG_BY_ID[id]
     background_tasks.add_task(

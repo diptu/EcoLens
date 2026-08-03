@@ -213,12 +213,20 @@ async def record_anomalies(
 
     async with get_session() as session:
         await session.execute(
+            # `:row_snapshot::jsonb` (no space before the `::` cast) trips
+            # up SQLAlchemy's bind-param parser in a raw `text()` string --
+            # it doesn't reliably tell "named param followed by a cast"
+            # apart from "named param with an unusual name", and ends up
+            # emitting `:row_snapshot` uncoverted to asyncpg's native `$N`
+            # placeholders alongside the other params that did convert,
+            # which asyncpg then rejects as a syntax error. `CAST(... AS
+            # jsonb)` is unambiguous and the standard fix.
             text(
                 "INSERT INTO meta.anomalies "
                 "(run_id, source, table_name, anomaly_score, anomaly_reason, row_snapshot, "
                 "metric, value, z_score, expected_low, expected_high) "
                 "VALUES (:run_id, :source, :table_name, :anomaly_score, :anomaly_reason, "
-                ":row_snapshot::jsonb, :metric, :value, :z_score, :expected_low, :expected_high)"
+                "CAST(:row_snapshot AS jsonb), :metric, :value, :z_score, :expected_low, :expected_high)"
             ),
             rows,
         )

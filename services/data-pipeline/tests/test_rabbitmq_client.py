@@ -177,6 +177,98 @@ async def test_consume_landed_events_calls_handler_for_each_message():
         mod.get_rabbitmq_connection = orig
 
 
+async def test_consume_landed_events_keeps_going_after_one_message_fails():
+    """Regression test: `sync_landed_event` deliberately re-raises after
+    marking a run `sync_failed` (so `message.process()` nacks instead of
+    acking) — confirmed in production that this exception, if not caught
+    one level up, escapes the `async for` and kills the entire consumer,
+    leaving every message behind the bad one unprocessed until someone
+    manually restarts the worker. One failing message must never stop
+    the rest of the queue from being consumed."""
+
+    class _FakeMessage:
+        def __init__(self, body):
+            self.body = body
+
+        def process(self, requeue=False):
+            return self
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc_info):
+            return False  # never suppresses — matches real aio_pika behavior
+
+    class _FakeQueueIterator:
+        def __init__(self, messages):
+            self._messages = messages
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc_info):
+            return False
+
+        def __aiter__(self):
+            return self._gen()
+
+        async def _gen(self):
+            for message in self._messages:
+                yield message
+
+    class _ConsumeFakeQueue:
+        def __init__(self, messages):
+            self._messages = messages
+
+        def iterator(self):
+            return _FakeQueueIterator(self._messages)
+
+    class _ConsumeFakeChannel(_FakeChannel):
+        def __init__(self, messages):
+            super().__init__()
+            self._messages = messages
+
+        async def declare_queue(self, name, durable=True):
+            await super().declare_queue(name, durable=durable)
+            return _ConsumeFakeQueue(self._messages)
+
+    messages = [
+        _FakeMessage(json.dumps({"run_id": "1"}).encode()),
+        _FakeMessage(json.dumps({"run_id": "2"}).encode()),  # this one fails
+        _FakeMessage(json.dumps({"run_id": "3"}).encode()),
+    ]
+
+    class _ConsumeFakeConnection(_FakeConnection):
+        def __init__(self, messages):
+            super().__init__()
+            self.channel_obj = _ConsumeFakeChannel(messages)
+
+    connection = _ConsumeFakeConnection(messages)
+
+    async def fake_get_connection():
+        return connection
+
+    import app.db.rabbitmq as mod
+
+    orig = mod.get_rabbitmq_connection
+    mod.get_rabbitmq_connection = fake_get_connection
+    try:
+        seen = []
+
+        async def handler(payload):
+            seen.append(payload)
+            if payload["run_id"] == "2":
+                raise RuntimeError("staged file missing — simulated sync failure")
+
+        await mod.consume_landed_events(handler)
+
+        # All 3 messages were handed to the handler, including the ones
+        # after the failing one — the loop didn't die on message 2.
+        assert seen == [{"run_id": "1"}, {"run_id": "2"}, {"run_id": "3"}]
+    finally:
+        mod.get_rabbitmq_connection = orig
+
+
 # ── training-trigger topology (exchange + DLX + DLQ + main queue) ─────────
 
 

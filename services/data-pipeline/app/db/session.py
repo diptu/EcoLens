@@ -24,7 +24,20 @@ from app.core.config import get_settings
 @lru_cache
 def get_engine() -> AsyncEngine:
     return create_async_engine(
-        get_settings().database_url, pool_pre_ping=True, future=True
+        get_settings().database_url,
+        pool_pre_ping=True,
+        future=True,
+        # `DATABASE_URL` in this environment goes through a transaction-mode
+        # connection pooler (Neon's "-pooler" endpoint, PgBouncer under the
+        # hood) -- confirmed the hard way: asyncpg's default server-side
+        # prepared-statement cache assumes a stable logical connection maps
+        # to one physical backend, which a transaction pooler doesn't
+        # guarantee (a later query on "the same" connection can land on a
+        # different backend that's never seen that prepared statement name
+        # before, or worse, has a *different* statement already registered
+        # under it -- `DuplicatePreparedStatementError`). Disabling it is
+        # asyncpg's own documented fix for exactly this pooler combination.
+        connect_args={"statement_cache_size": 0},
     )
 
 

@@ -6,13 +6,27 @@ different time zone (WST = UTC+8, no DST), different settlement.
 
 In production: hit https://data.wa.aemo.com.au/.
 In dev: read from `/data/raw/aemo/wem/`.
+
+`fetch_month`/`_fetch_historical_range` (bottom of this file) are a
+*separate*, genuinely-real historical path — verified directly against
+AEMO WA's real current (post-Oct-2023-reform) public data portal before
+writing this. `_try_live_api`'s URL below was never real (confirmed
+404 — a leftover guess), and that portal has no historical range query
+of its own anyway; the real per-day archives live under
+`data.wa.aemo.com.au/public/market-data/wemde/` instead (see
+`_fetch_wem_day`'s docstring for the exact two endpoints).
 """
 
 from __future__ import annotations
 
+import asyncio
+import io
+import json
 import uuid
-from datetime import datetime, timedelta, timezone
+import zipfile
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -25,9 +39,34 @@ log = get_logger(__name__)
 
 _WEM_CACHE_DIR = Path("/data/raw/aemo/wem")
 
+_DEMAND_URL = (
+    "https://data.wa.aemo.com.au/public/market-data/wemde/"
+    "operationalDemandWithdrawal/dailyFiles/"
+    "OperationalDemandAndWithdrawal_{day}.json"
+)
+_PRICE_URL = (
+    "https://data.wa.aemo.com.au/public/market-data/wemde/"
+    "referenceTradingPrice/previous/ReferenceTradingPrice_{day_compact}.zip"
+)
+# WEM trading intervals are 30-min, on the WST (+08:00, no DST) :00/:30
+# marks -- demand is published at 5-min resolution, so it's filtered down
+# to just those marks to align 1:1 with price.
+_TRADING_MINUTES = {0, 30}
+
 
 @timed("aemo_wem")
-async def run(lookback_minutes: int | None = None) -> pd.DataFrame:
+async def run(
+    lookback_minutes: int | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> pd.DataFrame:
+    """`start`/`end` (both required together) route to the real
+    historical fetch instead of the live/cache/stub path -- used by
+    `pipeline.backfill` to target an actual past date range rather than
+    "last N minutes from now"."""
+    if start is not None and end is not None:
+        return await _fetch_historical_range(start, end)
+
     settings_lookup = None
     from app.core.config import get_settings
 
@@ -124,3 +163,108 @@ def _synthetic_stub(lookback_minutes: int) -> pd.DataFrame:
     df["ingest_run_id"] = str(uuid.uuid4())
     log.warning("aemo_wem.using_synthetic_stub", rows=len(df))
     return df
+
+
+# ────────────────────────────────────────────────────────────────────
+# Real historical fetch — AEMO WA's current data portal (verified live)
+# ────────────────────────────────────────────────────────────────────
+
+
+async def _fetch_historical_range(start: datetime, end: datetime) -> pd.DataFrame:
+    """One row per (30-min trading interval) across every day in
+    `[start.date(), end.date()]` inclusive -- single region ("WEM"),
+    real data from AEMO WA's post-reform portal. A day that fails
+    (404 outside retention, network error) is logged and skipped
+    rather than aborting the whole range."""
+    import httpx
+
+    frames: list[pd.DataFrame] = []
+    day = start.date()
+    end_date = end.date()
+    async with httpx.AsyncClient(timeout=30) as client:
+        while day <= end_date:
+            try:
+                day_df = await _fetch_wem_day(client, day)
+                if not day_df.empty:
+                    frames.append(day_df)
+                log.info("aemo_wem.archive_day_fetched", day=str(day), rows=len(day_df))
+            except Exception as exc:  # noqa: BLE001 - one bad day shouldn't abort the range
+                log.warning("aemo_wem.archive_day_failed", day=str(day), error=str(exc))
+            day += timedelta(days=1)
+            await asyncio.sleep(0.2)
+
+    if not frames:
+        return pd.DataFrame(
+            columns=[
+                "ts",
+                "region",
+                "demand_mw",
+                "price_mwh",
+                "source",
+                "ingested_at",
+                "ingest_run_id",
+            ]
+        )
+    out = pd.concat(frames, ignore_index=True)
+    out["source"] = "aemo_wem"
+    out["ingested_at"] = pd.Timestamp.now(tz="UTC")
+    out["ingest_run_id"] = str(uuid.uuid4())
+    log.info(
+        "aemo_wem.historical_range_fetched",
+        start=str(start),
+        end=str(end),
+        rows=len(out),
+    )
+    return out
+
+
+async def _fetch_wem_day(client: Any, day: date) -> pd.DataFrame:
+    """Two separate real endpoints for one day, joined on timestamp:
+      - demand: .../operationalDemandWithdrawal/dailyFiles/
+        OperationalDemandAndWithdrawal_{YYYY-MM-DD}.json (5-min,
+        filtered down to the :00/:30 marks)
+      - price: .../referenceTradingPrice/previous/
+        ReferenceTradingPrice_{YYYYMMDD}.zip (a zip containing one
+        JSON, already 30-min)
+    Both verified against real downloaded samples before writing this.
+    """
+    demand_by_ts: dict[pd.Timestamp, float | None] = {}
+    demand_resp = await client.get(_DEMAND_URL.format(day=day.isoformat()))
+    demand_resp.raise_for_status()
+    demand_json = demand_resp.json()
+    for row in demand_json.get("data", {}).get("data", []):
+        ts_local = pd.Timestamp(row["dispatchInterval"])
+        if ts_local.minute not in _TRADING_MINUTES:
+            continue
+        demand_by_ts[ts_local.tz_convert("UTC")] = row.get("operationalDemand")
+
+    price_by_ts: dict[pd.Timestamp, float | None] = {}
+    try:
+        price_resp = await client.get(
+            _PRICE_URL.format(day_compact=day.strftime("%Y%m%d"))
+        )
+        price_resp.raise_for_status()
+        inner_zip = zipfile.ZipFile(io.BytesIO(price_resp.content))
+        json_names = [n for n in inner_zip.namelist() if n.lower().endswith(".json")]
+        if json_names:
+            price_data = json.loads(inner_zip.read(json_names[0]))
+            for row in price_data.get("data", {}).get("referenceTradingPrices", []):
+                ts_local = pd.Timestamp(row["tradingInterval"])
+                price_by_ts[ts_local.tz_convert("UTC")] = row.get(
+                    "referenceTradingPrice"
+                )
+    except Exception as exc:  # noqa: BLE001 - demand alone is still useful if price 404s
+        log.warning("aemo_wem.price_fetch_failed", day=str(day), error=str(exc))
+
+    rows = [
+        {
+            "ts": ts,
+            "region": "WEM",
+            "demand_mw": demand_by_ts.get(ts),
+            "price_mwh": price_by_ts.get(ts),
+        }
+        for ts in (set(demand_by_ts) | set(price_by_ts))
+    ]
+    if not rows:
+        return pd.DataFrame(columns=["ts", "region", "demand_mw", "price_mwh"])
+    return pd.DataFrame(rows)

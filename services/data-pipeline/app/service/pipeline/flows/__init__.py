@@ -132,7 +132,9 @@ def dbt_build_task(target: str = "prod") -> int:
 
 
 @task(name="publish-training-trigger")
-async def publish_training_trigger(regions: list[str], window_hours: int) -> None:
+async def publish_training_trigger(
+    regions: list[str], window_hours: int, *, triggered_by: str = "schedule"
+) -> dict:
     """`TODO.md` item 1's "Event Publisher": fires once `dbt_build_task`
     (the "dbt post-execution hook", adapted to a Prefect task-completion
     signal per that item's own note) has actually succeeded. The payload
@@ -141,6 +143,16 @@ async def publish_training_trigger(regions: list[str], window_hours: int) -> Non
     should query (`Settings.incremental_train_window_hours` back from
     now), and a real anomaly-summary flag count from `meta.anomalies`
     over that same window — not a placeholder field.
+
+    `triggered_by` defaults to `"schedule"` (this flow's own automatic
+    path); `app.service.model.actions.trigger_training` (the manual,
+    `POST /v1/model/train` path) passes `"manual"` instead -- threaded
+    into the payload so `training_worker.handle_training_trigger` can
+    record which path produced each `meta._training_log` row.
+
+    Returns the published payload -- `trigger_training` reuses it
+    verbatim for its own response instead of re-deriving the same
+    timestamps a second time.
     """
     window_until = datetime.now(UTC)
     window_since = window_until - timedelta(hours=window_hours)
@@ -161,6 +173,7 @@ async def publish_training_trigger(regions: list[str], window_hours: int) -> Non
         "window_since": window_since.isoformat(),
         "window_until": window_until.isoformat(),
         "anomalies_flagged": anomalies_flagged,
+        "triggered_by": triggered_by,
     }
     await publish_training_trigger_event(payload)
     log.info(
@@ -169,6 +182,7 @@ async def publish_training_trigger(regions: list[str], window_hours: int) -> Non
         window_since=payload["window_since"],
         anomalies_flagged=anomalies_flagged,
     )
+    return payload
 
 
 @task(name="training-due")

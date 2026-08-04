@@ -81,41 +81,36 @@ button next to it.
 
 ## Model Operations
 
-**This is the biggest structural gap on the page.** The mock (`getModelOps()`) lists 5 different
-models (Demand Forecast LSTM, Demand Baseline/Naive, Generation Mix Model, Carbon Intensity Model,
-Anomaly Detection Model) with distinct types (LSTM/Naive/XGBoost/Prophet/Isolation Forest) and
-independent MAPE/RMSE performance numbers. **Confirmed by reading every forecast-api route: there is
-exactly one real model in this platform** — whatever forecast-api's `ModelRegistry` currently has
-loaded from MLflow's Production stage (a DemandLSTM). There is no generation-mix model, no
-carbon-intensity model, no anomaly-detection model, no baseline model anywhere serving predictions —
-`generation-mix` and `emissions` endpoints are direct warehouse aggregations (SQL, no ML), not model
-outputs.
+> **Superseded for fine-tune work.** The single-model table, Fine-tune button,
+> `POST /v1/model/train`, training-runs log, and version/promote APIs are now
+> real. The multi-phase plan for finishing Fine-tune end-to-end (completion
+> loop, promote CTA, full retrain, preflight, quality gates) lives in root
+> **`TODO.md` → `# Operational Tasks` → `## Model Operations — Fine-tune
+> from the Model Operations tab`**. Do not implement from the outdated
+> checklist below; it is kept only as historical context for what the mock
+> looked like before Phase 0–2 landed.
 
-- [ ] Replace `getModelOps()`'s 5 rows with **exactly 1 row**, from `fetchModelInfo()` (`GET
-      /v1/model`, already built this session for Forecast Explorer's sidebar — direct reuse, not new
-      code). Table columns need rethinking around 1 row instead of 5:
-      - `Model Name` → `modelInfo.name`
-      - `Version` → `modelInfo.version`
-      - `Type` → **drop** — real schema has no model-architecture-type field, and asserting "LSTM" as
-        a fact for something the API doesn't report is exactly the fabrication being removed.
-      - `Last Trained` → `modelInfo.loaded_at`, relabeled "Loaded at" (real, but **not the same
-        thing** as when it was *trained* — `loaded_at` is when this server process loaded the
-        bundle, not MLflow's training timestamp; don't relabel it "Last Trained" and imply otherwise).
-      - `Performance` → render `Object.entries(modelInfo.metrics)` generically (key: value pairs),
-        not a hardcoded `.mape`/`.rmse` pair — confirmed by reading `service/ml/registry.py`:
-        `metrics = run.data.metrics` is whatever the MLflow run happened to log, key names aren't
-        guaranteed.
-      - `Status` → `modelInfo.status` ("loaded"/"not_loaded") + `modelInfo.stage`, not the mock's
-        deployed/staging/deprecated 3-state (real registry only distinguishes loaded vs. not, plus
-        whatever MLflow stage string it reports — don't invent "deprecated" as a status this API
-        never returns).
-- [ ] **KPI row tie-in**: "Model Status" KPI → `fetchModelInfo()`, same as Operations' identical KPI.
-- [ ] **Actions column ("Retrain"/"Tune"/"More") — cannot be wired.** No retrain-trigger endpoint
-      exists anywhere (confirmed across every forecast-api and data-pipeline route). Disable with
-      tooltip, same treatment as Pipeline Operations' actions.
-- [ ] "Retrain Model" button (card header) — same, disable with tooltip.
-- [ ] "View all models" — with only 1 real model, this link/button has nothing to expand to; drop it
-      rather than link somewhere that doesn't exist yet.
+**Historical note (pre-wiring):** The mock (`getModelOps()`) listed 5 different
+models. **There is still exactly one real model** — whatever forecast-api's
+`ModelRegistry` has loaded from MLflow Production (a DemandLSTM).
+`generation-mix` / `emissions` remain SQL aggregations, not ML.
+
+### Done since this doc was written
+
+- [x] Single-row Model Ops table from `fetchModelInfo()` (`GET /v1/model`)
+- [x] Metrics rendered generically from `modelInfo.metrics`
+- [x] Stage chip from real MLflow stage / not-loaded
+- [x] "Fine-tune" wired to `triggerTraining()` → `POST /v1/model/train`
+- [x] "View model registry" → `/dashboard/models/`
+- [x] Model Training & Tuning form (regions + window hours only)
+- [x] Recent versions via `GET /v1/model/versions`
+- [x] Active Tasks `model_training` rows from `GET /v1/model/training-runs`
+
+### Still open
+
+Track in root `TODO.md` Model Operations phases 0–6 (promote CTA, poll
+training-runs for failure, full retrain UI, preflight, quality gates, page
+KPI cleanup).
 
 ## Active Tasks
 

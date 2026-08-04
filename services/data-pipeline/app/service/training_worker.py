@@ -25,16 +25,86 @@ failed handler call.
 
 from __future__ import annotations
 
+import json
+import uuid
 from typing import Any
 
 import pandas as pd
+from sqlalchemy import text
 
 from app.core.config import get_settings
+from app.db.session import get_session
 from app.service.ml.incremental import train_and_register_incremental
 from app.db.rabbitmq import close_rabbitmq, consume_training_trigger_events
 from app.core.logging import configure_logging, get_logger
 
 log = get_logger(__name__)
+
+
+async def _log_training_start(
+    model_name: str,
+    triggered_by: str,
+    regions: list[str],
+    window_start,
+    window_end,
+) -> uuid.UUID:
+    """Insert a 'running' row into `meta._training_log` (Model Operations
+    TODO.md Phase 4) -- mirrors `pipeline.tasks._common._log_run_start`'s
+    pattern for `meta._ingest_log`. Returns the row id."""
+    log_id = uuid.uuid4()
+    async with get_session() as session:
+        await session.execute(
+            text(
+                """
+                INSERT INTO meta._training_log
+                    (id, model_name, status, triggered_by, regions, window_start, window_end, started_at, hostname)
+                VALUES
+                    (:id, :model_name, 'running', :triggered_by, CAST(:regions AS jsonb), :window_start, :window_end, now(), :hostname)
+                """
+            ),
+            {
+                "id": str(log_id),
+                "model_name": model_name,
+                "triggered_by": triggered_by,
+                "regions": json.dumps(regions),
+                "window_start": window_start,
+                "window_end": window_end,
+                "hostname": get_settings().hostname,
+            },
+        )
+    return log_id
+
+
+async def _log_training_finish(
+    log_id: uuid.UUID,
+    *,
+    status: str,
+    run_id: str | None = None,
+    model_version: str | None = None,
+    error_message: str | None = None,
+) -> None:
+    """Close out a `meta._training_log` row as `'success'`/`'failed'`."""
+    async with get_session() as session:
+        await session.execute(
+            text(
+                """
+                UPDATE meta._training_log
+                SET finished_at = now(),
+                    status = :status,
+                    run_id = :run_id,
+                    model_version = :model_version,
+                    error_message = :error_message
+                WHERE id = :id
+                """
+            ),
+            {
+                "id": str(log_id),
+                "status": status,
+                "run_id": run_id,
+                "model_version": model_version,
+                "error_message": error_message[:500] if error_message else None,
+            },
+        )
 
 
 async def handle_training_trigger(payload: dict[str, Any]) -> None:
@@ -47,19 +117,46 @@ async def handle_training_trigger(payload: dict[str, Any]) -> None:
     because the queue's `x-dead-letter-exchange` is set, dead-letters the
     message into `rabbitmq_training_trigger_dlq` rather than silently
     dropping it or retrying forever.
+
+    Logs a `meta._training_log` row for the full attempt regardless of
+    outcome (`running` at start, `success`/`failed` at the end) -- the
+    real "is a training run in flight right now" signal `GET /v1/model/
+    training-runs` reads, since nothing logged that anywhere before
+    (Model Operations TODO.md Phase 4).
     """
     settings = get_settings()
     regions = payload.get("regions") or settings.model_default_regions
     window_since = payload.get("window_since")
+    window_until = payload.get("window_until")
     since = (
         pd.Timestamp(window_since)
         if window_since
         else pd.Timestamp.now(tz="UTC")
         - pd.Timedelta(hours=settings.incremental_train_window_hours)
     )
+    until = pd.Timestamp(window_until) if window_until else pd.Timestamp.now(tz="UTC")
     model_name = settings.mlflow_registry_model_name
+    triggered_by = payload.get("triggered_by") or "schedule"
 
-    result = await train_and_register_incremental(model_name, regions, since)
+    log_id = await _log_training_start(
+        model_name,
+        triggered_by,
+        list(regions),
+        since.to_pydatetime(),
+        until.to_pydatetime(),
+    )
+    try:
+        result = await train_and_register_incremental(model_name, regions, since)
+    except Exception as exc:
+        await _log_training_finish(log_id, status="failed", error_message=str(exc))
+        raise
+
+    await _log_training_finish(
+        log_id,
+        status="success",
+        run_id=result.run_id,
+        model_version=result.model_version,
+    )
     log.info(
         "training_worker.incremental_trained",
         model_name=model_name,

@@ -19,23 +19,6 @@
 // ────────────────────────────────────────────────────────────────────
 // Types
 // ────────────────────────────────────────────────────────────────────
-export type ModelVersion = {
-  name: string;
-  version: number;
-  stage: "Production" | "Staging" | "Archived";
-  created_at: string;
-  metrics: {
-    mape: number;
-    rmse_mw: number;
-    mae_mw: number;
-    pinball_p10: number;
-    pinball_p90: number;
-  };
-  trained_by: string;
-  training_window_days: number;
-  notes: string;
-};
-
 export type DataSource = {
   id: string;
   name: string;
@@ -500,46 +483,6 @@ export function summarizeAnomalies(items: Anomaly[]): AnomalySummary {
     anomaly_rate_pct: 0.012,
     daily_counts: Object.entries(days).map(([date, count]) => ({ date, count })),
   };
-}
-
-// ────────────────────────────────────────────────────────────────────
-// Model registry
-// ────────────────────────────────────────────────────────────────────
-export function generateModelRegistry(): ModelVersion[] {
-  const now = new Date();
-  const day = 86_400_000;
-  return [
-    {
-      name: "ecolens_lstm_demand",
-      version: 7,
-      stage: "Production",
-      created_at: new Date(now.getTime() - 14 * day).toISOString(),
-      metrics: { mape: 4.2, rmse_mw: 285.0, mae_mw: 198.0, pinball_p10: 0.04, pinball_p90: 0.05 },
-      trained_by: "diptu",
-      training_window_days: 1095,
-      notes: "Full retrain on 3y window. LSTM + attention + 3 heads. Conformal bands updated.",
-    },
-    {
-      name: "ecolens_lstm_demand",
-      version: 6,
-      stage: "Staging",
-      created_at: new Date(now.getTime() - 21 * day).toISOString(),
-      metrics: { mape: 4.7, rmse_mw: 312.0, mae_mw: 215.0, pinball_p10: 0.04, pinball_p90: 0.05 },
-      trained_by: "ci-pipeline",
-      training_window_days: 1095,
-      notes: "Pending promotion. Slightly worse MAPE but better P90 coverage on VIC1.",
-    },
-    {
-      name: "ecolens_lstm_demand",
-      version: 5,
-      stage: "Archived",
-      created_at: new Date(now.getTime() - 92 * day).toISOString(),
-      metrics: { mape: 5.8, rmse_mw: 380.0, mae_mw: 261.0, pinball_p10: 0.05, pinball_p90: 0.06 },
-      trained_by: "ci-pipeline",
-      training_window_days: 730,
-      notes: "Old model. Kept for reproducibility studies.",
-    },
-  ];
 }
 
 // ────────────────────────────────────────────────────────────────────

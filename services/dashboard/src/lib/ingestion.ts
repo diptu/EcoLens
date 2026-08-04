@@ -332,6 +332,87 @@ export async function triggerBackfill(
   return res.json();
 }
 
+// ────────────────────────────────────────────────────────────────────
+// Manually triggering training — POST /v1/model/train
+// ────────────────────────────────────────────────────────────────────
+
+/** Shape of data-pipeline's `TrainTriggerResponse`. Unlike `RunTrigger`/
+ * `BackfillTrigger`, there's no id to poll here -- the actual work runs
+ * in a separate, independently-running consumer process (`train-worker`)
+ * this trigger call never talks to directly. Poll forecast-api's
+ * `GET /v1/model/versions` for a new version to appear instead (see
+ * `fetchModelVersions()` in `lib/emissions.ts`). */
+export type TrainTrigger = {
+  status: "queued";
+  queued_at: string;
+  regions: string[];
+  window_since: string;
+  window_until: string;
+  anomalies_flagged: number;
+  triggered_by: string;
+};
+
+/** Live call to `POST /v1/model/train` (data-pipeline) -- publishes the
+ * same training-trigger event the automatic (dbt-build-triggered) path
+ * fires, just on demand. No auth required, same reasoning as
+ * `triggerIngestionRun`/`triggerBackfill`. No "already in progress"
+ * guard server-side -- multiple manual triggers just queue multiple
+ * fine-tune events, harmless not conflicting (see that endpoint's own
+ * docstring), so this doesn't need one either. */
+export async function triggerTraining(opts?: {
+  regions?: string[];
+  windowHours?: number;
+}): Promise<TrainTrigger> {
+  const res = await fetch(`${DATA_PIPELINE_API_URL}/model/train`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      regions: opts?.regions ?? null,
+      window_hours: opts?.windowHours ?? null,
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    const message: string =
+      body?.error?.message ?? `POST /v1/model/train failed: ${res.status}`;
+    throw new TriggerIngestionError(message, res.status, body?.error?.code ?? null);
+  }
+  return res.json();
+}
+
+/** Shape of data-pipeline's `TrainingRunOut` (`GET /v1/model/training-runs`)
+ * -- one `meta._training_log` row. `status === "running"` is the real
+ * "is a training run in flight right now" signal (Model Operations
+ * TODO.md Phase 4) -- nothing logged this anywhere before that table
+ * existed, so `getActiveTasks()`'s `model_training` rows were always
+ * fully fictional. */
+export type TrainingRunLog = {
+  id: string;
+  model_name: string;
+  status: "running" | "success" | "failed";
+  triggered_by: string;
+  regions: string[];
+  window_start: string;
+  window_end: string;
+  started_at: string;
+  finished_at: string | null;
+  run_id: string | null;
+  model_version: string | null;
+  error_message: string | null;
+};
+
+export type TrainingRunsList = {
+  data: TrainingRunLog[];
+};
+
+export async function fetchTrainingRuns(limit = 20): Promise<TrainingRunsList> {
+  const res = await fetch(`${DATA_PIPELINE_API_URL}/model/training-runs?limit=${limit}`);
+  if (!res.ok) {
+    throw new Error(`GET /v1/model/training-runs failed: ${res.status}`);
+  }
+  return res.json();
+}
+
 const TERMINAL_RUN_STATUSES: RunStatus[] = ["success", "failed", "sync_failed", "partial"];
 
 /** Polls `fetchPublicRuns(1, sourceId)` every `intervalMs` for the most

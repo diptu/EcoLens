@@ -16,7 +16,6 @@ import { generateAdminUsers, type User } from "@/lib/admin";
 export type ComplianceStatus = "compliant" | "partial" | "pending";
 export type AlertLevel = "critical" | "warning" | "info";
 export type ReportStatus = "completed" | "processing" | "failed";
-export type ModelStage = "deployed" | "staging" | "deprecated";
 export type PipelineSource =
   | "ENTSO-E API"
   | "Open-Meteo API"
@@ -344,26 +343,6 @@ export function getPipelineOps(): PipelineOp[] {
     { id: "pipe-3", name: "Generation Mix",        source: "EIA API",            schedule: "Every hour",       cron: "0 */1 * * *",   last_run: "28 min ago",     status: "success" },
     { id: "pipe-4", name: "Carbon Intensity",      source: "Carbon Intensity API", schedule: "Every hour",     cron: "0 */1 * * *",   last_run: "31 min ago",     status: "success" },
     { id: "pipe-5", name: "Fuel Prices",           source: "ICE API",            schedule: "Every 2 hours",     cron: "0 */2 * * *",   last_run: "1 hr ago",       status: "failed"  },
-  ];
-}
-
-export interface ModelOp {
-  id: string;
-  name: string;
-  version: string;
-  type: string;
-  last_trained: string;
-  performance: { mape: number; rmse: number };
-  status: ModelStage;
-}
-
-export function getModelOps(): ModelOp[] {
-  return [
-    { id: "m1", name: "Demand Forecast LSTM",    version: "v2.3.1", type: "LSTM",          last_trained: "May 17, 02:15 AM", performance: { mape: 2.81,  rmse: 542.3 }, status: "deployed"  },
-    { id: "m2", name: "Demand Baseline (Naive)", version: "v1.4.0", type: "Naive",         last_trained: "May 16, 11:30 PM", performance: { mape: 6.72,  rmse: 1_214.6 }, status: "deployed"  },
-    { id: "m3", name: "Generation Mix Model",    version: "v1.2.3", type: "XGBoost",       last_trained: "May 15, 10:20 PM", performance: { mape: 4.15,  rmse: 812.7 }, status: "staging"   },
-    { id: "m4", name: "Carbon Intensity Model",  version: "v1.1.0", type: "Prophet",       last_trained: "May 14, 09:10 PM", performance: { mape: 3.23,  rmse: 45.6  }, status: "staging"   },
-    { id: "m5", name: "Anomaly Detection Model", version: "v1.0.2", type: "Isolation Forest", last_trained: "May 13, 08:05 PM", performance: { mape: 0.92,  rmse: 0.93  }, status: "deployed"  },
   ];
 }
 

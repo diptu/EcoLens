@@ -8,6 +8,7 @@ from app.api.v1.datasources import router as datasources_router
 from app.api.v1.dbt import router as dbt_router
 from app.api.v1.health import router as health_router
 from app.api.v1.ingest import router as ingest_router
+from app.api.v1.model import router as model_router
 from app.api.v1.pipelines import router as pipelines_router
 
 # Each resource router already declares its own full `/v1/...` prefix (see
@@ -24,3 +25,4 @@ api_router.include_router(ingest_router)
 api_router.include_router(datasources_router)
 api_router.include_router(data_quality_router)
 api_router.include_router(pipelines_router)
+api_router.include_router(model_router)

@@ -138,6 +138,126 @@ async def load_bundle(model_name: str, stage: str = "Production") -> ModelBundle
     return await asyncio.to_thread(_load)
 
 
+@dataclass
+class ModelVersionSummary:
+    version: str
+    stage: str
+    run_id: str
+    created_at: datetime
+    metrics: dict[str, float]
+    git_sha: str | None
+
+
+async def list_versions(model_name: str) -> list[ModelVersionSummary]:
+    """Every registered version of `model_name`, any stage -- unlike
+    `load_bundle` (which only ever loads whichever version is currently
+    `Production`), this is a pure registry read: no state_dict/scaler
+    download, no model reconstruction. Newest first. `[]` if the model
+    has no registered versions yet (same "real, expected before the
+    first train+register" reasoning as `load_bundle` returning `None`).
+    """
+
+    def _list() -> list[ModelVersionSummary]:
+        tracking_uri = get_settings().mlflow_tracking_uri
+        mlflow.set_tracking_uri(tracking_uri)
+        client = MlflowClient(tracking_uri=tracking_uri)
+        versions = client.search_model_versions(f"name='{model_name}'")
+        summaries = [
+            ModelVersionSummary(
+                version=v.version,
+                stage=v.current_stage,
+                run_id=v.run_id,
+                created_at=datetime.fromtimestamp(v.creation_timestamp / 1000, tz=UTC),
+                metrics=dict(client.get_run(v.run_id).data.metrics),
+                git_sha=client.get_run(v.run_id).data.tags.get("git_sha"),
+            )
+            for v in versions
+        ]
+        summaries.sort(key=lambda s: s.created_at, reverse=True)
+        return summaries
+
+    return await asyncio.to_thread(_list)
+
+
+class PromotionRejected(Exception):
+    """Raised by `promote_version` when promoting to Production would
+    replace a better-performing version with a worse one -- the "gated
+    promotion" `data-pipeline/TODO.md`'s `ECO-M12` flags as unbuilt.
+    The route (`api/v1/model/routes.py`) turns this into a 409."""
+
+    def __init__(self, message: str) -> None:
+        self.message = message
+        super().__init__(message)
+
+
+_PROMOTION_GATE_METRIC = "test_mape"  # lower is better
+
+
+async def promote_version(
+    model_name: str, version: str, stage: str
+) -> ModelVersionSummary:
+    """Transitions `version` to `stage` in the MLflow registry.
+
+    Promoting to `Production` is gated: if both the candidate and the
+    current Production version have a real `test_mape` logged, reject
+    (raise `PromotionRejected`) when the candidate's is worse (higher).
+    No gate on Staging/Archived transitions -- those don't replace
+    what's actually serving traffic. If either side is missing the
+    metric, the promotion goes through ungated rather than blocking on
+    a comparison that can't actually be made.
+
+    Promoting to `Production` also archives whatever version was
+    previously in that stage (`archive_existing_versions=True`) -- the
+    same "only one Production at a time" invariant the old mock's
+    client-side `promote()` enforced, now real.
+    """
+
+    def _promote() -> ModelVersionSummary:
+        tracking_uri = get_settings().mlflow_tracking_uri
+        mlflow.set_tracking_uri(tracking_uri)
+        client = MlflowClient(tracking_uri=tracking_uri)
+
+        candidate = client.get_model_version(model_name, version)
+        candidate_metrics = dict(client.get_run(candidate.run_id).data.metrics)
+
+        if stage == "Production":
+            current = client.get_latest_versions(model_name, stages=["Production"])
+            if current:
+                current_metrics = dict(client.get_run(current[0].run_id).data.metrics)
+                candidate_mape = candidate_metrics.get(_PROMOTION_GATE_METRIC)
+                current_mape = current_metrics.get(_PROMOTION_GATE_METRIC)
+                if (
+                    candidate_mape is not None
+                    and current_mape is not None
+                    and candidate_mape > current_mape
+                ):
+                    raise PromotionRejected(
+                        f"version {version}'s {_PROMOTION_GATE_METRIC} "
+                        f"({candidate_mape:.4f}) is worse than the current "
+                        f"Production version's ({current_mape:.4f})"
+                    )
+
+        client.transition_model_version_stage(
+            name=model_name,
+            version=version,
+            stage=stage,
+            archive_existing_versions=(stage == "Production"),
+        )
+        run = client.get_run(candidate.run_id)
+        return ModelVersionSummary(
+            version=candidate.version,
+            stage=stage,
+            run_id=candidate.run_id,
+            created_at=datetime.fromtimestamp(
+                candidate.creation_timestamp / 1000, tz=UTC
+            ),
+            metrics=dict(run.data.metrics),
+            git_sha=run.data.tags.get("git_sha"),
+        )
+
+    return await asyncio.to_thread(_promote)
+
+
 class ModelRegistry:
     def __init__(self, model_name: str) -> None:
         self.model_name = model_name

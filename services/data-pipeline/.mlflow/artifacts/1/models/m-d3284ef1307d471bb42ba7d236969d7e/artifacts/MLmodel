@@ -1,0 +1,23 @@
+artifact_path: /Users/macbook/Project/research/EcoLens/services/data-pipeline/.mlflow/artifacts/1/models/m-d3284ef1307d471bb42ba7d236969d7e/artifacts
+flavors:
+  python_function:
+    config:
+      device: null
+    data: data
+    env:
+      conda: conda.yaml
+      virtualenv: python_env.yaml
+    loader_module: mlflow.pytorch
+    pickle_module_name: mlflow.pytorch.pickle_module
+    python_version: 3.12.12
+  pytorch:
+    code: null
+    model_data: data
+    pytorch_version: 2.13.0
+mlflow_version: 3.15.0
+model_id: m-d3284ef1307d471bb42ba7d236969d7e
+model_size_bytes: 874979
+model_uuid: m-d3284ef1307d471bb42ba7d236969d7e
+prompts: null
+run_id: 0318130e203b4f4495fd3da88cce5970
+utc_time_created: '2026-08-04 05:59:33.589258'

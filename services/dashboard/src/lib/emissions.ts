@@ -261,6 +261,104 @@ export async function fetchModelInfo(): Promise<ModelInfo> {
   return res.json();
 }
 
+/** Shape of forecast-api's `ModelVersionOut` (`GET /v1/model/versions`). */
+export type ModelVersion = {
+  version: string;
+  stage: string;
+  run_id: string;
+  created_at: string;
+  metrics: Record<string, number>;
+  git_sha: string | null;
+};
+
+export type ModelVersionsList = {
+  name: string;
+  data: ModelVersion[];
+};
+
+/** Live call to `GET /v1/model/versions` -- every registered MLflow
+ * version of the model, any stage. Unlike `fetchModelInfo()` (which
+ * only ever reports whichever version is currently Production), this
+ * is the real multi-row training history: backs the Model Registry
+ * page's Registry tab and Operational Tasks' "Recent Training Runs"
+ * list (Model Operations TODO.md Phase 1) -- `[]` is a real, expected
+ * state before the first model is ever trained+registered, not an
+ * error. */
+export async function fetchModelVersions(): Promise<ModelVersionsList> {
+  const res = await fetch(`${FORECAST_API_URL}/model/versions`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(
+      body?.error?.message ?? `GET /v1/model/versions failed: ${res.status}`,
+    );
+  }
+  return res.json();
+}
+
+/** Live call to `POST /v1/model/versions/{version}/promote` -- real
+ * MLflow stage transition, gated server-side when promoting to
+ * `"Production"` (rejects a candidate with a worse `test_mape` than
+ * the current Production version, a real 409). Promoting to
+ * `"Production"` also archives whatever version was previously in that
+ * stage server-side -- callers don't need to issue a second call for
+ * that. */
+export async function promoteModelVersion(
+  version: string,
+  stage: "Production" | "Staging" | "Archived",
+): Promise<ModelVersion> {
+  const res = await fetch(`${FORECAST_API_URL}/model/versions/${version}/promote`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ stage }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(
+      body?.error?.message ?? `POST /v1/model/versions/${version}/promote failed: ${res.status}`,
+    );
+  }
+  return res.json();
+}
+
+/** Polls `fetchModelVersions()` every `intervalMs` until the newest
+ * version differs from `sinceVersion` (the top-of-list version's id
+ * *before* the trigger, or `null` if the registry was empty) or
+ * `timeoutMs` elapses. Used after `triggerTraining()`
+ * (`lib/ingestion.ts`) -- that trigger has no training-run id to poll
+ * directly (a separate, independently-running consumer process does
+ * the actual work; see its own docstring), so watching for a new
+ * top-of-list version here is the only real completion signal
+ * available. Returns a cancel function; callers must call it on
+ * unmount so a stale poll doesn't call `onUpdate` after the
+ * component's gone. */
+export function pollForNewModelVersion(
+  sinceVersion: string | null,
+  onUpdate: (versions: ModelVersionsList) => void,
+  intervalMs = 5000,
+  timeoutMs = 120_000,
+): () => void {
+  let cancelled = false;
+  const deadline = Date.now() + timeoutMs;
+  const tick = async () => {
+    try {
+      const res = await fetchModelVersions();
+      if (cancelled) return;
+      onUpdate(res);
+      const newest = res.data[0]?.version ?? null;
+      if (newest !== sinceVersion) return; // a new version landed -- stop polling
+    } catch {
+      // A transient poll failure isn't fatal -- just retry next tick.
+    }
+    if (!cancelled && Date.now() < deadline) {
+      setTimeout(tick, intervalMs);
+    }
+  };
+  void tick();
+  return () => {
+    cancelled = true;
+  };
+}
+
 /** Display labels for `raw_marts.dim_energy_mix`'s real `fuel_type`
  * vocabulary (see `GenerationMix`) — narrower than the dashboard's older
  * mock `EMISSION_FACTORS` names (no black/brown coal or CCGT/OCGT gas

@@ -36,6 +36,9 @@ ecolens-pipeline = "app.cli:main"
 
 [dependency-groups]
 dev = [
+    "ipykernel>=7.3.0",
+    "jupyter>=1.1.1",
+    "matplotlib>=3.11.1",
     "mypy>=2.3.0",
     "pytest>=9.1.1",
     "ruff>=0.15.22",

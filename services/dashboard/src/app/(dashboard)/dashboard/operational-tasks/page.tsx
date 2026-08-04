@@ -59,30 +59,36 @@ import { Card } from "@/components/dashboard/card";
 import { cn } from "@/lib/utils";
 import {
   getActiveTasks,
-  getModelOps,
   getOperationalKpis,
-  getRecentTrainingRuns,
   getScheduledOps,
   getSystemCommands,
-  getTrainingConfigOptions,
   type ActiveTask,
-  type ModelOp,
   type OperationalKpi,
   type ScheduledOp,
   type SystemCommand,
   type TaskStatus,
   type TaskType,
-  type TrainingRun,
 } from "@/lib/admin-dashboard";
 import {
+  fetchModelInfo,
+  fetchModelVersions,
+  pollForNewModelVersion,
+  type ModelInfo,
+  type ModelVersion,
+} from "@/lib/emissions";
+import {
   PIPELINE_CATALOG,
+  triggerTraining,
+  fetchTrainingRuns,
   triggerIngestionRun,
   pollLatestRun,
   triggerBackfill,
   pollBackfillSummary,
   monthToRange,
+  formatRelativeTime,
   TriggerIngestionError,
   type RunStatus,
+  type TrainingRunLog,
   type BackfillTrigger,
   type BackfillProgress,
 } from "@/lib/ingestion";
@@ -153,18 +159,26 @@ function PipelineStatusChip({ status }: { status: RowStatus }) {
   );
 }
 
-function ModelStatusChip({ status }: { status: ModelOp["status"] }) {
-  const map = {
-    deployed:   { color: "border-emerald-200/40 bg-emerald-200/10 text-emerald-100", label: "Deployed"  },
-    staging:    { color: "border-amber-300/40 bg-amber-300/10 text-amber-200",     label: "Staging"   },
-    deprecated: { color: "border-white/10 bg-white/5 text-white/60",                label: "Deprecated"},
-  };
-  const m = map[status];
-  return (
-    <span className={cn("rounded-md border px-2 py-0.5 text-[11px] font-medium", m.color)}>
-      {m.label}
-    </span>
-  );
+/** `ModelInfo.stage` is whatever MLflow's registry actually reports —
+ * today that's always "Production" (`GET /v1/model` only ever loads
+ * the Production version, see `service/ml/registry.py`'s `load_bundle`
+ * default) or absent entirely (`status: "not_loaded"`, a real state
+ * before the first model is ever trained+promoted). Not a closed union
+ * like the old mock's deployed/staging/deprecated -- Phase 1's
+ * `GET /v1/model/versions` will surface Staging/Archived for real. */
+function ModelStageChip({ stage }: { stage: string | null }) {
+  if (!stage) {
+    return (
+      <span className="rounded-md border border-white/10 bg-white/5 px-2 py-0.5 text-[11px] font-medium text-white/50">
+        Not loaded
+      </span>
+    );
+  }
+  const color =
+    stage === "Production"
+      ? "border-emerald-200/40 bg-emerald-200/10 text-emerald-100"
+      : "border-amber-300/40 bg-amber-300/10 text-amber-200";
+  return <span className={cn("rounded-md border px-2 py-0.5 text-[11px] font-medium", color)}>{stage}</span>;
 }
 
 function TaskStatusChip({ status }: { status: TaskStatus }) {
@@ -215,6 +229,12 @@ const TASK_TAB_LABELS: Array<{ value: TaskStatus | "all"; label: string }> = [
 
 type RowState = { status: RowStatus; records?: number | null; error?: string };
 
+type TrainStatus =
+  | { state: "idle" }
+  | { state: "queued" }
+  | { state: "polling" }
+  | { state: "error"; message: string };
+
 type BackfillState =
   | { state: "submitting" }
   | { state: "running"; trigger: BackfillTrigger; progress: BackfillProgress }
@@ -227,25 +247,109 @@ export default function OperationalTasksPage() {
   const cancelFns = useRef<Record<string, () => void>>({});
   const [backfillModal, setBackfillModal] = useState<{ sourceId: string; label: string } | null>(null);
   const [backfillStatus, setBackfillStatus] = useState<Record<string, BackfillState>>({});
-  const models = useMemo(() => getModelOps(), []);
-  const allTasks = useMemo(() => getActiveTasks(), []);
-  const recentRuns = useMemo(() => getRecentTrainingRuns(), []);
+  const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null);
+  const [modelInfoLoaded, setModelInfoLoaded] = useState(false);
+  const [modelVersions, setModelVersions] = useState<ModelVersion[] | null>(null);
+  const [modelVersionsLoaded, setModelVersionsLoaded] = useState(false);
+  const [trainStatus, setTrainStatus] = useState<TrainStatus>({ state: "idle" });
+  const [trainingRuns, setTrainingRuns] = useState<TrainingRunLog[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchTrainingRuns(5)
+      .then((r) => {
+        if (!cancelled) setTrainingRuns(r.data);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // The `model_training`-typed rows are real (`meta._training_log`,
+  // Model Operations TODO.md Phase 4); the other 6 task types
+  // (ingestion, data_quality, feature_build, forecast, report, anomaly)
+  // stay mock -- nothing else logs "a task is in flight" anywhere yet.
+  const allTasks = useMemo(() => {
+    const mockTasks = getActiveTasks().filter((t) => t.type !== "model_training");
+    const realTrainingTasks: ActiveTask[] = (trainingRuns ?? []).map((r) => ({
+      id: r.id,
+      type: "model_training",
+      target: r.model_name,
+      triggered_by: r.triggered_by,
+      started_at: formatRelativeTime(r.started_at),
+      status: r.status === "running" ? "running" : r.status === "success" ? "completed" : "failed",
+      progress: r.status === "running" ? 50 : 100,
+    }));
+    return [...realTrainingTasks, ...mockTasks];
+  }, [trainingRuns]);
   const scheduled = useMemo(() => getScheduledOps(), []);
   const commands = useMemo(() => getSystemCommands(), []);
-  const configOpts = useMemo(() => getTrainingConfigOptions(), []);
 
   const [tab, setTab] = useState<TaskStatus | "all">("all");
-  const [selectedModel, setSelectedModel] = useState(configOpts.models[0]);
-  const [dataRange, setDataRange] = useState("2023-01-01 → 2025-05-18");
-  const [env, setEnv] = useState(configOpts.environments[0]);
-  const [compute, setCompute] = useState(configOpts.compute[1]); // GPU (NVIDIA T4)
-  const [expName, setExpName] = useState("");
+  const [trainRegionsInput, setTrainRegionsInput] = useState("");
+  const [trainWindowHours, setTrainWindowHours] = useState(24);
 
   useEffect(() => {
     return () => {
       Object.values(cancelFns.current).forEach((cancel) => cancel());
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchModelInfo()
+      .then((info) => {
+        if (!cancelled) setModelInfo(info);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setModelInfoLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchModelVersions()
+      .then((r) => {
+        if (!cancelled) setModelVersions(r.data);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setModelVersionsLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  function triggerFineTune(opts?: { regions?: string[]; windowHours?: number }) {
+    cancelFns.current["__model_training__"]?.();
+    setTrainStatus({ state: "queued" });
+    const sinceVersion = modelVersions?.[0]?.version ?? null;
+
+    triggerTraining(opts)
+      .then(() => {
+        fetchTrainingRuns(5).then((r) => setTrainingRuns(r.data)).catch(() => {});
+        cancelFns.current["__model_training__"] = pollForNewModelVersion(sinceVersion, (versions) => {
+          setTrainStatus({ state: "polling" });
+          fetchTrainingRuns(5).then((r) => setTrainingRuns(r.data)).catch(() => {});
+          const newest = versions.data[0]?.version ?? null;
+          if (newest !== sinceVersion) {
+            setModelVersions(versions.data);
+            fetchModelInfo().then(setModelInfo).catch(() => {});
+            setTrainStatus({ state: "idle" });
+          }
+        });
+      })
+      .catch((err) => {
+        const message = err instanceof Error ? err.message : "training trigger failed";
+        setTrainStatus({ state: "error", message });
+      });
+  }
 
   function triggerPipeline(sourceId: string) {
     cancelFns.current[sourceId]?.();
@@ -383,17 +487,38 @@ export default function OperationalTasksPage() {
           <div className="mb-3 flex items-center justify-between">
             <div>
               <h2 className="text-base font-semibold text-white">Model Operations</h2>
-              <p className="text-xs text-white/50">Manage model training, tuning and deployments.</p>
+              <p className="text-xs text-white/50">The one real model in this system.</p>
             </div>
-            <button className="inline-flex items-center gap-1 rounded-md bg-emerald-200/15 px-3 py-1.5 text-xs font-semibold text-emerald-100 hover:bg-emerald-200/20">
-              <RefreshCw className="h-3.5 w-3.5" />
-              Retrain Model
+            <button
+              onClick={() => triggerFineTune()}
+              disabled={trainStatus.state === "queued" || trainStatus.state === "polling"}
+              className={cn(
+                "inline-flex items-center gap-1 rounded-md px-3 py-1.5 text-xs font-semibold",
+                trainStatus.state === "queued" || trainStatus.state === "polling"
+                  ? "cursor-not-allowed bg-white/10 text-white/40"
+                  : "bg-emerald-200/15 text-emerald-100 hover:bg-emerald-200/20",
+              )}
+            >
+              <RefreshCw className={cn("h-3.5 w-3.5", trainStatus.state === "polling" && "animate-spin")} />
+              Fine-tune
             </button>
           </div>
-          <ModelTable rows={models} />
-          <button className="mt-3 inline-flex w-full items-center justify-center gap-1 text-xs text-emerald-100 hover:underline">
-            View all models <ChevronDown className="h-3 w-3" />
-          </button>
+          <ModelInfoTable info={modelInfo} loaded={modelInfoLoaded} />
+          {trainStatus.state === "queued" && (
+            <p className="mt-2 text-[11px] text-sky-300">Training trigger queued — waiting for the worker to pick it up.</p>
+          )}
+          {trainStatus.state === "polling" && (
+            <p className="mt-2 text-[11px] text-sky-300">Waiting for a new registered version — this can take a few minutes.</p>
+          )}
+          {trainStatus.state === "error" && (
+            <p className="mt-2 text-[11px] text-rose-300">{trainStatus.message}</p>
+          )}
+          <a
+            href="/dashboard/models/"
+            className="mt-3 inline-flex w-full items-center justify-center gap-1 text-xs text-emerald-100 hover:underline"
+          >
+            View model registry <ChevronDown className="h-3 w-3" />
+          </a>
         </Card>
       </div>
 
@@ -429,71 +554,56 @@ export default function OperationalTasksPage() {
         <Card>
           <div className="mb-3">
             <h2 className="text-base font-semibold text-white">Model Training &amp; Tuning</h2>
-            <p className="text-xs text-white/50">Configure and launch model training or hyperparameter tuning jobs.</p>
-          </div>
-          <div className="mb-3 flex items-center gap-2 border-b border-white/5">
-            <TabBtn active>Train Model</TabBtn>
-            <TabBtn>Hyperparameter Tuning</TabBtn>
+            <p className="text-xs text-white/50">
+              Publishes a real training-trigger event to data-pipeline's train-worker --
+              only the incremental fine-tune path exists (see the Model Registry page's
+              Train tab for the still-unbuilt full-retrain path).
+            </p>
           </div>
           <div className="space-y-3">
-            <Field label="Select Model">
-              <select
-                value={selectedModel}
-                onChange={(e) => setSelectedModel(e.target.value)}
-                className="w-full rounded-md border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-white focus:border-emerald-200/60 focus:outline-none"
-              >
-                {configOpts.models.map((m) => <option key={m} className="bg-[#0a1410]">{m}</option>)}
-              </select>
-            </Field>
-            <Field label="Training Data Range">
-              <div className="flex items-center gap-2">
-                <input
-                  type="text"
-                  value={dataRange}
-                  onChange={(e) => setDataRange(e.target.value)}
-                  className="w-full rounded-md border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-white focus:border-emerald-200/60 focus:outline-none"
-                />
-                <button className="rounded-md border border-white/10 bg-white/[0.04] p-2 text-white/60 hover:text-white">
-                  <Calendar className="h-4 w-4" />
-                </button>
-              </div>
-            </Field>
-            <Field label="Training Environment">
-              <select
-                value={env}
-                onChange={(e) => setEnv(e.target.value)}
-                className="w-full rounded-md border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-white focus:border-emerald-200/60 focus:outline-none"
-              >
-                {configOpts.environments.map((e) => <option key={e} className="bg-[#0a1410]">{e}</option>)}
-              </select>
-            </Field>
-            <Field label="Compute Resource">
-              <select
-                value={compute}
-                onChange={(e) => setCompute(e.target.value)}
-                className="w-full rounded-md border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-white focus:border-emerald-200/60 focus:outline-none"
-              >
-                {configOpts.compute.map((c) => <option key={c} className="bg-[#0a1410]">{c}</option>)}
-              </select>
-            </Field>
-            <Field label="Experiment Name (Optional)">
+            <Field label="Regions (optional)">
               <input
                 type="text"
-                value={expName}
-                onChange={(e) => setExpName(e.target.value)}
-                placeholder="e.g., lstm_retrain_may19"
+                value={trainRegionsInput}
+                onChange={(e) => setTrainRegionsInput(e.target.value)}
+                placeholder="e.g. NSW1, QLD1 -- blank uses the server default"
                 className="w-full rounded-md border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-white placeholder:text-white/35 focus:border-emerald-200/60 focus:outline-none"
               />
             </Field>
-            <details className="rounded-md border border-white/5 bg-white/[0.02]">
-              <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-white/70">Advanced Settings</summary>
-              <div className="border-t border-white/5 p-3 text-xs text-white/50">
-                <p>Learning rate, batch size, epochs, early stopping, MLflow experiment, etc.</p>
-              </div>
-            </details>
-            <button className="inline-flex w-full items-center justify-center gap-2 rounded-md bg-emerald-200 px-4 py-2 text-sm font-semibold text-black hover:bg-emerald-100">
+            <Field label="Window (hours)">
+              <input
+                type="number"
+                min={1}
+                max={720}
+                value={trainWindowHours}
+                onChange={(e) => setTrainWindowHours(parseInt(e.target.value, 10) || 1)}
+                className="w-full rounded-md border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-white focus:border-emerald-200/60 focus:outline-none"
+              />
+            </Field>
+            {trainStatus.state === "queued" && (
+              <p className="text-xs text-sky-300">Queued — waiting for the worker to pick it up.</p>
+            )}
+            {trainStatus.state === "polling" && (
+              <p className="text-xs text-sky-300">Waiting for a new registered version — this can take a few minutes.</p>
+            )}
+            {trainStatus.state === "error" && (
+              <p className="text-xs text-rose-300">{trainStatus.message}</p>
+            )}
+            <button
+              onClick={() => {
+                const regions = trainRegionsInput.split(",").map((r) => r.trim()).filter(Boolean);
+                triggerFineTune({ regions: regions.length ? regions : undefined, windowHours: trainWindowHours });
+              }}
+              disabled={trainStatus.state === "queued" || trainStatus.state === "polling"}
+              className={cn(
+                "inline-flex w-full items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-semibold",
+                trainStatus.state === "queued" || trainStatus.state === "polling"
+                  ? "cursor-not-allowed bg-white/10 text-white/40"
+                  : "bg-emerald-200 text-black hover:bg-emerald-100",
+              )}
+            >
               <Play className="h-4 w-4" />
-              Start Training
+              Start Fine-tune
             </button>
           </div>
         </Card>
@@ -505,7 +615,7 @@ export default function OperationalTasksPage() {
           <div className="mb-3">
             <h2 className="text-base font-semibold text-white">Recent Training Runs</h2>
           </div>
-          <TrainingRunsList runs={recentRuns} />
+          <TrainingRunsList versions={modelVersions} loaded={modelVersionsLoaded} />
         </Card>
       </div>
 
@@ -741,49 +851,61 @@ function BackfillModal({
   );
 }
 
-function ModelTable({ rows }: { rows: ModelOp[] }) {
+/** Renders `GET /v1/model`'s single row honestly -- there is exactly one
+ * real model in this system (see this file's module docstring), so
+ * unlike the old mock's 5-row fake table, this either shows that one
+ * model's real fields or an explicit "not loaded yet" state (a real,
+ * expected condition before the first model is ever trained+promoted,
+ * not an error). Metrics are rendered generically from whatever keys
+ * `info.metrics` actually has -- real training only ever logs
+ * `test_mape`/`test_coverage_raw`/`test_coverage_calibrated` (see
+ * `data-pipeline/app/service/ml/train.py`), not the old mock's
+ * fabricated MAPE+RMSE pair. */
+function ModelInfoTable({ info, loaded }: { info: ModelInfo | null; loaded: boolean }) {
+  if (!loaded) {
+    return <p className="py-4 text-center text-xs text-white/40">Loading model info…</p>;
+  }
+  if (!info || info.status === "not_loaded") {
+    return (
+      <div className="rounded-md border border-white/10 bg-white/[0.02] p-3 text-xs text-white/50">
+        No model has been trained and promoted to Production yet
+        {info?.name ? ` (${info.name})` : ""}.
+      </div>
+    );
+  }
   return (
     <table className="w-full text-left text-sm">
       <thead className="border-b border-white/5 text-[11px] uppercase tracking-wide text-white/40">
         <tr>
           <th className="py-2">Model Name</th>
           <th className="py-2">Version</th>
-          <th className="py-2">Type</th>
-          <th className="py-2">Last Trained</th>
-          <th className="py-2">Performance</th>
-          <th className="py-2">Status</th>
-          <th className="py-2 text-right">Actions</th>
+          <th className="py-2">Stage</th>
+          <th className="py-2">Loaded</th>
+          <th className="py-2">Metrics</th>
         </tr>
       </thead>
       <tbody className="divide-y divide-white/5">
-        {rows.map((m) => (
-          <tr key={m.id} className="text-white/85">
-            <td className="py-2 pr-2">{m.name}</td>
-            <td className="py-2 pr-2">
-              <span className="rounded bg-purple-300/15 px-1.5 py-0.5 font-mono text-[11px] text-purple-200">{m.version}</span>
-            </td>
-            <td className="py-2 pr-2 text-white/60">{m.type}</td>
-            <td className="py-2 pr-2 text-white/60">{m.last_trained}</td>
-            <td className="py-2 pr-2 text-[11px] text-white/70">
-              <div>MAPE {m.performance.mape.toFixed(2)}%</div>
-              <div>RMSE {m.performance.rmse.toLocaleString()}</div>
-            </td>
-            <td className="py-2 pr-2"><ModelStatusChip status={m.status} /></td>
-            <td className="py-2 text-right">
-              <div className="inline-flex items-center gap-1">
-                <button className="rounded p-1 text-white/50 hover:bg-white/5 hover:text-white" title="Retrain">
-                  <RefreshCw className="h-3.5 w-3.5" />
-                </button>
-                <button className="rounded p-1 text-white/50 hover:bg-white/5 hover:text-white" title="Tune">
-                  <Sparkles className="h-3.5 w-3.5" />
-                </button>
-                <button className="rounded p-1 text-white/50 hover:bg-white/5 hover:text-white" title="More">
-                  ⋯
-                </button>
-              </div>
-            </td>
-          </tr>
-        ))}
+        <tr className="text-white/85">
+          <td className="py-2 pr-2">{info.name}</td>
+          <td className="py-2 pr-2">
+            {info.version ? (
+              <span className="rounded bg-purple-300/15 px-1.5 py-0.5 font-mono text-[11px] text-purple-200">v{info.version}</span>
+            ) : (
+              "—"
+            )}
+          </td>
+          <td className="py-2 pr-2"><ModelStageChip stage={info.stage} /></td>
+          <td className="py-2 pr-2 text-white/60">{formatRelativeTime(info.loaded_at)}</td>
+          <td className="py-2 pr-2 text-[11px] text-white/70">
+            {Object.keys(info.metrics).length === 0
+              ? "—"
+              : Object.entries(info.metrics).map(([key, value]) => (
+                  <div key={key}>
+                    {key.replace(/_/g, " ")}: {value.toFixed(2)}
+                  </div>
+                ))}
+          </td>
+        </tr>
       </tbody>
     </table>
   );
@@ -873,31 +995,51 @@ function ScheduledTable({ rows }: { rows: ScheduledOp[] }) {
   );
 }
 
-function TrainingRunsList({ runs }: { runs: TrainingRun[] }) {
+/** Real registered versions from `GET /v1/model/versions`, newest first
+ * (Model Operations TODO.md Phase 1) -- metrics are rendered generically
+ * from whatever keys are actually present (`test_mape`/
+ * `test_coverage_raw`/`test_coverage_calibrated`, see
+ * `data-pipeline/app/service/ml/train.py`), not the old mock's
+ * fabricated MAPE+RMSE pair. */
+function TrainingRunsList({ versions, loaded }: { versions: ModelVersion[] | null; loaded: boolean }) {
+  if (!loaded) {
+    return <p className="py-4 text-center text-xs text-white/40">Loading training history…</p>;
+  }
+  if (!versions || versions.length === 0) {
+    return (
+      <div className="rounded-md border border-white/5 bg-white/[0.02] p-3 text-center text-xs text-white/50">
+        No model has been trained and registered yet.
+      </div>
+    );
+  }
   return (
     <ul className="space-y-1.5">
-      {runs.map((r) => (
-        <li key={r.version} className="rounded-md border border-white/5 bg-white/[0.02] p-2.5">
+      {versions.map((v) => (
+        <li key={v.version} className="rounded-md border border-white/5 bg-white/[0.02] p-2.5">
           <div className="flex items-center justify-between">
             <div>
               <div className="flex items-center gap-2">
-                <span className="text-sm font-medium text-white">{r.model}</span>
-                <span className="rounded bg-purple-300/15 px-1.5 py-0.5 font-mono text-[10px] text-purple-200">{r.version}</span>
+                <span className="rounded bg-purple-300/15 px-1.5 py-0.5 font-mono text-[10px] text-purple-200">v{v.version}</span>
               </div>
-              <div className="text-[11px] text-white/50">{r.trained_at}</div>
+              <div className="text-[11px] text-white/50">{formatRelativeTime(v.created_at)}</div>
             </div>
             <span className="rounded-md border border-emerald-200/40 bg-emerald-200/10 px-2 py-0.5 text-[11px] font-medium text-emerald-100">
-              {r.status.charAt(0).toUpperCase() + r.status.slice(1)}
+              {v.stage}
             </span>
           </div>
-          <div className="mt-1.5 flex items-center gap-3 text-[11px] text-white/60">
-            <span>MAPE {r.performance.mape.toFixed(2)}%</span>
-            <span>RMSE {r.performance.rmse.toLocaleString()}</span>
+          <div className="mt-1.5 flex flex-wrap items-center gap-3 text-[11px] text-white/60">
+            {Object.keys(v.metrics).length === 0 ? (
+              <span>No test metrics logged for this run.</span>
+            ) : (
+              Object.entries(v.metrics).map(([key, value]) => (
+                <span key={key}>{key.replace(/_/g, " ")}: {value.toFixed(2)}</span>
+              ))
+            )}
           </div>
         </li>
       ))}
       <li className="pt-1 text-center">
-        <button className="text-xs text-emerald-100 hover:underline">View all runs</button>
+        <a href="/dashboard/models/" className="text-xs text-emerald-100 hover:underline">View all versions</a>
       </li>
     </ul>
   );
@@ -940,15 +1082,3 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
-function TabBtn({ children, active }: { children: React.ReactNode; active?: boolean }) {
-  return (
-    <button className={cn(
-      "border-b-2 px-3 py-1.5 text-xs font-medium transition-colors",
-      active
-        ? "border-emerald-200 text-emerald-100"
-        : "border-transparent text-white/60 hover:text-white",
-    )}>
-      {children}
-    </button>
-  );
-}

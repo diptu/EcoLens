@@ -11,7 +11,6 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  generateModelRegistry,
   generateDataSources,
   generateJobs,
   generateAdminUsers,
@@ -28,51 +27,6 @@ const VALID_JOB_STATUSES: JobStatus[] = [
   "queued", "running", "succeeded", "failed", "cancelled",
 ];
 const VALID_ROLES: User["role"][] = ["admin", "analyst", "viewer"];
-
-describe("generateModelRegistry", () => {
-  const models = generateModelRegistry();
-
-  it("returns 3 versions", () => {
-    expect(models).toHaveLength(3);
-  });
-
-  it("has exactly one Production, one Staging, one Archived", () => {
-    const stages = models.map((m) => m.stage);
-    expect(stages.filter((s) => s === "Production")).toHaveLength(1);
-    expect(stages.filter((s) => s === "Staging")).toHaveLength(1);
-    expect(stages.filter((s) => s === "Archived")).toHaveLength(1);
-  });
-
-  it("uses sequential version numbers", () => {
-    const versions = models.map((m) => m.version).sort((a, b) => a - b);
-    expect(versions).toEqual([5, 6, 7]);
-  });
-
-  it("all metrics are positive numbers", () => {
-    for (const m of models) {
-      expect(m.metrics.mape).toBeGreaterThan(0);
-      expect(m.metrics.rmse_mw).toBeGreaterThan(0);
-      expect(m.metrics.mae_mw).toBeGreaterThan(0);
-    }
-  });
-
-  it("Production model has the lowest MAPE", () => {
-    const production = models.find((m) => m.stage === "Production")!;
-    const other = models.filter((m) => m.stage !== "Production");
-    for (const o of other) {
-      expect(production.metrics.mape).toBeLessThanOrEqual(o.metrics.mape);
-    }
-  });
-
-  it("each model has a created_at within the last 100 days", () => {
-    const now = Date.now();
-    for (const m of models) {
-      const ts = new Date(m.created_at).getTime();
-      expect(ts).toBeLessThanOrEqual(now);
-      expect(now - ts).toBeLessThan(100 * 86_400_000);
-    }
-  });
-});
 
 describe("generateDataSources", () => {
   const sources = generateDataSources();

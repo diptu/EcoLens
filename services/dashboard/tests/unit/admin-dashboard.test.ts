@@ -19,7 +19,6 @@ import {
   getEmissionsTrend,
   getGenerationMix,
   getIngestionStatus,
-  getModelOps,
   getOperationalKpis,
   getRecentAlerts,
   getRecentReports,
@@ -92,17 +91,6 @@ describe("admin-dashboard — shape & invariants", () => {
     expect(s.success).toBeGreaterThan(0);
     expect(s.failed).toBeGreaterThanOrEqual(0);
     expect(s.pending).toBeGreaterThanOrEqual(0);
-  });
-
-  it("getModelOps has 5 models with performance metrics", () => {
-    const models = getModelOps();
-    expect(models).toHaveLength(5);
-    for (const m of models) {
-      expect(m.version).toBeTruthy();
-      expect(m.performance.mape).toBeGreaterThan(0);
-      expect(m.performance.rmse).toBeGreaterThan(0);
-      expect(["deployed", "staging", "deprecated"]).toContain(m.status);
-    }
   });
 
   it("getActiveTasks covers all 4 statuses", () => {

@@ -17,6 +17,17 @@
 --
 -- Ephemeral (dbt_project.yml) -- inlined into fct_energy_demand, never
 -- materialized on its own.
+--
+-- Weather and generation-mix joins are both "as-of" (last observation
+-- at or before `d.ts`), not exact-timestamp -- BoM/OpenElectricity both
+-- report on their own independent cadences that don't line up exactly
+-- with AEMO's 5-min dispatch timestamps (confirmed against real data:
+-- exact-match joins left ~83% of rows NULL for weather and produced
+-- runs of complete rows too short to cover `ml/data.py`'s
+-- lookback+horizon=96-step sliding windows even after fixing weather
+-- alone -- see TODO.md's Model Operations section). Both change slowly
+-- enough that forward-filling the most recent real reading is the
+-- standard, honest way to handle this, not a fabricated value.
 
 with demand as (
     select ts, region, demand_mw, price_mwh from {{ ref('stg_aemo_nem_dispatch') }}
@@ -53,7 +64,17 @@ select
         partition by d.region order by d.ts rows between 335 preceding and current row
     ) as roll_7d
 from demand d
-left join weather w
-    on d.region = w.region and d.ts = w.ts
-left join generation g
-    on d.region = g.region and d.ts = g.ts
+left join lateral (
+    select w2.temp_c, w2.apparent_temp_c, w2.humidity_pct, w2.wind_speed_kmh, w2.cloud_oktas
+    from weather w2
+    where w2.region = d.region and w2.ts <= d.ts
+    order by w2.ts desc
+    limit 1
+) w on true
+left join lateral (
+    select g2.total_generation_mw, g2.total_renewable_mw
+    from generation g2
+    where g2.region = d.region and g2.ts <= d.ts
+    order by g2.ts desc
+    limit 1
+) g on true

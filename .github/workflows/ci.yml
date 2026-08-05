@@ -13,11 +13,19 @@ name: CI
 # findings once, then switch this workflow to `make lint`/`make test`
 # instead of duplicating their command list here.
 #
-# forecast-api is its own independent `uv` project (own venv/lockfile,
-# not a member of the root workspace) — its restructured package is named
-# `app`, same as data-pipeline's, so sharing one workspace venv would
-# collide the two. Its steps use `uv run --directory services/forecast-api`
-# rather than the root workspace sync the data-pipeline steps use.
+# forecast-api and services/waerehouse are each their own independent
+# `uv` project (own venv/lockfile, not a member of the root workspace) —
+# both restructured packages are named `app`, same as data-pipeline's, so
+# sharing one workspace venv would collide them. Their steps use `uv run
+# --directory services/<name>` rather than the root workspace sync the
+# data-pipeline steps use. (`services/ingestion` is the same shape but
+# isn't wired into this workflow yet — a pre-existing gap, not something
+# this change touches.)
+#
+# `warehouse-dbt` is a separate job from `lint`/`test` (README Phase 5's
+# "execute dbt test runs against an ephemeral test database") — it needs
+# a real Postgres service container to run `dbt seed`/`run`/`test`
+# against, which the other two jobs have no reason to pay for.
 
 on:
   push:
@@ -45,17 +53,26 @@ jobs:
       - name: Sync forecast-api (independent project)
         run: uv sync --directory services/forecast-api
 
+      - name: Sync warehouse (independent project)
+        run: uv sync --directory services/waerehouse
+
       - name: ruff check (data-pipeline, repo root)
         run: uv run ruff check .
 
       - name: ruff check (forecast-api)
         run: uv run --directory services/forecast-api ruff check .
 
+      - name: ruff check (warehouse)
+        run: uv run --directory services/waerehouse ruff check .
+
       - name: mypy (data-pipeline)
         run: uv run mypy services/data-pipeline/app
 
       - name: mypy (forecast-api)
         run: uv run --directory services/forecast-api mypy app
+
+      - name: mypy (warehouse)
+        run: uv run --directory services/waerehouse mypy app
 
   test:
     runs-on: ubuntu-latest
@@ -72,8 +89,55 @@ jobs:
       - name: Sync forecast-api (independent project)
         run: uv sync --directory services/forecast-api
 
+      - name: Sync warehouse (independent project)
+        run: uv sync --directory services/waerehouse
+
       - name: pytest (data-pipeline)
         run: uv run pytest services/data-pipeline -q
 
       - name: pytest (forecast-api)
         run: uv run --directory services/forecast-api pytest -q
+
+      - name: pytest (warehouse)
+        run: uv run --directory services/waerehouse pytest -q
+
+  warehouse-dbt:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ecolens
+          POSTGRES_PASSWORD: ecolens
+          POSTGRES_DB: ecolens
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql+asyncpg://ecolens:ecolens@localhost:5432/ecolens
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Sync warehouse (independent project)
+        run: uv sync --directory services/waerehouse
+
+      - name: Apply raw.* schema migrations
+        run: |
+          sudo apt-get update && sudo apt-get install -y postgresql-client
+          ENV_FILE=/dev/null services/waerehouse/scripts/apply-migrations.sh
+
+      - name: dbt seed
+        run: uv run --directory services/waerehouse ecolens-warehouse dbt seed
+
+      - name: dbt run
+        run: uv run --directory services/waerehouse ecolens-warehouse dbt run
+
+      - name: dbt test
+        run: uv run --directory services/waerehouse ecolens-warehouse dbt test

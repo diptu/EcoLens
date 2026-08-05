@@ -1,0 +1,58 @@
+version: 2
+
+models:
+  - name: int_demand_with_weather
+    description: >
+      NEM + WEM demand joined to same-region/same-timestamp BoM weather,
+      with hour/day-of-week and lag/rolling-average demand features —
+      README.md's documented feature-engineering example.
+    columns:
+      - name: ts
+        tests: [not_null]
+      - name: region
+        tests: [not_null]
+      - name: demand_mw
+        tests: [not_null]
+
+  - name: int_mix_share
+    description: >
+      stg_openelectricity_mix's wide per-fuel MW columns, unpivoted to one
+      row per (ts, network_code, region, fuel_type) plus each fuel's
+      share of total generation for that interval.
+    columns:
+      - name: fuel_type
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('emissions_factors')
+                field: fuel_type
+
+  - name: int_carbon_intensity
+    description: >
+      Per-(ts, network_code, region) generation-weighted carbon
+      intensity — README's "live_mix_weighted" emissions method.
+    columns:
+      - name: ts
+        tests: [not_null]
+      - name: region
+        tests: [not_null]
+
+  - name: int_fuel_emissions
+    description: >
+      Per-(ts, network_code, region, fuel_type) generation (MWh) +
+      weighted emissions (kgCO2e) — the per-fuel math int_carbon_intensity
+      sums away; shared by int_carbon_intensity and fct_generation_mix so
+      neither duplicates the weighting logic.
+    columns:
+      - name: ts
+        tests: [not_null]
+      - name: region
+        tests: [not_null]
+      - name: fuel_type
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('emissions_factors')
+                field: fuel_type

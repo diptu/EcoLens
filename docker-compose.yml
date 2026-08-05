@@ -267,7 +267,56 @@ services:
       redis:
         condition: service_healthy
 
-  # ── Warehouse-sync consumer (overview.md §2) ─────────────────────────────
+  # ── Warehouse (services/waerehouse/README.md) ────────────────────────────
+  # Standalone extraction of the warehousing half (overview.md §2) --
+  # own uv project/image, not a `data-pipeline` command variant. Runs
+  # alongside `data-pipeline`'s own `warehouse-sync` below (unmodified)
+  # until this service is verified and cut over, same "extract, don't
+  # replace yet" pattern `services/ingestion` already established.
+  # Read-only on the shared `duckdb_staging` volume (`app.db.
+  # duckdb_client`'s own module docstring -- writing/appending stays
+  # ingestion's job).
+  warehouse:
+    build:
+      context: .
+      dockerfile: infra/docker/warehouse.Dockerfile
+    <<: *common-env
+    ports:
+      - "8004:8004"
+    volumes:
+      - duckdb_staging:/app/services/waerehouse/data/staging:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      minio-setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8004/v1/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # The actual RabbitMQ consumer (`ecolens.landing` -> Postgres `raw.*`)
+  # -- same image/entrypoint as `warehouse` above, `command: consume` is
+  # the only difference.
+  warehouse-consumer:
+    build:
+      context: .
+      dockerfile: infra/docker/warehouse.Dockerfile
+    <<: *common-env
+    command: consume
+    volumes:
+      - duckdb_staging:/app/services/waerehouse/data/staging:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  # ── Warehouse-sync consumer (overview.md §2, data-pipeline's own
+  # legacy version) ─────────────────────────────────────────────────────────
   # The other half of the raw-landing pipeline: `data-pipeline`'s ingest
   # tasks stage into DuckDB and publish here via RabbitMQ; this is the
   # long-running process that reads those files back out and loads them

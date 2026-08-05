@@ -1,0 +1,248 @@
+"""ecoLens warehouse service configuration.
+
+Single source of truth for runtime settings — this service owns the
+consumer side of the event-driven warehousing pipeline (`overview.md`
+§2): it reads `ecolens.landing` off RabbitMQ (the same queue `services/
+ingestion`'s `publish_landed_event` writes to — the queue *name* has to
+match exactly, it's the one real coupling point between the two
+services), reads the shared DuckDB staging file `services/ingestion`
+writes into, loads into Postgres `raw.*`, enforces the free-tier
+rolling-window retention policy, and runs dbt on top. Never fetches from
+external providers or writes to `meta._ingest_log` — that's ingestion's
+job (`services/ingestion/TODO.md`'s own service-boundary note).
+"""
+
+from __future__ import annotations
+
+import socket
+from functools import lru_cache
+from pathlib import Path
+from urllib.parse import urlparse
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# This file lives at services/waerehouse/app/core/config.py -- three
+# `.parent`s up is services/waerehouse itself, where `.env` lives.
+# Anchoring `env_file` here (not a bare relative string) makes it
+# independent of the invoking process's CWD -- same reasoning as
+# ingestion/data-pipeline's identical `_PACKAGE_ROOT`.
+_PACKAGE_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+class Settings(BaseSettings):
+    """Warehouse service runtime settings.
+
+    All fields are loaded from environment variables. The service
+    container supplies them via docker-compose's `env_file: .env`.
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=str(_PACKAGE_ROOT / ".env"),
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    # API -- this service's own FastAPI control plane (Phase 5).
+    api_port: int = 8004
+    api_cors_origins: list[str] = ["*"]
+
+    database_url_env: str | None = Field(default=None, validation_alias="DATABASE_URL")
+    postgres_host: str = "localhost"
+    postgres_port: int = 5432
+    postgres_db: str = "ecolens"
+    postgres_user: str = "postgres"
+    postgres_password: str = "postgres"
+
+    # RabbitMQ (Phase 1's "RabbitMQ Consumer Framework") -- consume-only,
+    # the mirror image of ingestion's publish-only `rabbitmq_url`/
+    # `rabbitmq_landing_queue`. `rabbitmq_landing_dlx`/`_dlq` are new
+    # here -- `data-pipeline`'s current landing queue has no DLX at all
+    # (confirmed by reading `app/db/rabbitmq.py` there); this service's
+    # consumer adds one (README Phase 1's explicit ask), following the
+    # same topology shape that codebase's own training-trigger queue
+    # already uses.
+    rabbitmq_url: str = "amqp://guest:guest@localhost:5672/"
+    rabbitmq_landing_queue: str = "ecolens.landing"
+    rabbitmq_landing_dlx: str = "ecolens.landing.dlx"
+    rabbitmq_landing_dlq: str = "ecolens.landing.dlq"
+
+    # DuckDB staging directory -- the SAME shared `landed.duckdb` file
+    # `services/ingestion` writes into (its own `Settings.
+    # duckdb_staging_dir` docstring covers the full reasoning). This
+    # service only ever opens it read-only. Default matches ingestion's
+    # own default exactly, deliberately -- in Docker both containers
+    # mount the same named `duckdb_staging` volume at `<their own
+    # WORKDIR>/data/staging`, so identical *relative* defaults resolve
+    # to the same physical file from each container's own root (verified
+    # live, `services/ingestion/TODO.md`'s Storage section has the full
+    # story) -- change this only in lockstep with ingestion's own.
+    duckdb_staging_dir: str = "./data/staging"
+
+    # Cloudflare R2 (S3-compatible) -- same account/bucket ingestion's
+    # own `object_storage.py` uses, this service's own cold-storage
+    # export (Phase 3) writes under a different key prefix
+    # (`object_storage_coldstorage_prefix`) rather than a separate
+    # bucket. Falls back to local MinIO (`s3_*` below) when unset, same
+    # "real value overrides local default" shape as `database_url`.
+    s3_endpoint_url: str = "http://localhost:9000"
+    s3_bucket: str = "ecolens"
+    s3_access_key: str = "minioadmin"
+    s3_secret_key: str = "minioadmin"
+    object_storage_coldstorage_prefix: str = "coldstorage"
+
+    r2_account_id: str | None = Field(
+        default=None, validation_alias="CLOUDFLARESTORAGE_ACCOUNT_ID"
+    )
+    r2_s3_api_env: str | None = Field(
+        default=None, validation_alias="CLOUDFLARESTORAGE_S3_API"
+    )
+    r2_access_key_id: str | None = Field(
+        default=None, validation_alias="CLOUDFLARESTORAGE_ACCESS_KEY_ID"
+    )
+    r2_secret_access_key: str | None = Field(
+        default=None, validation_alias="CLOUDFLARESTORAGE_SECRET_ACCESS_KEY"
+    )
+
+    # Rolling-window retention (Phase 3 -- "Critical for Free Tier").
+    # README's own example: "DELETE FROM raw.telemetry WHERE timestamp <
+    # NOW() - INTERVAL '2 months'" -- 60 days is that window in plain
+    # day-count form (easier to reason about/test than a variable-length
+    # calendar month).
+    retention_days: int = 60
+
+    # NeonDB's free-tier project storage cap (README Phase 3's own
+    # number). `retention_warning_pct` is when monitoring should start
+    # alerting; `retention_emergency_pct` is when an out-of-band
+    # emergency prune (tighter than `retention_days`) should trigger --
+    # both against this same limit.
+    database_size_limit_mb: int = 500
+    retention_warning_pct: float = 0.80
+    retention_emergency_pct: float = 0.95
+
+    # dbt project (Phase 4) -- ported from data-pipeline's `dbt/ecolens`
+    # (`services/waerehouse/dbt/ecolens`), pointed at this service's own
+    # `DATABASE_URL` via `profiles.yml`'s env var indirection, same
+    # target database/schema, now run from here rather than data-pipeline.
+    # A bare relative default here would resolve against whatever the
+    # invoking process's CWD happens to be, not this package's own root
+    # -- the exact class of bug `services/ingestion`'s `duckdb_staging_
+    # dir` hit earlier this session. `dbt_project_dir` (the property
+    # below) is what callers should actually use.
+    dbt_project_dir_env: str = Field(
+        default="dbt/ecolens", validation_alias="DBT_PROJECT_DIR"
+    )
+
+    # Recorded in structured logs -- lets an operator tell which
+    # process/host ran a given consume/retention/dbt job, same role
+    # ingestion/data-pipeline's identical `hostname` field plays.
+    hostname: str = Field(default_factory=socket.gethostname)
+
+    @property
+    def database_url(self) -> str:
+        """`postgresql+asyncpg://` DSN for SQLAlchemy's async engine.
+
+        Uses `DATABASE_URL` verbatim if set, else assembles one from the
+        decomposed `postgres_*` fields. Same two normalizations as
+        ingestion/data-pipeline's identical property: a plain
+        `postgresql://` scheme becomes `+asyncpg`, and `sslmode=` (what
+        Neon/most providers hand you) becomes `ssl=` (what asyncpg
+        understands).
+        """
+        if self.database_url_env:
+            url = self.database_url_env
+            if url.startswith("postgresql://"):
+                url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+            url = url.replace("sslmode=", "ssl=")
+            return url
+        return (
+            f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}"
+            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+        )
+
+    @property
+    def dbt_project_dir(self) -> str:
+        """`dbt_project_dir_env` resolved against this package's own
+        root if it's a relative path -- so `dbt.runner.run_dbt` finds
+        the real project regardless of the invoking process's CWD."""
+        path = Path(self.dbt_project_dir_env)
+        if not path.is_absolute():
+            path = _PACKAGE_ROOT / path
+        return str(path)
+
+    @property
+    def dbt_postgres_env(self) -> dict[str, str]:
+        """`POSTGRES_HOST`/`PORT`/`USER`/`PASSWORD`/`DB` derived from
+        `database_url` -- what `dbt/ecolens/profiles.yml` actually needs.
+
+        dbt reads these as raw OS environment variables via Jinja
+        `env_var()` (`app.dbt.runner.run_dbt`'s subprocess), a completely
+        separate resolution path from this class's own `DATABASE_URL`-
+        first logic above. Without this, a NeonDB (or any other
+        single-DSN) deployment that only sets `DATABASE_URL` -- the
+        normal case everywhere else in this app -- leaves dbt's profile
+        vars unset, and dbt silently falls back to *its own* defaults
+        instead of raising: a `dbt build` that runs, exits 0, and
+        rebuilds nothing in the real database. Ported from `data-
+        pipeline`'s identical property -- same real bug it was written
+        to avoid.
+        """
+        parsed = urlparse(
+            self.database_url.replace("postgresql+asyncpg://", "postgresql://")
+        )
+        return {
+            "POSTGRES_HOST": parsed.hostname or "localhost",
+            "POSTGRES_PORT": str(parsed.port or 5432),
+            "POSTGRES_USER": parsed.username or "postgres",
+            "POSTGRES_PASSWORD": parsed.password or "postgres",
+            "POSTGRES_DB": parsed.path.lstrip("/") or "ecolens",
+        }
+
+    @property
+    def object_storage_configured(self) -> bool:
+        """True once a real R2 API token is present. `r2_s3_api_env`/
+        `r2_account_id` alone (Cloudflare hands these out even before a
+        token is generated) aren't enough to authenticate — both the
+        access key id and secret are required."""
+        return bool(self.r2_access_key_id and self.r2_secret_access_key)
+
+    @property
+    def object_storage_endpoint_url(self) -> str:
+        """R2's S3-compatible endpoint once configured, else local MinIO
+        (`s3_endpoint_url`)."""
+        if self.object_storage_configured and self.r2_s3_api_env:
+            parsed = urlparse(self.r2_s3_api_env)
+            return f"{parsed.scheme}://{parsed.netloc}"
+        if self.object_storage_configured and self.r2_account_id:
+            return f"https://{self.r2_account_id}.r2.cloudflarestorage.com"
+        return self.s3_endpoint_url
+
+    @property
+    def object_storage_bucket(self) -> str:
+        """Bucket name parsed off `r2_s3_api_env`'s path suffix once R2
+        is configured, else local MinIO's `s3_bucket`."""
+        if self.object_storage_configured and self.r2_s3_api_env:
+            path_bucket = urlparse(self.r2_s3_api_env).path.strip("/")
+            if path_bucket:
+                return path_bucket
+        return self.s3_bucket
+
+    @property
+    def object_storage_access_key(self) -> str:
+        if self.object_storage_configured:
+            assert self.r2_access_key_id is not None  # nosec B101 -- internal invariant for type-narrowing, not a security check; object_storage_configured guarantees this
+            return self.r2_access_key_id
+        return self.s3_access_key
+
+    @property
+    def object_storage_secret_key(self) -> str:
+        if self.object_storage_configured:
+            assert self.r2_secret_access_key is not None  # nosec B101 -- internal invariant for type-narrowing, not a security check; object_storage_configured guarantees this
+            return self.r2_secret_access_key
+        return self.s3_secret_key
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()

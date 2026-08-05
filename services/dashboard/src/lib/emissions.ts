@@ -276,6 +276,20 @@ export type ModelVersionsList = {
   data: ModelVersion[];
 };
 
+/** The real registered architectures this platform actually has,
+ * end to end (`todo-model-training.md` Phases 1-2) -- `lstm_demand`
+ * (the original LSTM) and `lstm_demand_tft` (the hand-rolled TFT).
+ * TimesFM is deliberately absent: it's zero-shot, so it has no MLflow
+ * Model Registry versions of its own to list/promote (see
+ * `app/models/timesfm_adapter.py`'s module docstring on the data-pipeline
+ * side for why). Phase 8's real dashboard experiment-comparison work --
+ * letting the Model Registry page actually switch between architectures
+ * instead of only ever showing `lstm_demand`. */
+export const MODEL_ARCHITECTURES = [
+  { modelName: "lstm_demand", label: "LSTM" },
+  { modelName: "lstm_demand_tft", label: "TFT" },
+] as const;
+
 /** Live call to `GET /v1/model/versions` -- every registered MLflow
  * version of the model, any stage. Unlike `fetchModelInfo()` (which
  * only ever reports whichever version is currently Production), this
@@ -283,9 +297,15 @@ export type ModelVersionsList = {
  * page's Registry tab and Operational Tasks' "Recent Training Runs"
  * list (Model Operations TODO.md Phase 1) -- `[]` is a real, expected
  * state before the first model is ever trained+registered, not an
- * error. */
-export async function fetchModelVersions(): Promise<ModelVersionsList> {
-  const res = await fetch(`${FORECAST_API_URL}/model/versions`);
+ * error. `modelName` (Phase 8) selects which registered architecture to
+ * list -- omitted uses forecast-api's own default (`lstm_demand`). */
+export async function fetchModelVersions(
+  modelName?: string,
+): Promise<ModelVersionsList> {
+  const url = modelName
+    ? `${FORECAST_API_URL}/model/versions?model_name=${encodeURIComponent(modelName)}`
+    : `${FORECAST_API_URL}/model/versions`;
+  const res = await fetch(url);
   if (!res.ok) {
     const body = await res.json().catch(() => null);
     throw new Error(
@@ -301,20 +321,92 @@ export async function fetchModelVersions(): Promise<ModelVersionsList> {
  * the current Production version, a real 409). Promoting to
  * `"Production"` also archives whatever version was previously in that
  * stage server-side -- callers don't need to issue a second call for
- * that. */
+ * that. `modelName` (Phase 8) targets a non-default architecture's
+ * registry, same as `fetchModelVersions`. */
 export async function promoteModelVersion(
   version: string,
   stage: "Production" | "Staging" | "Archived",
+  modelName?: string,
 ): Promise<ModelVersion> {
   const res = await fetch(`${FORECAST_API_URL}/model/versions/${version}/promote`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ stage }),
+    body: JSON.stringify({ stage, model_name: modelName ?? null }),
   });
   if (!res.ok) {
     const body = await res.json().catch(() => null);
     throw new Error(
       body?.error?.message ?? `POST /v1/model/versions/${version}/promote failed: ${res.status}`,
+    );
+  }
+  return res.json();
+}
+
+/** Live call to `DELETE /v1/model/versions/{version}` -- real,
+ * permanent MLflow registry-entry removal (2026-08-05). The underlying
+ * training run/artifacts aren't touched, only the registry entry --
+ * once deleted, the version stops appearing in `fetchModelVersions()`
+ * and can't be promoted or served. Server-side gated: throws (real 409)
+ * if `version` is the current Production version, since that's what's
+ * actually serving live traffic. `modelName` (Phase 8) targets a
+ * non-default architecture's registry, same as `fetchModelVersions`. */
+export async function deleteModelVersion(
+  version: string,
+  modelName?: string,
+): Promise<void> {
+  const url = modelName
+    ? `${FORECAST_API_URL}/model/versions/${version}?model_name=${encodeURIComponent(modelName)}`
+    : `${FORECAST_API_URL}/model/versions/${version}`;
+  const res = await fetch(url, { method: "DELETE" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(
+      body?.error?.message ?? `DELETE /v1/model/versions/${version} failed: ${res.status}`,
+    );
+  }
+}
+
+/** Shape of forecast-api's `LossCurvePointOut`/`LossCurveOut`
+ * (`GET /v1/model/versions/{version}/loss-curve`) -- real per-epoch
+ * `train_loss`/`val_loss`/`val_mape`/`val_rmse`/`val_mae` history read
+ * from MLflow's step-metric history, distinct from `ModelVersion.metrics` (final
+ * value only). `val_loss` (2026-08-05) is the real validation-split
+ * `demand_loss` -- same units as `train_loss`, the actual "training vs
+ * validation loss" pair; `val_mape`/`val_rmse`/`val_mae` are separate
+ * real MW-unit (or percentage) error metrics, not losses, kept apart
+ * rather than plotted on the same axis as train_loss/val_loss. */
+export type LossCurvePoint = {
+  epoch: number;
+  train_loss: number | null;
+  val_loss: number | null;
+  val_mape: number | null;
+  val_rmse: number | null;
+  val_mae: number | null;
+};
+
+export type LossCurve = {
+  model_name: string;
+  version: string;
+  run_id: string;
+  points: LossCurvePoint[];
+};
+
+/** Live call to `GET /v1/model/versions/{version}/loss-curve` -- the
+ * real per-epoch training-loss curve for one registered version.
+ * `points` is `[]` for a version trained before per-epoch logging
+ * existed, a real, expected state, not an error. */
+export async function fetchLossCurve(
+  version: string,
+  modelName?: string,
+): Promise<LossCurve> {
+  const url = modelName
+    ? `${FORECAST_API_URL}/model/versions/${encodeURIComponent(version)}/loss-curve?model_name=${encodeURIComponent(modelName)}`
+    : `${FORECAST_API_URL}/model/versions/${encodeURIComponent(version)}/loss-curve`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(
+      body?.error?.message ?? `GET /v1/model/versions/${version}/loss-curve failed: ${res.status}`,
     );
   }
   return res.json();
@@ -336,12 +428,13 @@ export function pollForNewModelVersion(
   onUpdate: (versions: ModelVersionsList) => void,
   intervalMs = 5000,
   timeoutMs = 120_000,
+  modelName?: string,
 ): () => void {
   let cancelled = false;
   const deadline = Date.now() + timeoutMs;
   const tick = async () => {
     try {
-      const res = await fetchModelVersions();
+      const res = await fetchModelVersions(modelName);
       if (cancelled) return;
       onUpdate(res);
       const newest = res.data[0]?.version ?? null;

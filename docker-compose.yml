@@ -108,9 +108,27 @@ services:
     <<: *common-env
     environment:
       MLFLOW_BACKEND_STORE_URI: postgresql://${POSTGRES_USER:-ecolens}:${POSTGRES_PASSWORD:-ecolens}@postgres:5432/${POSTGRES_DB:-ecolens}
+      # Already R2-ready with zero further compose changes: set
+      # MLFLOW_S3_ENDPOINT_URL/S3_ACCESS_KEY/S3_SECRET_KEY/S3_BUCKET_MODELS
+      # (root .env) to the real Cloudflare R2 values (endpoint = R2's
+      # account-scoped S3 API URL, keys = an R2 API token) and every new
+      # run this service tracks lands on R2 instead of local MinIO --
+      # `TODO.md`'s Storage item. Only affects a *fresh* MLflow deployment
+      # (this compose service); does not touch/migrate the separately-run
+      # local `.mlflow/` sqlite server's existing artifacts -- see
+      # `scripts/sync_mlflow_artifacts_to_r2.py` for backing those up.
       MLFLOW_S3_ENDPOINT_URL: ${MLFLOW_S3_ENDPOINT_URL:-http://minio:9000}
       AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-minioadmin}
       AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-minioadmin}
+      # R2 doesn't support the newer AWS SDK default of sending
+      # `x-amz-checksum-*` request headers / requiring response checksum
+      # validation on every call (botocore >=1.36's default
+      # `when_supported`) -- `when_required` is what every S3-compatible
+      # provider, R2 included, actually accepts. Harmless no-op against
+      # real AWS S3 or MinIO too, so this is safe to set unconditionally
+      # rather than only when R2 is actually the target.
+      AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+      AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
     command: >
       mlflow server
         --host 0.0.0.0

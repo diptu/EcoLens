@@ -8,6 +8,12 @@ from app.service.ml.train import TrainAndRegisterResult
 
 pytestmark = pytest.mark.anyio
 
+# Captured once, before any test's `fake_live_eval_gate` autouse fixture
+# patches it away -- the one test that wants the REAL `_run_live_
+# evaluation_gate` (to verify its own internal exception-catching)
+# restores this reference explicitly.
+_real_run_live_evaluation_gate = training_worker._run_live_evaluation_gate
+
 
 @pytest.fixture
 def anyio_backend():
@@ -45,6 +51,22 @@ def fake_training_log_session(monkeypatch):
         training_worker, "get_session", lambda: _FakeSessionCtx(session)
     )
     return session
+
+
+@pytest.fixture(autouse=True)
+def fake_live_eval_gate(monkeypatch):
+    """`handle_training_trigger` now runs Phase 4's live evaluation gate
+    after a successful registration -- stub it out to a no-op by default
+    so every test in this module stays fast/hermetic (no real MLflow/DB
+    calls) unless a test explicitly wants to observe it, in which case it
+    overrides this fixture's patch itself."""
+    calls = []
+
+    async def fake_gate(architecture, model_name, version, regions):
+        calls.append((architecture, model_name, version, regions))
+
+    monkeypatch.setattr(training_worker, "_run_live_evaluation_gate", fake_gate)
+    return calls
 
 
 async def test_run_consumes_events_and_closes_the_connection_on_exit(monkeypatch):
@@ -138,6 +160,132 @@ class TestHandleTrainingTrigger:
         settings = get_settings()
         assert captured["regions"] == settings.model_default_regions
         assert captured["since"] is not None
+
+    async def test_dispatches_to_lstm_by_default(self, monkeypatch):
+        calls = []
+
+        async def fake_lstm(model_name, regions, since):
+            calls.append("lstm")
+            return TrainAndRegisterResult(
+                run_id="run-1", model_version="1", test_metrics={}, final_val_mape=None
+            )
+
+        async def fake_tft(model_name, regions, since):
+            calls.append("tft")
+            return TrainAndRegisterResult(
+                run_id="run-1", model_version="1", test_metrics={}, final_val_mape=None
+            )
+
+        monkeypatch.setattr(
+            training_worker, "train_and_register_incremental", fake_lstm
+        )
+        monkeypatch.setattr(
+            training_worker, "train_and_register_tft_incremental", fake_tft
+        )
+
+        await training_worker.handle_training_trigger({"regions": ["NSW1"]})
+
+        assert calls == ["lstm"]
+
+    async def test_dispatches_to_tft_when_architecture_is_tft(self, monkeypatch):
+        calls = []
+        captured = {}
+
+        async def fake_lstm(model_name, regions, since):
+            calls.append("lstm")
+            return TrainAndRegisterResult(
+                run_id="run-1", model_version="1", test_metrics={}, final_val_mape=None
+            )
+
+        async def fake_tft(model_name, regions, since):
+            calls.append("tft")
+            captured["model_name"] = model_name
+            return TrainAndRegisterResult(
+                run_id="run-1", model_version="1", test_metrics={}, final_val_mape=None
+            )
+
+        monkeypatch.setattr(
+            training_worker, "train_and_register_incremental", fake_lstm
+        )
+        monkeypatch.setattr(
+            training_worker, "train_and_register_tft_incremental", fake_tft
+        )
+
+        await training_worker.handle_training_trigger(
+            {"regions": ["NSW1"], "architecture": "tft"}
+        )
+
+        assert calls == ["tft"]
+        assert captured["model_name"] == training_worker.TFT_MODEL_NAME
+
+    async def test_runs_the_live_eval_gate_after_a_successful_registration(
+        self, monkeypatch, fake_live_eval_gate
+    ):
+        async def fake_train(model_name, regions, since):
+            return TrainAndRegisterResult(
+                run_id="run-1", model_version="7", test_metrics={}, final_val_mape=None
+            )
+
+        monkeypatch.setattr(
+            training_worker, "train_and_register_incremental", fake_train
+        )
+
+        await training_worker.handle_training_trigger(
+            {"regions": ["NSW1"], "architecture": "lstm"}
+        )
+
+        assert fake_live_eval_gate == [
+            ("lstm", get_settings().mlflow_registry_model_name, "7", ["NSW1"])
+        ]
+
+    async def test_skips_the_live_eval_gate_when_nothing_was_registered(
+        self, monkeypatch, fake_live_eval_gate
+    ):
+        async def fake_train(model_name, regions, since):
+            return TrainAndRegisterResult(
+                run_id="run-1", model_version=None, test_metrics={}, final_val_mape=None
+            )
+
+        monkeypatch.setattr(
+            training_worker, "train_and_register_incremental", fake_train
+        )
+
+        await training_worker.handle_training_trigger({"regions": ["NSW1"]})
+
+        assert fake_live_eval_gate == []
+
+    async def test_a_failing_live_eval_gate_does_not_fail_the_training_run(
+        self, monkeypatch
+    ):
+        # Restore the REAL `_run_live_evaluation_gate` for this one test
+        # -- the module's `fake_live_eval_gate` autouse fixture stubs it
+        # to a no-op by default, which would never actually exercise the
+        # exception-catching behavior this test wants to verify.
+        monkeypatch.setattr(
+            training_worker,
+            "_run_live_evaluation_gate",
+            _real_run_live_evaluation_gate,
+        )
+
+        async def fake_train(model_name, regions, since):
+            return TrainAndRegisterResult(
+                run_id="run-1", model_version="7", test_metrics={}, final_val_mape=None
+            )
+
+        monkeypatch.setattr(
+            training_worker, "train_and_register_incremental", fake_train
+        )
+
+        def fake_load_registered_model(model_name, version):
+            raise RuntimeError("MLflow unreachable")
+
+        monkeypatch.setattr(
+            training_worker, "load_registered_model", fake_load_registered_model
+        )
+
+        # No exception should propagate -- `_run_live_evaluation_gate`
+        # catches and logs internally.
+        await training_worker.handle_training_trigger({"regions": ["NSW1"]})
 
 
 class TestTrainingLog:

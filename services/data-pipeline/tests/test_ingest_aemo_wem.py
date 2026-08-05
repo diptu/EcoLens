@@ -148,10 +148,7 @@ async def test_fetch_wem_day_joins_demand_and_price_on_timestamp():
         json_body=_demand_json(
             [
                 ("2026-08-01T08:00:00+08:00", 2500.0),
-                (
-                    "2026-08-01T08:05:00+08:00",
-                    2490.0,
-                ),  # not on a :00/:30 mark -- dropped
+                ("2026-08-01T08:05:00+08:00", 2490.0),  # kept -- no subsampling
                 ("2026-08-01T08:30:00+08:00", 2480.0),
             ]
         )
@@ -168,10 +165,14 @@ async def test_fetch_wem_day_joins_demand_and_price_on_timestamp():
 
     df = await ingest_aemo_wem._fetch_wem_day(client, date(2026, 8, 1))
 
-    assert len(df) == 2
+    # All 3 demand intervals survive; price only exists at :00/:30
+    # (its own native resolution), so the :05 row's price is NaN.
+    assert len(df) == 3
     assert set(df["region"]) == {"WEM"}
     row_0000 = df[df["demand_mw"] == 2500.0].iloc[0]
     assert row_0000["price_mwh"] == 95.83
+    row_0005 = df[df["demand_mw"] == 2490.0].iloc[0]
+    assert pd.isna(row_0005["price_mwh"])
 
 
 async def test_fetch_wem_day_keeps_demand_when_price_fetch_fails():

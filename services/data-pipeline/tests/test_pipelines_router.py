@@ -8,6 +8,8 @@ import pytest
 from app.main import app
 from app.api.v1.deps import get_db, get_redis_client
 from app.core.config import get_settings
+from app.service import pipelines as pipelines_service
+from app.service.pipeline.dbt_build import DbtBuildLockTimeout
 
 NOW = datetime.now(UTC)
 
@@ -421,6 +423,49 @@ class TestPauseResume:
         assert body["next_scheduled_run"] is not None
         update_calls = [q for q, _ in session.queries if q.strip().startswith("UPDATE")]
         assert len(update_calls) == 1
+
+
+class TestTriggerDbtWarehouseBuild:
+    """`POST /v1/ingestion/dbt-warehouse/build` -- the manual escape hatch
+    for TODO.md's backfill-section gap (a dashboard-triggered backfill
+    never refreshed `raw_marts.*` on its own). Deliberately open, unlike
+    `/v1/dbt/{subcommand}` -- see `pipelines.trigger_dbt_warehouse_build`'s
+    docstring for why."""
+
+    def test_no_auth_required(self, client, wired, monkeypatch):
+        async def fake_locked(redis, *, trigger, triggered_by, max_wait_seconds=0):
+            return 0
+
+        monkeypatch.setattr(pipelines_service, "run_dbt_build_locked", fake_locked)
+
+        response = client.post("/v1/ingestion/dbt-warehouse/build")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body == {"subcommand": "build", "target": "prod", "exit_code": 0}
+
+    def test_build_failure_is_a_500(self, client, wired, monkeypatch):
+        async def fake_locked(redis, *, trigger, triggered_by, max_wait_seconds=0):
+            return 1
+
+        monkeypatch.setattr(pipelines_service, "run_dbt_build_locked", fake_locked)
+
+        response = client.post("/v1/ingestion/dbt-warehouse/build")
+
+        assert response.status_code == 500
+        assert response.json()["error"]["code"] == "internal"
+
+    def test_concurrent_build_fails_fast_with_409(self, client, wired, monkeypatch):
+        async def fake_locked(redis, *, trigger, triggered_by, max_wait_seconds=0):
+            assert max_wait_seconds == 0  # fails fast, doesn't hold the request open
+            raise DbtBuildLockTimeout("another build is still running")
+
+        monkeypatch.setattr(pipelines_service, "run_dbt_build_locked", fake_locked)
+
+        response = client.post("/v1/ingestion/dbt-warehouse/build")
+
+        assert response.status_code == 409
+        assert response.json()["error"]["code"] == "dbt_build_in_progress"
 
 
 class _RedactionResult:

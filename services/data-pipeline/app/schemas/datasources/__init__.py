@@ -25,6 +25,7 @@ from app.schemas.datasources.create import (
 )
 from app.schemas.datasources.entities import DataSourceOut
 from app.schemas.datasources.response import (
+    BackfillStatusResponse,
     BackfillTriggerResponse,
     CircuitBreakerDetail,
     DataSourcesListResponse,
@@ -41,6 +42,7 @@ __all__ = [
     "AuthType",
     "AuthUpdate",
     "BackfillRequest",
+    "BackfillStatusResponse",
     "BackfillTriggerResponse",
     "Category",
     "CircuitBreakerDetail",

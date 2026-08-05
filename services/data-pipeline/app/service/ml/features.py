@@ -268,3 +268,31 @@ NUMERIC_COLUMNS: tuple[str, ...] = (
     + _LAG_COLUMNS
     + _ROLLING_COLUMNS
 )
+
+#: `todo-model-training.md` Phase 2's TFT input-type classification --
+#: which of `FEATURE_COLUMNS` are actually knowable for the *entire*
+#: forecast horizon at serving time, not just at training time. The
+#: calendar block is the only real "known future" input this project
+#: has: `hour`/`day_of_week`/`month`/`is_weekend`/`is_holiday` (+ their
+#: cyclical encodings) are pure functions of the timestamp itself, valid
+#: arbitrarily far ahead. Everything else in `FEATURE_COLUMNS` needs a
+#: live weather *forecast* feed (doesn't exist yet -- see
+#: `OBSERVED_PAST_COLUMNS`'s docstring) or a live generation-mix/price
+#: feed to be known ahead of time, neither of which this project has.
+KNOWN_FUTURE_COLUMNS: tuple[str, ...] = (
+    _CALENDAR_FLAG_COLUMNS + _CALENDAR_CYCLICAL_COLUMNS
+)
+
+#: The complement of `KNOWN_FUTURE_COLUMNS` within `FEATURE_COLUMNS`:
+#: real-valued only up to "now", never known ahead of the forecast
+#: origin. `price_mwh`/`total_generation_mw`/`total_renewable_mw` are
+#: live market feeds, not forecasts of themselves; `temp_c` et al. are
+#: BoM *observations*, not a weather *forecast* feed (a real, explicitly
+#: out-of-scope gap -- see `todo-model-training.md`'s non-goals); the
+#: lag/rolling/cross-region columns are all direct functions of
+#: `TARGET_COLUMN`'s own past values. A TFT decoder only ever sees
+#: `KNOWN_FUTURE_COLUMNS` for future timesteps -- these are encoder-only
+#: inputs.
+OBSERVED_PAST_COLUMNS: tuple[str, ...] = tuple(
+    c for c in FEATURE_COLUMNS if c not in KNOWN_FUTURE_COLUMNS
+)

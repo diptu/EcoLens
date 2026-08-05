@@ -62,12 +62,14 @@ from app.schemas.pipelines import (
 )
 from app.core.config import Settings
 from app.models.datasources import CATALOG, CATALOG_BY_ID
+from app.schemas.dbt import DbtRunResponse
 from app.service.datasources.monitoring import _classify_error
 from app.service.datasources.service import (
     _fetch_source_configs,
     _percentile,
     fetch_run_rows,
 )
+from app.service.pipeline.dbt_build import DbtBuildLockTimeout, run_dbt_build_locked
 from app.service.pipeline.tasks.registry import SOURCES
 from app.models.pipelines import (
     PIPELINES,
@@ -777,6 +779,47 @@ async def resume_pipeline(
     next_run = _next_run_at(cron, timezone, now) if enabled else None
     return ResumeResponse(
         id=id, resumed_at=now, resumed_by=resumed_by, next_scheduled_run=next_run
+    )
+
+
+async def trigger_dbt_warehouse_build(
+    redis: Redis, settings: Settings, *, triggered_by: str
+) -> DbtRunResponse:
+    """Manual "Run now" for the `pipe-dbt-warehouse` row (TODO.md's
+    backfill section) -- the one real, immediate fix for a dashboard
+    backfill's raw rows never reaching `raw_marts.*` on their own: an
+    operator can trigger a rebuild directly instead of shelling into a
+    CLI.
+
+    Deliberately open (no auth), unlike the general-purpose,
+    arbitrary-subcommand `POST /v1/dbt/{subcommand}`
+    (`app/api/v1/dbt/routes.py`, still admin-gated on purpose) -- that
+    route accepts arbitrary `extra_args` passthrough to the dbt CLI, a
+    materially bigger attack surface than this fixed, no-args `build`
+    trigger, so the two aren't interchangeable from a security standpoint
+    and this one doesn't inherit that gate.
+
+    Fails fast (`max_wait_seconds=0`) rather than holding this HTTP
+    request open for however long a concurrent build (from another manual
+    trigger or a backfill's auto-rebuild) takes -- see
+    `run_dbt_build_locked`'s own docstring for why the background
+    auto-trigger uses a long wait instead.
+    """
+    try:
+        exit_code = await run_dbt_build_locked(
+            redis,
+            trigger="dashboard_manual",
+            triggered_by=triggered_by,
+            max_wait_seconds=0,
+        )
+    except DbtBuildLockTimeout as exc:
+        raise ApiError(409, "dbt_build_in_progress", str(exc)) from exc
+
+    if exit_code != 0:
+        raise ApiError(500, "internal", f"dbt build failed with exit code {exit_code}")
+
+    return DbtRunResponse(
+        subcommand="build", target=settings.dbt_target, exit_code=exit_code
     )
 
 

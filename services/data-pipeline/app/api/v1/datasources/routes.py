@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.v1.deps import get_app_settings, get_db, get_redis_client
 from app.schemas.datasources import (
     BackfillRequest,
+    BackfillStatusResponse,
     BackfillTriggerResponse,
     Category,
     DataSourceOut,
@@ -42,6 +43,7 @@ from app.schemas.datasources import (
 from app.core.security import ROLES, Principal, require_roles
 from app.core.config import Settings
 from app.service.datasources.actions import (
+    get_backfill_status,
     run_backfill_in_background,
     run_in_background,
     trigger_backfill,
@@ -159,9 +161,28 @@ async def trigger_backfill_endpoint(
     )
     entry = CATALOG_BY_ID[id]
     background_tasks.add_task(
-        run_backfill_in_background, redis, id, entry.registry_key, body.start, body.end
+        run_backfill_in_background,
+        redis,
+        id,
+        entry.registry_key,
+        body.start,
+        body.end,
+        body.skip_dbt,
     )
     return response
+
+
+@router.get("/{id}/backfill/status", response_model=BackfillStatusResponse)
+async def get_backfill_status_endpoint(
+    id: str,
+    redis: Redis = Depends(get_redis_client),
+) -> BackfillStatusResponse:
+    # Deliberately open — same reasoning as trigger_run_endpoint/
+    # trigger_backfill_endpoint above. Lets the dashboard re-check "is a
+    # backfill for this source still running" after a page refresh,
+    # instead of only knowing that from the in-memory state set by the
+    # button click that started it.
+    return await get_backfill_status(redis, id)
 
 
 @router.get("/{id}/health", response_model=SourceHealthResponse)

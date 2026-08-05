@@ -52,3 +52,9 @@ class BackfillRequest(AppBaseModel):
     chunk: str = "P1D"
     concurrency: int = Field(default=1, ge=1, le=4)
     deduplicate: bool = True
+    # Parity with `scripts/backfill.py`'s `--skip-dbt` -- the API-triggered
+    # path runs one `dbt build` after the whole range lands (TODO.md's
+    # backfill section), matching the CLI's existing behavior. Set True for
+    # multi-source/multi-month backfills where you'd rather defer to one
+    # manual trigger at the end than N automatic rebuilds.
+    skip_dbt: bool = False

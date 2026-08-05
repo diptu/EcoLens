@@ -9,10 +9,12 @@ external CLI. `run_dbt` is synchronous by design (it's just
 
 from __future__ import annotations
 
+import os
 import subprocess  # nosec B404 -- shelling out to the dbt CLI is this module's entire purpose
 import time
 from pathlib import Path
 
+from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.core.metrics import dbt_run_duration_seconds, dbt_runs_total
 
@@ -50,10 +52,24 @@ def run_dbt(
         *(extra_args or []),
     ]
 
+    # `dbt/ecolens/profiles.yml` reads POSTGRES_HOST/PORT/USER/PASSWORD/DB
+    # as raw OS env vars (Jinja `env_var()`) -- entirely separate from
+    # this service's own `DATABASE_URL`-first `Settings.database_url`.
+    # Fill them in from there when not already present in this process's
+    # environment, so a NeonDB/single-DSN deployment (the normal case
+    # everywhere else in this app) doesn't need them duplicated by hand
+    # -- without this, dbt silently falls back to its own `localhost`
+    # defaults instead of the real database (see `Settings.
+    # dbt_postgres_env`'s own docstring). `setdefault` so an operator's
+    # explicit env var still wins.
+    env = os.environ.copy()
+    for key, value in get_settings().dbt_postgres_env.items():
+        env.setdefault(key, value)
+
     started = time.monotonic()
     try:
         result = subprocess.run(  # nosec B603 -- args is a static list, no shell=True involved
-            args, capture_output=True, text=True, check=False
+            args, capture_output=True, text=True, check=False, env=env
         )
         exit_code = result.returncode
         output = result.stdout + result.stderr

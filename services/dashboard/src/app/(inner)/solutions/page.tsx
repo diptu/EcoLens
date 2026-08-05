@@ -14,6 +14,8 @@
  */
 "use client";
 
+import Link from "next/link";
+
 import {
   INDUSTRIES,
   PLATFORM_FEATURES,
@@ -110,7 +112,7 @@ export default function SolutionsPage() {
           {/* LEFT */}
           <StaggerContainer className="flex flex-col">
             <MotionItem variant="fadeIn" className="flex items-center gap-1 text-sm text-white/60">
-              <a href="/" className="hover:text-white">Home</a>
+              <Link href="/" className="hover:text-white">Home</Link>
               <ChevronIcon /> <span className="text-white">Solutions</span>
             </MotionItem>
             <MotionItem variant="fadeIn" className="mt-6">

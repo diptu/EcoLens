@@ -242,7 +242,11 @@ class TestTriggerBackfill:
 
         assert response.status_code == 202
         body = response.json()
-        assert body["total_chunks"] == 7  # 7 days / P1D
+        # 2026-01-01 through 2026-01-08 is 8 real calendar days, inclusive
+        # of both ends (`pipeline.backfill.daterange`'s actual execution
+        # semantics) -- not the 7-day span's plain duration/chunk-size
+        # division, which undercounts real per-day outcomes by 1.
+        assert body["total_chunks"] == 8
         assert body["backfill_id"].startswith("bf-")
         assert "progress_url" in body
 
@@ -255,6 +259,38 @@ class TestTriggerBackfill:
 
         assert response.status_code == 400
         assert response.json()["error"]["code"] == "invalid_range"
+
+    def test_start_equal_to_end_is_a_valid_single_day_backfill(self, client, wired):
+        """The dashboard's "Single day" mode (`dayToRange`) sends
+        `start === end`, both that day's 00:00Z -- matching
+        `pipeline.backfill.daterange`'s inclusive-both-ends semantics
+        (one day in, one day out), not an empty/reversed range."""
+        response = client.post(
+            "/v1/data-sources/ds-bom/backfill",
+            json=self._body(start="2026-01-01T00:00:00Z", end="2026-01-01T00:00:00Z"),
+            headers=_auth(),
+        )
+
+        assert response.status_code == 202
+        assert response.json()["total_chunks"] == 1
+
+    def test_a_30_day_span_reports_31_real_calendar_day_chunks(self, client, wired):
+        """Regression: `total_chunks` used to be `ceil(total_seconds /
+        chunk_seconds)`, a plain duration division -- for a 30-day span
+        that's 30, but `pipeline.backfill.backfill`'s actual execution
+        (`daterange`, inclusive of both `start`'s and `end`'s calendar
+        dates) processes 31 real days (Jan 1 through Jan 31 inclusive).
+        The mismatch surfaced as a real dashboard bug: "0/30 succeeded,
+        31 failed" for a 30-day AEMO WEM backfill -- the UI's stated
+        total was wrong, not the actual per-day outcomes."""
+        response = client.post(
+            "/v1/data-sources/ds-bom/backfill",
+            json=self._body(start="2026-01-01T00:00:00Z", end="2026-01-31T00:00:00Z"),
+            headers=_auth(),
+        )
+
+        assert response.status_code == 202
+        assert response.json()["total_chunks"] == 31
 
     def test_range_over_90_days_is_400(self, client, wired):
         response = client.post(

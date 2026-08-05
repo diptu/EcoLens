@@ -1,3 +1,4 @@
+import json
 from contextlib import asynccontextmanager
 
 import pandas as pd
@@ -212,6 +213,47 @@ async def test_record_anomalies_inserts_one_row_per_flagged_record(monkeypatch):
     assert params[0]["expected_high"] == 20000.0
     assert params[0]["z_score"] is None
     assert "demand_mw" in params[0]["row_snapshot"]
+
+
+async def test_record_anomalies_produces_valid_json_for_a_nan_snapshot_value(
+    monkeypatch,
+):
+    """Regression: `aemo_wem`'s `price_mwh` is a real, honest NaN on
+    5-min-only rows (5/6 of its data) -- `demand_mw` missing/out-of-range
+    is a comparatively rare flag, but a NaN `price_mwh` gets flagged as
+    `missing_value:price_mwh` on nearly every WEM row, every WEM ingest.
+    Before `_json_safe_snapshot`, `json.dumps` on a dict containing a
+    float NaN produced the bare (invalid-JSON) `NaN` token, which
+    Postgres's `jsonb` parser rejected -- silently failing *every* WEM
+    backfill day at the `record_anomalies` step, even though the fetch
+    itself succeeded."""
+    session = _FakeSession()
+
+    @asynccontextmanager
+    async def fake_get_session():
+        yield session
+
+    monkeypatch.setattr(anomaly, "get_session", fake_get_session)
+
+    df = pd.DataFrame(
+        {"demand_mw": [2500.0, 2490.0], "price_mwh": [95.83, float("nan")]}
+    )
+    flagged = anomaly.detect_anomalies(df, "aemo_wem")
+    assert len(flagged) == 1  # only the NaN-price row is flagged here
+
+    await anomaly.record_anomalies("run-1", "aemo_wem", "aemo_wem_dispatch", flagged)
+
+    _, params = session.executed[0]
+    snapshot_json = params[0]["row_snapshot"]
+    # The actual Postgres failure mode: `jsonb`'s strict-JSON parser
+    # rejects a bare `NaN` token outright, unlike Python's own `json`
+    # module which happily reads it back as `float("nan")` -- so the real
+    # regression check is the token's absence here, not just that
+    # `json.loads` (Python-lenient) can parse the string.
+    assert "NaN" not in snapshot_json
+    parsed = json.loads(snapshot_json)
+    assert parsed["price_mwh"] is None
+    assert parsed["demand_mw"] == 2490.0
 
 
 async def test_count_anomalies_returns_the_query_result(monkeypatch):

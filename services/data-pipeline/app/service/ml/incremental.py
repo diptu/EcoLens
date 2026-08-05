@@ -43,6 +43,7 @@ from mlflow.tracking import MlflowClient
 
 from app.core.config import Settings, get_settings
 from app.db.session import get_session
+from app.service.ml import divergence
 from app.service.ml.data import load_holidays, load_training_data
 from app.service.ml.train import (
     TrainAndRegisterResult,
@@ -202,6 +203,29 @@ async def train_and_register_incremental(
         holidays=holidays_df,
         warm_start_state_dict=warm_start.state_dict,
     )
+
+    # Catastrophic-forgetting guard (`todo-model-training.md` Phase 4):
+    # real weight-norm drift from the last full retrain, logged alongside
+    # this run -- `None` (nothing to compare against yet, e.g. the very
+    # first incremental run after a fresh registry) logs nothing rather
+    # than a misleading zero.
+    drift_report = divergence.check_drift(result.model.state_dict(), model_name)
+    extra_params: dict[str, object] = {}
+    if drift_report is not None:
+        extra_params["drift_relative_l2"] = drift_report.relative_l2_drift
+        extra_params["drift_exceeded_threshold"] = drift_report.exceeded_threshold
+        extra_params["drift_compared_against_run_id"] = (
+            drift_report.compared_against_run_id
+        )
+        if drift_report.exceeded_threshold:
+            log.warning(
+                "incremental.drift_threshold_exceeded",
+                model_name=model_name,
+                relative_l2_drift=drift_report.relative_l2_drift,
+                threshold=drift_report.threshold,
+                compared_against_run_id=drift_report.compared_against_run_id,
+            )
+
     log.info(
         "incremental.trained",
         model_name=model_name,
@@ -221,4 +245,5 @@ async def train_and_register_incremental(
             "warm_start_run_id": warm_start.run_id,
             "warm_start_stage": warm_start.stage,
         },
+        extra_params=extra_params,
     )

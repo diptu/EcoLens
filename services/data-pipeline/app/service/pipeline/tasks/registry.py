@@ -1,17 +1,31 @@
 """Registry of ingestion sources — one lookup both `cli.py` (ECO-D47) and
 `api/routers/ingest.py` (ECO-D30) share.
 
-Per `task.md`: `ingest_openelectricity.run` is already decorated with
-`@standard_run`, so it stages+publishes+logs itself and returns rows
-staged (`int`). The other 4 tasks (`ingest_aemo_nem`, `ingest_aemo_wem`,
-`ingest_bom`, `ingest_holidays`) are only wrapped with `@timed` — they
-return a bare `pandas.DataFrame` and don't stage, publish, or log
-anything. `run_source()` applies `_common.standard_run` to those 4 at
-call time (same table conventions as `docs/data/ingestion-schema.md`),
-so every source has the same "trigger it, get rows staged back" contract
-regardless of which task file happens to self-wrap. See `overview.md`
-§2 for why "staged" — not "loaded into Postgres" — is what a successful
-`run_source()` call actually means now.
+All 5 tasks (`ingest_openelectricity`, `ingest_aemo_nem`,
+`ingest_aemo_wem`, `ingest_bom`, `ingest_holidays`) are only wrapped with
+`@timed` — none self-wrap with `@standard_run` (as of 2026-08-05; `oe`
+used to, see below) — they return a bare `pandas.DataFrame` and don't
+stage, publish, or log anything on their own. `run_source()` applies
+`_common.standard_run` to all 5 at call time (same table conventions as
+`docs/data/ingestion-schema.md`), so every source has the same "trigger
+it, get rows staged back" contract, and `triggered_by` (`"manual"`/
+`"schedule"`/`"backfill"`) genuinely reaches `meta._ingest_log` for all
+of them. See `overview.md` §2 for why "staged" — not "loaded into
+Postgres" — is what a successful `run_source()` call actually means now.
+
+`self_wrapped` still exists below for `oe` to flip back to `True` if a
+future source genuinely needs its own bespoke lifecycle (a real reason
+this flag exists, not a soon-to-be-dead one) -- but `oe` itself no
+longer needs it: it used to self-wrap with `@standard_run` applied *at
+import time*, which baked in a fixed `triggered_by="manual"` no caller
+could override -- `run_source`'s own `triggered_by` argument was
+silently ignored for `oe` specifically, mislabeling every real OE
+backfill's `meta._ingest_log` rows as `trigger='manual'` instead of
+`'backfill'` (confirmed live: the dashboard's `pollBackfillSummary`
+filters on `trigger === "backfill"`, so a real, successfully-running OE
+backfill showed zero progress there). Un-self-wrapping it — `oe`'s own
+`run()` is now a plain fetch function, same shape as the other 4 — closes
+that gap for good.
 """
 
 from __future__ import annotations
@@ -43,7 +57,10 @@ SOURCES: dict[str, IngestSource] = {
         source="openelectricity",
         table="openelectricity_mix",
         run=ingest_openelectricity.run,
-        self_wrapped=True,
+        # Was True -- un-self-wrapped 2026-08-05 (see this module's own
+        # docstring for why: the fixed-at-import-time triggered_by="manual"
+        # it used to bake in silently broke backfill labeling for `oe`).
+        self_wrapped=False,
     ),
     "aemo-nem": IngestSource(
         source="aemo_nem",
@@ -86,12 +103,15 @@ async def run_source(
     /v1/data-sources/{id}/history`'s `trigger` field) — pass `"schedule"`
     for a cron-triggered call, `"manual"` (the default) for
     `POST /v1/data-sources/{id}/run`, `"backfill"` for
-    `pipeline.backfill`, etc. Only takes effect for the 4 sources
-    `_common.standard_run` wraps at call time — `oe` is already
-    decorated with a fixed `triggered_by="manual"` at import time
-    (`ingest_openelectricity.py`), so this parameter is silently ignored
-    for it. That's a real, if minor, gap: fixing it means restructuring
-    how `oe` self-wraps, not just this function.
+    `pipeline.backfill`, etc. Takes effect for all 5 sources — `oe`
+    used to be self-wrapped with a fixed `triggered_by="manual"` baked
+    in at import time, silently ignoring whatever this function was
+    passed, but was un-self-wrapped 2026-08-05 (see `SOURCES["oe"]`'s
+    own comment) specifically to close that gap: OE backfills were
+    landing real `meta._ingest_log` rows the whole time, just mislabeled
+    `trigger='manual'` instead of `'backfill'`, so the dashboard's
+    trigger-filtered backfill-progress view showed nothing for a backfill
+    that was genuinely running.
 
     Raises `KeyError` for an unknown `key` — callers (CLI, API router)
     turn that into their own "invalid source" response.

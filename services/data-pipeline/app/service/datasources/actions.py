@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.errors import ApiError
 from app.schemas.datasources import (
     BackfillRequest,
+    BackfillStatusResponse,
     BackfillTriggerResponse,
     RunRequest,
     RunTriggerResponse,
@@ -34,6 +35,7 @@ from app.service.datasources.service import require_catalog_entry
 from app.core.logging import get_logger
 from app.service.pipeline.backfill import backfill as run_backfill
 from app.service.pipeline.circuit_breaker import CircuitState
+from app.service.pipeline.dbt_build import DbtBuildLockTimeout, run_dbt_build_locked
 from app.service.pipeline.tasks.registry import run_source
 
 log = get_logger(__name__)
@@ -157,6 +159,23 @@ async def _backfill_in_progress(redis: Redis, id: str) -> bool:
     return await redis.get(f"backfill:lock:{id}") is not None
 
 
+async def get_backfill_status(redis: Redis, id: str) -> BackfillStatusResponse:
+    """Backs `GET /v1/data-sources/{id}/backfill/status` — reads the same
+    `backfill:lock:{id}` key `_backfill_in_progress` checks, so this is
+    always consistent with the 409 `trigger_backfill` would give right
+    now, not a separate, potentially-diverging status source.
+    """
+    require_catalog_entry(id)  # 404s if the id doesn't exist in the catalog
+    raw = await redis.get(f"backfill:lock:{id}")
+    if raw is None:
+        return BackfillStatusResponse(source_id=id, running=False)
+    return BackfillStatusResponse(
+        source_id=id,
+        running=True,
+        trigger=BackfillTriggerResponse.model_validate_json(raw),
+    )
+
+
 async def trigger_backfill(
     redis: Redis,
     id: str,
@@ -167,8 +186,8 @@ async def trigger_backfill(
 ) -> BackfillTriggerResponse:
     require_catalog_entry(id)  # 404s if the id doesn't exist in the catalog
 
-    if body.start >= body.end:
-        raise ApiError(400, "invalid_range", "'start' must be before 'end'")
+    if body.start > body.end:
+        raise ApiError(400, "invalid_range", "'start' must not be after 'end'")
     now = datetime.now(UTC)
     if body.end > now:
         raise ApiError(400, "invalid_range", "'end' must not be in the future")
@@ -189,9 +208,20 @@ async def trigger_backfill(
             409, "backfill_in_progress", f"A backfill for '{id}' is already running"
         )
 
-    chunk_seconds = _parse_chunk_seconds(body.chunk)
-    total_seconds = (body.end - body.start).total_seconds()
-    total_chunks = max(1, math.ceil(total_seconds / chunk_seconds))
+    _parse_chunk_seconds(body.chunk)  # validates `chunk` is a supported value
+
+    # `chunk` doesn't actually change execution granularity -- despite
+    # accepting "PT1H"/"P1D"/"P1W", `run_backfill_in_background` always
+    # processes one calendar day per iteration regardless
+    # (`pipeline.backfill.backfill`'s `daterange`, INCLUSIVE of both
+    # `start`'s and `end`'s calendar dates -- see that function's own
+    # docstring). `total_chunks` must match that real, inclusive day
+    # count, not a chunk-duration division -- the latter silently
+    # undercounts by exactly 1 whenever `start`/`end` span N full days
+    # (e.g. a 30-day-duration request produces 31 real per-day outcomes
+    # against a UI total of 30 -- confirmed the hard way against a real
+    # AEMO WEM backfill: "0/30 succeeded, 31 failed").
+    total_chunks = (body.end.date() - body.start.date()).days + 1
     estimated_duration_seconds = math.ceil(total_chunks / body.concurrency) * 60
 
     backfill_id = _synthetic_run_id("bf")
@@ -211,8 +241,15 @@ async def trigger_backfill(
         progress_url=f"/v1/ingestion/runs?backfill_id={backfill_id}",
     )
 
+    # Stores the full trigger response, not just `backfill_id` -- lets
+    # `get_backfill_status` reconstruct `queued_at`/`total_chunks`/etc. for
+    # a client that missed the original 202 (e.g. this same browser tab
+    # after a refresh) so it can resume progress polling faithfully
+    # instead of only ever knowing "something is running".
     lock_ttl = estimated_duration_seconds + 300
-    await redis.set(f"backfill:lock:{id}", backfill_id, ex=lock_ttl, nx=True)
+    await redis.set(
+        f"backfill:lock:{id}", response.model_dump_json(), ex=lock_ttl, nx=True
+    )
 
     if idem_cache_key:
         await redis.set(
@@ -223,7 +260,12 @@ async def trigger_backfill(
 
 
 async def run_backfill_in_background(
-    redis: Redis, id: str, registry_key: str, start: datetime, end: datetime
+    redis: Redis,
+    id: str,
+    registry_key: str,
+    start: datetime,
+    end: datetime,
+    skip_dbt: bool = False,
 ) -> None:
     try:
         await run_backfill((registry_key,), start.date(), end.date())
@@ -231,5 +273,26 @@ async def run_backfill_in_background(
         log.error(
             "datasources.backfill_background_failed", source_id=id, error=str(exc)
         )
+        return
     finally:
         await redis.delete(f"backfill:lock:{id}")
+
+    # One `dbt build` for the *whole* range, not per day -- matches
+    # `scripts/backfill.py`'s existing behavior. Runs even if some
+    # individual days failed above (`backfill_day` never raises, it
+    # returns per-day outcomes) since whatever partial real data did land
+    # is still worth reflecting in `raw_marts.*`. Runs after the per-source
+    # lock is released above -- the global dbt-build lock is a separate
+    # concern (serializing builds against each other, not backfills
+    # against each other).
+    if not skip_dbt:
+        try:
+            await run_dbt_build_locked(
+                redis, trigger="backfill_auto", triggered_by=f"backfill:{id}"
+            )
+        except DbtBuildLockTimeout:
+            # Already logged inside `run_dbt_build_locked` -- a real,
+            # known gap (no persisted build-outcome log yet, see TODO.md's
+            # backfill section), not a reason to fail the backfill itself,
+            # which already succeeded.
+            pass

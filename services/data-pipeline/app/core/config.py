@@ -14,10 +14,28 @@ from __future__ import annotations
 
 import socket
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
+from urllib.parse import urlparse
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# This file lives at services/data-pipeline/app/core/config.py -- three
+# `.parent`s up is services/data-pipeline itself, where `.env` and
+# `dbt/ecolens` both actually live. Anchoring `env_file`/`dbt_project_dir`
+# here (not a bare relative string) makes both independent of the
+# invoking process's CWD -- a real, previously-silent bug: `make
+# dbt-build` runs `uv run --package data-pipeline ...` from the repo
+# root (unlike `forecast-api`'s Makefile targets, which use `--directory`
+# and do change CWD), so a relative `"dbt/ecolens"` doesn't exist there
+# (confirmed: `Error: Invalid value for '--project-dir': Path
+# 'dbt/ecolens' does not exist.'`) and a relative `".env"` silently loads
+# the *repo root's* `.env` instead of this package's own -- which, in
+# this codebase's actual dev setup, points at a completely different
+# (and largely empty) database. Neither failure raises loudly; the first
+# is a CLI error, the second just quietly uses the wrong config.
+_PACKAGE_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 class Settings(BaseSettings):
@@ -28,7 +46,7 @@ class Settings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(_PACKAGE_ROOT / ".env"),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -66,6 +84,34 @@ class Settings(BaseSettings):
     s3_bucket: str = "ecolens"
     s3_access_key: str = "minioadmin"
     s3_secret_key: str = "minioadmin"
+
+    # Cloudflare R2 (S3-compatible) — `TODO.md`'s Storage item: the real
+    # object store for dashboard static assets and MLflow model-weight
+    # artifact backups, replacing local MinIO once configured
+    # (`object_storage_*` properties below resolve to R2 when these are
+    # set, else fall back to the `s3_*` MinIO fields above — same
+    # "real value overrides local default" shape as `database_url`).
+    # `r2_s3_api_env` is `CLOUDFLARESTORAGE_S3_API` verbatim, which (as
+    # issued for this project) already has the bucket name appended as a
+    # path suffix rather than being a bare endpoint --
+    # `object_storage_endpoint_url`/`object_storage_bucket` split that
+    # back apart. Access key id/secret are a real R2 API token
+    # (Cloudflare dashboard -> R2 -> Manage API tokens) — deliberately
+    # `None` by default, never a MinIO-style placeholder credential,
+    # since silently falling back to a fake key against a real R2 bucket
+    # would just 403 instead of failing obviously at config time.
+    r2_account_id: str | None = Field(
+        default=None, validation_alias="CLOUDFLARESTORAGE_ACCOUNT_ID"
+    )
+    r2_s3_api_env: str | None = Field(
+        default=None, validation_alias="CLOUDFLARESTORAGE_S3_API"
+    )
+    r2_access_key_id: str | None = Field(
+        default=None, validation_alias="CLOUDFLARESTORAGE_ACCESS_KEY_ID"
+    )
+    r2_secret_access_key: str | None = Field(
+        default=None, validation_alias="CLOUDFLARESTORAGE_SECRET_ACCESS_KEY"
+    )
 
     # MongoDB. LEGACY — superseded by the DuckDB+RabbitMQ raw-landing
     # design below (`overview.md`/`README.md`); no longer required or used
@@ -141,8 +187,13 @@ class Settings(BaseSettings):
     mlflow_tracking_uri: str = "http://localhost:5000"
     mlflow_registry_model_name: str = "lstm_demand"
 
-    # OpenElectricity (ECO-D23). Free tier works with a registered key;
-    # None means anonymous/rate-limited access.
+    # OpenElectricity (ECO-D23). Required, despite the optional type --
+    # the installed SDK (openelectricity>=0.11.3) raises immediately if
+    # this (or OPENELECTRICITY_API_KEY) is unset; there's no anonymous
+    # fallback (see `app.service.emissions`'s module docstring). Typed
+    # `| None` because `Settings()` itself must still construct without
+    # it (e.g. in tests) -- every real openelectricity ingest run will
+    # just silently land 0 rows until a real key is set.
     oe_api_key: str | None = None
 
     # BoM weather stations (README § Data sources -> BoM), region -> BoM
@@ -179,7 +230,7 @@ class Settings(BaseSettings):
     model_train_epochs: int = 50
     model_train_lr: float = 1e-3
     model_hidden_size: int = 128
-    model_dropout: float = 0.2
+    model_dropout: float = 0.5
     model_num_layers: int = 2
     model_lookback: int = 48
     model_horizon: int = 48
@@ -198,9 +249,20 @@ class Settings(BaseSettings):
     # ("Baseline LSTM v0 (NSW1)") before the other NEM regions + WEM.
     model_default_regions: list[str] = ["NSW1"]
 
-    # dbt (README's data-pipeline tree; ECO-D21/D22).
-    dbt_project_dir: str = "dbt/ecolens"
+    # dbt (README's data-pipeline tree; ECO-D21/D22). Absolute (see
+    # `_PACKAGE_ROOT`'s comment above) -- CWD-independent.
+    dbt_project_dir: str = str(_PACKAGE_ROOT / "dbt" / "ecolens")
     dbt_target: str = "prod"
+    # `app.service.pipeline.dbt_build_watch`'s periodic background rebuild --
+    # the only thing that keeps `raw_marts.*` in sync with continuous
+    # ingestion (`.github/workflows/ingest-*.yml`'s 5-30 minute crons)
+    # between backfills/manual triggers, which are the only *other* things
+    # that ever run `dbt build`. 300s (5 min) matches the "5-minute cron/dbt
+    # pipeline run" cadence this codebase's cache TTLs already assume
+    # elsewhere (e.g. `forecast_cache_ttl_seconds`). `<= 0` disables the
+    # watcher entirely -- `main.py`'s lifespan checks this before starting
+    # the background task at all.
+    dbt_auto_build_interval_seconds: float = 300.0
 
     # JWT bearer auth (API_SPECEFICATIONS.md § Conventions: `Auth | JWT
     # bearer (admin or analyst)`). HS256 shared secret, verified by
@@ -268,6 +330,37 @@ class Settings(BaseSettings):
         )
 
     @property
+    def dbt_postgres_env(self) -> dict[str, str]:
+        """`POSTGRES_HOST`/`PORT`/`USER`/`PASSWORD`/`DB` derived from
+        `database_url` -- what `dbt/ecolens/profiles.yml` actually needs.
+
+        dbt reads these as raw OS environment variables via Jinja
+        `env_var()` (`app.service.dbt_runner.run_dbt`'s subprocess), a
+        completely separate resolution path from this class's own
+        `DATABASE_URL`-first logic above. Without this, a NeonDB (or any
+        other single-DSN) deployment that only sets `DATABASE_URL` -- the
+        normal case everywhere else in this app -- leaves dbt's profile
+        vars unset, and dbt silently falls back to *its own* defaults
+        (`localhost`/`ecolens`/`ecolens`/`ecolens`, `profiles.yml`'s
+        `dev` target) instead of raising: a `dbt build` that runs, exits
+        0, and rebuilds nothing in the real database. `run_dbt` merges
+        this in without overriding any `POSTGRES_*` already present in
+        the subprocess's environment, so an operator can still set them
+        explicitly (e.g. a genuinely different dbt-only database) if
+        they need to.
+        """
+        parsed = urlparse(
+            self.database_url.replace("postgresql+asyncpg://", "postgresql://")
+        )
+        return {
+            "POSTGRES_HOST": parsed.hostname or "localhost",
+            "POSTGRES_PORT": str(parsed.port or 5432),
+            "POSTGRES_USER": parsed.username or "postgres",
+            "POSTGRES_PASSWORD": parsed.password or "postgres",
+            "POSTGRES_DB": parsed.path.lstrip("/") or "ecolens",
+        }
+
+    @property
     def redis_url(self) -> str:
         """`redis://` DSN for the async Redis client (ECO-D06).
 
@@ -277,6 +370,54 @@ class Settings(BaseSettings):
         if self.redis_url_env:
             return self.redis_url_env
         return f"redis://{self.redis_host}:{self.redis_port}/{self.redis_db}"
+
+    @property
+    def object_storage_configured(self) -> bool:
+        """True once a real R2 API token is present. `r2_s3_api_env`/
+        `r2_account_id` alone (Cloudflare hands these out even before a
+        token is generated) aren't enough to authenticate — both the
+        access key id and secret are required."""
+        return bool(self.r2_access_key_id and self.r2_secret_access_key)
+
+    @property
+    def object_storage_endpoint_url(self) -> str:
+        """R2's S3-compatible endpoint once configured, else local MinIO
+        (`s3_endpoint_url`). `r2_s3_api_env` as issued for this project
+        already has the bucket name appended as a path segment
+        (`https://<account>.r2.cloudflarestorage.com/<bucket>`) — S3
+        clients take `Bucket=` as a separate call parameter, not part of
+        the endpoint URL, so this strips back to a bare origin rather than
+        assume every future R2 token looks the same shape."""
+        if self.object_storage_configured and self.r2_s3_api_env:
+            parsed = urlparse(self.r2_s3_api_env)
+            return f"{parsed.scheme}://{parsed.netloc}"
+        if self.object_storage_configured and self.r2_account_id:
+            return f"https://{self.r2_account_id}.r2.cloudflarestorage.com"
+        return self.s3_endpoint_url
+
+    @property
+    def object_storage_bucket(self) -> str:
+        """Bucket name parsed off `r2_s3_api_env`'s path suffix once R2 is
+        configured, else local MinIO's `s3_bucket`."""
+        if self.object_storage_configured and self.r2_s3_api_env:
+            path_bucket = urlparse(self.r2_s3_api_env).path.strip("/")
+            if path_bucket:
+                return path_bucket
+        return self.s3_bucket
+
+    @property
+    def object_storage_access_key(self) -> str:
+        if self.object_storage_configured:
+            assert self.r2_access_key_id is not None  # nosec B101 -- internal invariant for type-narrowing, not a security check; object_storage_configured guarantees this
+            return self.r2_access_key_id
+        return self.s3_access_key
+
+    @property
+    def object_storage_secret_key(self) -> str:
+        if self.object_storage_configured:
+            assert self.r2_secret_access_key is not None  # nosec B101 -- internal invariant for type-narrowing, not a security check; object_storage_configured guarantees this
+            return self.r2_secret_access_key
+        return self.s3_secret_key
 
 
 @lru_cache

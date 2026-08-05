@@ -700,13 +700,28 @@ period, the platform:
 3. Returns `kwh × intensity` and the breakdown.
 
 OpenElectricity already publishes emission factors, but we **don't blindly
-trust the third-party number** — our calculator lets you choose between:
+trust the third-party number**. Every `/v1/emissions*`/`/v1/footprint`
+response reports which real method actually served it (`method` field):
 
-- `live_mix_weighted` — our calculation, real-time
-- `live_provider` — what OpenElectricity reports for the same window
-- `static_nger` — audit-grade, NGER factors only
+- `live_provider` — OpenElectricity's own reported intensity for that
+  window, **preferred when it's fresh** (`fct_carbon_intensity.
+  live_provider_intensity_kgco2e_per_mwh`, generation-weighted up to the
+  hour the same way our own figure is — see `service/ml/data.
+  resolve_intensity_method`, forecast-api). "Fresh" means within
+  `Settings.emissions_provider_freshness_minutes` (90 min default) of
+  now — a stale provider row is deliberately not trusted just because
+  it's non-null.
+- `live_mix_weighted` — our own per-fuel-weighted calculation
+  (`seeds/emissions_factors.csv`), served whenever the provider figure
+  is missing or stale. This is the real, honest fallback, not a
+  user-selectable alternative — a live discrepancy between the two
+  (found while building this: the two methods disagree substantially on
+  real data for some intervals) is exactly the kind of thing keeping
+  both, rather than trusting one, is meant to surface.
 
-This is the **triangulation** that makes the number defensible.
+A third method, `static_nger` (audit-grade, NGER factors only, no live
+weighting at all), is documented here as a real future addition, not
+implemented yet — don't assume it's live from this README alone.
 
 See [`docs/emissions-model.md`](docs/emissions-model.md) (TODO) for the
 full formula and unit tests.

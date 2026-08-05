@@ -46,11 +46,6 @@ _ARCHIVE_URL = (
 # NEM "market time" is fixed AEST (UTC+10), never DST -- Australia/Brisbane
 # matches that exactly (Queensland doesn't observe DST either).
 _NEM_TZ = "Australia/Brisbane"
-# Sample the 30-min marks only, not all 288 5-min intervals/day -- matches
-# task.md's own documented "5-min -> 30-min resampled" granularity and
-# keeps a month's worth of nested-zip extraction to ~1,440 files instead
-# of ~8,640.
-_SAMPLED_MINUTES = {0, 30}
 
 
 @timed("aemo_nem")
@@ -207,7 +202,7 @@ def _synthetic_stub(lookback_minutes: int) -> pd.DataFrame:
 
 
 async def _fetch_historical_range(start: datetime, end: datetime) -> pd.DataFrame:
-    """One row per (30-min interval, region) across every day in
+    """One row per (5-min interval, region) across every day in
     `[start.date(), end.date()]` inclusive, fetched from NEMWeb's real
     public Archive -- not the live/cache/stub path above. A day that
     fails (404 outside the ~13-month retention window, network error,
@@ -262,9 +257,9 @@ async def _fetch_historical_range(start: datetime, end: datetime) -> pd.DataFram
 
 
 async def _fetch_archive_day(client: Any, day: date) -> pd.DataFrame:
-    """One day's Archive zip -- a zip-of-288-nested-zips (one per 5-min
-    dispatch interval); only the ones landing on a 30-min mark
-    (`_SAMPLED_MINUTES`) are extracted and parsed."""
+    """One day's Archive zip -- a zip-of-288-nested-zips, one per real
+    5-min dispatch interval; every one is extracted and parsed (no
+    30-min subsampling)."""
     url = _ARCHIVE_URL.format(day=day.strftime("%Y%m%d"))
     resp = await client.get(url)
     resp.raise_for_status()
@@ -272,8 +267,7 @@ async def _fetch_archive_day(client: Any, day: date) -> pd.DataFrame:
     outer = zipfile.ZipFile(io.BytesIO(resp.content))
     rows: list[dict] = []
     for name in outer.namelist():
-        minute_match = _interval_minute(name)
-        if minute_match is None or minute_match not in _SAMPLED_MINUTES:
+        if _interval_minute(name) is None:
             continue
         inner_bytes = outer.read(name)
         try:

@@ -50,7 +50,7 @@ ignore_missing_imports = true
 # No type stubs published for these — safe to ignore rather than pull in
 # pandas-stubs / aioboto3-stubs for a service still in early scaffolding.
 [[tool.mypy.overrides]]
-module = ["aioboto3.*", "pandas.*", "openelectricity.*", "sklearn.*", "croniter.*", "joblib.*"]
+module = ["aioboto3.*", "pandas.*", "openelectricity.*", "sklearn.*", "croniter.*", "joblib.*", "timesfm.*", "scipy.*"]
 ignore_missing_imports = true
 
 [tool.uv.workspace]

@@ -259,8 +259,13 @@ class TestTrainAndRegisterIncremental:
 
         captured = {}
 
+        class _FakeModel:
+            def state_dict(self):
+                return {}
+
         class _FakeTrainResult:
             n_train_windows = 42
+            model = _FakeModel()
 
         fake_result = _FakeTrainResult()
 
@@ -272,9 +277,19 @@ class TestTrainAndRegisterIncremental:
             return fake_result
 
         monkeypatch.setattr(incremental, "train_model", fake_train_model)
+        monkeypatch.setattr(
+            incremental.divergence, "check_drift", lambda state_dict, model_name: None
+        )
 
         def fake_log_and_register_run(
-            result, config, regions, model_name, *, register, extra_tags=None
+            result,
+            config,
+            regions,
+            model_name,
+            *,
+            register,
+            extra_tags=None,
+            extra_params=None,
         ):
             captured["log_call"] = (
                 result,
@@ -283,6 +298,7 @@ class TestTrainAndRegisterIncremental:
                 model_name,
                 register,
                 extra_tags,
+                extra_params,
             )
             return TrainAndRegisterResult(
                 run_id="run-2", model_version="4", test_metrics={}, final_val_mape=None
@@ -311,3 +327,4 @@ class TestTrainAndRegisterIncremental:
             "warm_start_run_id": "run-1",
             "warm_start_stage": "Production",
         }
+        assert captured["log_call"][6] == {}

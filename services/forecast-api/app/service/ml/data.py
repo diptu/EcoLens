@@ -8,9 +8,14 @@ puts `fct_energy_demand` in `raw_marts`, not a bare `marts` schema).
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from typing import Literal
+
 import pandas as pd
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+IntensityMethod = Literal["live_provider", "live_mix_weighted"]
 
 MARTS_SCHEMA = "raw_marts"
 
@@ -87,7 +92,31 @@ _INTENSITY_COLUMNS = (
     "total_emissions_kgco2e",
     "intensity_kgco2e_per_mwh",
     "factors_version",
+    "live_provider_intensity_kgco2e_per_mwh",
 )
+
+
+def resolve_intensity_method(
+    hour, live_provider_intensity: float | None, freshness_minutes: float, *, now=None
+) -> IntensityMethod:
+    """`todo-model-training.md` Phase 7: real external-provider-first
+    fallback -- `"live_provider"` if `fct_carbon_intensity.
+    live_provider_intensity_kgco2e_per_mwh` is both non-null AND `hour`
+    is within `freshness_minutes` of `now`, else `"live_mix_weighted"`.
+    A stale-but-non-null provider figure is deliberately NOT trusted
+    (the whole point of a freshness check) -- only a real, recent
+    external number wins; anything else honestly falls back rather than
+    silently serving a stale "live" figure.
+    """
+    if live_provider_intensity is None:
+        return "live_mix_weighted"
+    now = now or datetime.now(UTC)
+    if hour.tzinfo is None:
+        hour = hour.replace(tzinfo=UTC)
+    age_minutes = (now - hour).total_seconds() / 60
+    if age_minutes <= freshness_minutes:
+        return "live_provider"
+    return "live_mix_weighted"
 
 
 async def load_latest_intensity(db: AsyncSession, region: str) -> dict | None:
@@ -111,12 +140,19 @@ async def load_intensity_over_period(
     backs `POST /v1/footprint` (`README.md`'s `live_mix_weighted`
     method: `sum(emissions) / sum(generation)` over the period, not a
     plain average of each hour's already-weighted intensity, which would
-    over-weight low-generation hours)."""
+    over-weight low-generation hours). Also returns the same real
+    `provider_generation_mwh`/`provider_emissions_kgco2e` aggregates +
+    `latest_hour` `load_current_intensity`/`load_ytd_intensity` do, so
+    the route layer can apply `resolve_intensity_method`'s real
+    freshness-gated fallback consistently everywhere (Phase 7)."""
     result = await db.execute(
         text(
             f"SELECT "  # nosec B608 -- `MARTS_SCHEMA` is a fixed module-level constant, not user input
             "sum(total_generation_mwh) AS total_generation_mwh, "
             "sum(total_emissions_kgco2e) AS total_emissions_kgco2e, "
+            "sum(provider_generation_mwh) AS provider_generation_mwh, "
+            "sum(provider_emissions_kgco2e) AS provider_emissions_kgco2e, "
+            "max(hour) AS latest_hour, "
             "max(factors_version) AS factors_version "
             f"FROM {MARTS_SCHEMA}.fct_carbon_intensity "
             "WHERE region = :region AND hour >= :start AND hour <= :end"
@@ -142,14 +178,18 @@ async def load_current_intensity(db: AsyncSession) -> dict | None:
         text(
             "WITH latest AS ("  # nosec B608 -- `MARTS_SCHEMA` below is a fixed module-level constant, not user input
             "  SELECT DISTINCT ON (region) "
-            "    region, hour, total_generation_mwh, total_emissions_kgco2e, factors_version "
+            "    region, hour, total_generation_mwh, total_emissions_kgco2e, "
+            "    provider_generation_mwh, provider_emissions_kgco2e, factors_version "
             f"  FROM {MARTS_SCHEMA}.fct_carbon_intensity "
             "  ORDER BY region, hour DESC"
             ") "
             "SELECT "
             "  sum(total_generation_mwh) AS total_generation_mwh, "
             "  sum(total_emissions_kgco2e) AS total_emissions_kgco2e, "
+            "  sum(provider_generation_mwh) AS provider_generation_mwh, "
+            "  sum(provider_emissions_kgco2e) AS provider_emissions_kgco2e, "
             "  max(hour) AS as_of, "
+            "  max(hour) AS latest_hour, "
             "  max(factors_version) AS factors_version "
             "FROM latest"
         )
@@ -269,6 +309,9 @@ async def load_ytd_intensity(db: AsyncSession, start, end) -> dict | None:
             f"SELECT "  # nosec B608 -- `MARTS_SCHEMA` is a fixed module-level constant, not user input
             "sum(total_generation_mwh) AS total_generation_mwh, "
             "sum(total_emissions_kgco2e) AS total_emissions_kgco2e, "
+            "sum(provider_generation_mwh) AS provider_generation_mwh, "
+            "sum(provider_emissions_kgco2e) AS provider_emissions_kgco2e, "
+            "max(hour) AS latest_hour, "
             "max(factors_version) AS factors_version "
             f"FROM {MARTS_SCHEMA}.fct_carbon_intensity "
             "WHERE hour >= :start AND hour <= :end"

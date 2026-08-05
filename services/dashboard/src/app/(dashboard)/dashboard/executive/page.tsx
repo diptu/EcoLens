@@ -177,7 +177,15 @@ export default function ExecutiveDashboardPage() {
 
     fetchEmissionsTimeseries("day", 8)
       .then((series) => {
-        if (cancelled || series.points.length === 0) return;
+        // Need at least 2 points to draw a trend line at all (`MiniChart`'s
+        // own guard also protects against this, but skipping the `setTrend`
+        // call here means a sparse/partially-stale warehouse response
+        // (e.g. only 1 of the 8 requested days actually has data) leaves
+        // the placeholder mock trend showing instead of a "not enough
+        // data" empty state -- a real answer beats a technically-honest
+        // but useless one when the placeholder is clearly labeled as such
+        // elsewhere on this page.
+        if (cancelled || series.points.length < 2) return;
         // Every point here is a measured historical fact, not a
         // projection -- there's no real day-level forecast to show a
         // P10-P90 band against (the model's own horizon tops out at
@@ -498,8 +506,21 @@ function MiniChart({ data }: { data: EmissionsTrendPoint[] }) {
   const reduced = useReducedMotion();
   const w = 720, h = 200, padL = 40, padR = 8, padT = 8, padB = 28;
   const innerW = w - padL - padR, innerH = h - padT - padB;
-  const yMax = Math.max(...data.flatMap((d) => [d.actual, d.forecast_p90])) * 1.1;
-  const stepX = innerW / (data.length - 1);
+  // A real (non-mock) fetch can land fewer than 2 points -- e.g. a
+  // partially-stale warehouse where only one day in the requested window
+  // has any data at all. `stepX`'s `data.length - 1` divisor goes to 0
+  // (or negative) below 2 points, which turns every SVG coordinate below
+  // into NaN/Infinity -- not a thrown error, just an invisible chart:
+  // the card/title/legend around it still render fine, only the actual
+  // graph silently draws nothing. Guarded here (hooks below still run
+  // unconditionally either way -- only the JSX return branches on this)
+  // rather than upstream, so this component is safe regardless of what
+  // any caller passes.
+  const hasEnoughData = data.length >= 2;
+  const yMax = hasEnoughData
+    ? Math.max(...data.flatMap((d) => [d.actual, d.forecast_p90])) * 1.1
+    : 1;
+  const stepX = hasEnoughData ? innerW / (data.length - 1) : innerW;
   const x = (i: number) => padL + i * stepX;
   const y = (v: number) => padT + innerH - (v / yMax) * innerH;
   const actualPath = data.map((d, i) => `${i === 0 ? "M" : "L"} ${x(i).toFixed(1)} ${y(d.actual).toFixed(1)}`).join(" ");
@@ -536,6 +557,22 @@ function MiniChart({ data }: { data: EmissionsTrendPoint[] }) {
 
   const hoverPoint = hover ? data[hover.idx] : null;
   const hoverLabel = hoverPoint ? hoverPoint.date : null;
+
+  if (!hasEnoughData) {
+    return (
+      <div
+        ref={wrapRef}
+        className="flex h-48 w-full items-center justify-center rounded-lg border border-white/5 bg-white/[0.01]"
+        data-testid="emissions-trend-chart"
+      >
+        <p className="text-xs text-white/40">
+          {data.length === 0
+            ? "No emissions data available for this period yet."
+            : "Not enough recent data to draw a trend — only 1 day has data so far."}
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div ref={wrapRef} className="relative" data-testid="emissions-trend-chart">
@@ -604,13 +641,20 @@ function MiniChart({ data }: { data: EmissionsTrendPoint[] }) {
           />
         ))}
 
-        {/* X labels */}
+        {/* X labels -- the first/last points sit at padL/(w - padR)
+            (`x(0)`/`x(data.length - 1)`), and `padR` (8) is nowhere near
+            half a "MM-DD" label's rendered width. Center-anchoring every
+            label let the last one's right half spill past the SVG
+            viewBox's right edge and get silently clipped (e.g. "08-04"
+            rendering as "08-0") -- anchoring the first label to its left
+            edge and the last to its right edge keeps both fully inside
+            the plotted area without needing to guess a wider padR. */}
         {data.map((d, i) => (
           <text
             key={d.date}
             x={x(i)}
             y={h - 8}
-            textAnchor="middle"
+            textAnchor={i === 0 ? "start" : i === data.length - 1 ? "end" : "middle"}
             fontSize="10"
             fill="rgba(255,255,255,0.5)"
           >

@@ -16,6 +16,7 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_app_settings, get_db, get_redis_client
+from app.schemas.dbt import DbtRunResponse
 from app.schemas.pipelines import (
     FailedRunsResponse,
     PauseRequest,
@@ -214,3 +215,26 @@ async def resume_pipeline_endpoint(
     redis: Redis = Depends(get_redis_client),
 ) -> ResumeResponse:
     return await service.resume_pipeline(db, redis, id, principal.sub)
+
+
+@router.post("/dbt-warehouse/build", response_model=DbtRunResponse)
+async def trigger_dbt_warehouse_build_endpoint(
+    redis: Redis = Depends(get_redis_client),
+    settings: Settings = Depends(get_app_settings),
+) -> DbtRunResponse:
+    # Deliberately open — same reasoning as `/v1/data-sources/{id}/run` and
+    # `/backfill` (see those routes' own comments): triggering a pipeline
+    # run isn't a privileged action in this platform's current scope. This
+    # is a *fixed* action (always `dbt build`, no subcommand choice, no
+    # `extra_args`), unlike the admin-gated `/v1/dbt/{subcommand}` this
+    # reuses under the hood — that one's arbitrary CLI-args passthrough is
+    # the real reason it keeps its gate; this one doesn't inherit it.
+    #
+    # Synchronous, not backgrounded: `dbt build` typically finishes in
+    # well under a minute here, and returning the real exit code directly
+    # is simpler for the dashboard than a 202+poll shape for an action
+    # this short-lived (contrast with `/backfill`, which is backgrounded
+    # because a real multi-day/month range can run for minutes).
+    return await service.trigger_dbt_warehouse_build(
+        redis, settings, triggered_by="dashboard"
+    )

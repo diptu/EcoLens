@@ -1,396 +1,321 @@
 # TODO's
 
 ## Storage
-[]store all asstets & art-effects on claudeflare R2
-
-## Performance optimization:
-
-- [] Prefetch Data Before Navigation: prefetch pages in the background. Ensure you are using framework-level prefetching.
--[] Stream inference updates or pipeline progress indicators back to Next.js progressively,
+[]store all asstets & art-effects, including model weights on claudeflare R2
 
 
-## FastAPI Backend: Payload Compression & Asynchronous Processing
+# Storage & Cost Optimization — Neon free tier + local DuckDB archive
 
--  []Gzip Compression Middleware: Enable built-in compression in FastAPI to drastically reduce JSON payload size for large time-series arrays.
+Goal: stay on Neon's free tier (512MB) **indefinitely** by keeping only a
+rolling ~2-month hot window in Postgres, while a persistent local DuckDB
+warehouse holds full history — **from 2025-08-01 (the real data start
+date across all 5 sources) onward, growing forever after** — for anything
+that needs it. Split model training accordingly: **initial/full training
+and hyperparameter tuning read from local DuckDB** (unbounded history,
+zero Neon cost); **online/incremental training keeps reading from Neon**
+(it only ever needs a recent window anyway, so the 2-month cap never
+affects it).
 
-## Response Caching & Edge Delivery
-
--[] FastAPI Response Caching: For heavy forecasting endpoints that only update after  5-minute cron/dbt pipeline runs, use fastapi-cache backed by Redis. This prevents FastAPI from recalculating or querying the database repeatedly for identical requests within that 5-minute window.
-
-Cache-Control Headers: Set explicit cache headers (Cache-Control: public, s-maxage=300, stale-while-revalidate=60) on  FastAPI GET endpoints so that Vercel or CDN layers cache static historical carbon analytics closer to your users.
-
-
-# Operational Tasks
-
-## Model Operations — Fine-tune from the Model Operations tab
-
-Companion docs (deeper / adjacent scope, not this plan's job):
-- `todo-operational-tasks.md` — whole Operational Tasks page (pipelines, tasks, schedules)
-- `todo-model-training.md` — multi-model research path (TimesFM / TFT / blend / pruning)
-
-This section is specifically: **what happens when an operator clicks
-"Fine-tune" on `/dashboard/operational-tasks` Model Operations**, what is
-already real, what is broken/incomplete, and the multi-phase plan to make
-that path production-honest end-to-end.
+Companion docs: `todo-model-training.md` (what each architecture trains
+on), the Model Operations section above (`ml/incremental.py`'s trigger
+path — unaffected by this plan).
 
 ---
 
-### Ground truth (verified against current code, 2026-08-04)
+### Ground truth (verified against live code + live DB, 2026-08-05)
 
-#### End-to-end path that already exists
+#### Current state
 
-```
-[Operational Tasks UI]
-  Model Ops card "Fine-tune" button  ──┐
-  "Model Training & Tuning" form     ──┼──► lib/ingestion.triggerTraining()
-                                       │      POST data-pipeline /v1/model/train
-                                       │         body: { regions?, window_hours? }
-                                       │         → publish_training_trigger.fn
-                                       │         → RabbitMQ training-trigger queue
-                                       │         ← 202 { queued_at, regions,
-                                       │                 window_since/until, ... }
-                                       │
-[train-worker]  (data-pipeline, separate process / compose service)
-  consume event ───────────────────────┘
-  → INSERT meta._training_log (status=running)
-  → ml.incremental.train_and_register_incremental
-       · warm-start weights from Production, else Staging
-       · train only on data since window_since
-       · epochs/lr from Settings.incremental_train_* (not per-request)
-       · register new MLflow version at stage=None (not Production)
-  → UPDATE meta._training_log (success|failed + run_id + model_version)
+- Neon project size: **399MB / 512MB** (right after clearing a runaway
+  duplicate-anomaly bug this session — see incident note below; was
+  489MB before cleanup).
+- Real history already spans **~1 full year** per raw source
+  (`raw.aemo_nem_dispatch`: 2025-07-31 → today, 528K rows;
+  `raw.openelectricity_mix`, `raw.aemo_wem_dispatch`, `raw.bom_observations`
+  similar). That entire year fits in ~400MB — i.e. **a 60-day window is
+  ~1/6 of that, roughly 65-70MB**, leaving generous headroom under the
+  512MB cap even accounting for `meta.anomalies`/`meta._ingest_log`
+  operational overhead. No compression tricks needed to make 60 days fit;
+  they're a safety margin, not a requirement.
+- **Decision: the local DuckDB archive's history starts at `2025-08-01`**
+  (not "whatever's in Neon today", and not per-source min timestamp).
+  This is a deliberate, slightly-rounded boundary: `aemo_nem_dispatch`
+  (2025-07-31 14:05) and `openelectricity_mix` (2025-07-31 08:00) both
+  have a partial day of real rows *before* 2025-08-01 that this boundary
+  excludes — acceptable (well under a day, across only 2 of the 5
+  sources), but call it out explicitly here rather than let Phase 1 drop
+  it silently. `aemo_wem_dispatch`/`bom_observations` already start
+  exactly at 2025-08-01 00:00, so the boundary is a no-op for those two.
+- **5 raw tables are already TimescaleDB hypertables**, 7-day chunks
+  (`migrations/0009_hypertables.sql`, `0012_reapply_hypertables_and_indexes.sql`):
+  `raw.openelectricity_mix`, `raw.aemo_nem_dispatch`, `raw.aemo_wem_dispatch`,
+  `raw.bom_observations`, `raw.aemo_holidays`. The migration was written
+  assuming Neon *doesn't* support the `timescaledb` extension (with a
+  graceful no-op fallback) — turns out it does on this project; hypertable
+  chunks are real and live (`_timescaledb_internal._hyper_*_*_chunk`).
+  This matters: **Timescale's `add_retention_policy` drops whole chunks**
+  (cheap, no dead-tuple bloat), unlike the row-by-row `DELETE` this
+  session had to run by hand today, which left the DB reporting "full"
+  until autovacuum caught up.
+- `raw_marts.fct_energy_demand` (dbt, `+materialized: table`, i.e. full
+  rebuild every `dbt build`) is derived entirely from those 5 raw tables.
+  It is **not itself a hypertable** — but because it's a full-refresh
+  table, pruning the raw hypertables automatically shrinks it to match on
+  the *next* dbt build. No separate mart-pruning logic needed.
+- `analytics.fact_demand_30min` / `fact_generation_30min` (~72K rows,
+  ~20MB combined): a **leftover schema from the pre-dbt medallion
+  architecture** (`0001_init.sql`). Confirmed unreferenced by any dbt
+  model or app code today (`0022_drop_unused_schemas.sql`'s own comment
+  explicitly deferred this decision). Pure dead weight sitting in the
+  512MB budget for nothing.
+- `ml.ml_features_demand_v1` (orphaned table, no dbt model/pipeline code
+  owns it, `ml/data.py`'s own comment): a full year, 103,734 rows, but
+  **66% imputed/synthetic** (`data_quality_status='imputed'`). Already a
+  documented fallback data source (`load_ml_features_v1_training_data`),
+  not something to build the new archive on top of.
+- **Training data sources today (before this plan), all Postgres, no
+  DuckDB training path exists at all:**
+  - `ml/train.py:725` (`train_and_register`, full LSTM retrain) —
+    `load_training_data(db, regions, since=since)`
+  - `ml/train_tft.py:373` (full TFT retrain) — same
+  - `ml/tune.py:101,250` (`tune_optuna`) — same
+  - `ml/incremental.py:191` (`train_and_register_incremental`, the
+    online/warm-start path, `incremental_train_window_hours` default
+    **24h**) — same call, but always `since=<recent window>`, so it's
+    naturally unaffected by a 60-day Neon retention window.
+- **DuckDB today is transient staging only** (`pipeline/duckdb_staging.py`):
+  one `.duckdb` file per ingest run, deleted once `warehouse_sync` loads
+  it into Postgres. It is explicitly *not* a durable archive.
+- **Incident this session, still relevant to sizing/safety:** an
+  `openelectricity` bug (`_pivot_long_to_wide` sourcing `demand_mw`/
+  `price_mwh` from a `fuel_type` that never appears in the SDK's `POWER`
+  metric response — fixed in `anomaly.py` by dropping those columns from
+  its scan list) caused every OE run to flag ~100% of its batch as
+  anomalous, filling `meta.anomalies` with 108,864 duplicate rows/110MB
+  across 63 retried runs and pushing Neon over its limit — which then
+  wedged every in-flight run in `status='running'` forever (the write
+  that would finalize it also failed with `DiskFullError`). Cleaned up
+  this session (108,864 rows deleted, 13 stuck runs marked `failed`).
+  Separately: **645 orphaned `.duckdb` staging files (330MB)** sit in
+  `services/data-pipeline/data/staging/` right now — real fetched data
+  (mostly `bom_observations`) that a different bug (`Event loop is
+  closed` on the RabbitMQ publish, 701 occurrences) left un-synced and
+  un-deleted. Both should feed into Phase 1's backfill below rather than
+  being discarded.
+- **Unresolved, blocks Phase 2's "keep DuckDB continuously current" until
+  fixed:** the machine's crontab (`*/15 * * * *`) actually drives
+  ingestion against `/Users/macbook/Project/personal/EcoLens` — a
+  **separate, stale clone** of this same repo (6 commits behind, and on
+  an entirely different `ecolens.*` package layout, not this repo's
+  `app.*`). The `Event loop is closed` bug lives over there, in code this
+  plan hasn't touched. Needs its own decision (point the crontab at this
+  repo, or treat that clone as intentionally separate) before Phase 2 can
+  be trusted to run unattended.
 
-[Dashboard completion signal]
-  pollForNewModelVersion(sinceVersion)
-    → GET forecast-api /v1/model/versions every 5s, up to 120s
-    → stops when newest version id ≠ sinceVersion
+#### Non-negotiable design constraints
 
-[Serving path — separate, not part of fine-tune]
-  forecast-api ModelRegistry only loads stage=Production
-  hot-reloads on model_reload_interval_seconds
-  promote is a separate call:
-    POST forecast-api /v1/model/versions/{v}/promote { stage }
-    (gated on test_mape when promoting to Production)
-```
-
-#### What is already real (do not re-build)
-
-| Layer | Real artifact |
-| :--- | :--- |
-| UI — Model Ops table | Single row from `GET /v1/model` (`fetchModelInfo`) — not the old 5-model mock |
-| UI — Fine-tune button | Calls real `triggerTraining()`; disables while queued/polling |
-| UI — Training form | Regions + window hours only (matches real request schema) |
-| UI — Models page Fine-tune tab | Same real path as Operational Tasks |
-| data-pipeline | `POST /v1/model/train`, `GET /v1/model/training-runs` |
-| data-pipeline | `training_worker` + `ml.incremental` warm-start fine-tune |
-| data-pipeline | `meta._training_log` (migration `0021_training_log.sql`) |
-| forecast-api | `GET /v1/model`, `GET /v1/model/versions`, `POST .../promote` |
-| forecast-api | Production-only load + background hot-reload watch |
-| Active Tasks | `model_training` rows mapped from real `training-runs` (other task types still mock) |
-| Recent Training Runs | Real MLflow versions via `GET /v1/model/versions` |
-
-#### Critical gaps (why "Fine-tune" does not yet mean "production got smarter")
-
-1. **Register ≠ serve.** Fine-tune registers a new version at MLflow stage
-   `None`. Serving only ever loads `Production`. Until someone promotes,
-   forecasts are unchanged. The UI currently treats "new version appeared"
-   as success and stops — it never prompts promote, never auto-promotes,
-   and never refreshes the Model Ops "currently served" row for a stage
-   change that hasn't happened.
-2. **Completion signal is incomplete.** Polling only watches for a *new
-   version id*. A failed fine-tune (empty window, no warm-start, worker
-   crash, MLflow down) never registers a version, so the UI sits in
-   "polling" until the 120s timeout then silently returns to idle with no
-   error. Real failure lives in `meta._training_log` / DLQ and is ignored.
-3. **Fake progress.** Active Tasks hardcodes `progress: 50` for running
-   training rows. Nothing in the backend emits epoch-level progress to
-   the dashboard.
-4. **Recent Training Runs ≠ training attempts.** That card lists
-   *registered MLflow versions*, so failed attempts, in-flight runs, and
-   "queued but worker dead" never appear. Operators cannot tell *why*
-   Fine-tune did nothing.
-5. **Full retrain is still CLI-only.** Models page Train tab is disabled;
-   Operational Tasks form is incremental-only. No warm-start exists until
-   `ecolens-pipeline train` + promote has been run once — Fine-tune will
-   hard-fail with a real `ValueError` in that bootstrap case.
-6. **Ops prerequisites are invisible.** Fine-tune needs all of: RabbitMQ
-   up, `train-worker` process running, MLflow reachable, warehouse data
-   for the window, and a Production/Staging version to warm-start from.
-   UI has no preflight / health banner for any of these.
-7. **No in-flight guard.** Multiple clicks queue multiple events; worker
-   serializes them. UI disables only *this browser tab's* button state.
-8. **KPIs / schedules still mock** on this page for model-related numbers
-   ("Next Retrain", etc.) — no real training scheduler is exposed.
-9. **120s poll ceiling is optimistic.** Real incremental runs on non-toy
-   windows can exceed 2 minutes; timeout leaves the job running server-side
-   with the UI already idle.
-10. **Stale companion docs.** `todo-operational-tasks.md` still says
-    retrain/train endpoints "do not exist" — they do now. Treat *this*
-    section as source of truth for Model Operations fine-tune; update
-    that companion when convenient.
-
-#### Non-negotiable design constraints (already enforced in code)
-
-- **forecast-api never trains** — training stays in data-pipeline's
-  `train-worker`. Dashboard must never call a forecast-api train route.
-- **Never train inside an HTTP request** — `POST /train` only publishes;
-  work is async. Do not "fix" this by running training in the API process.
-- **Promotion is gated** — Production promote rejects worse `test_mape`.
-  Any auto-promote path must respect (or deliberately extend) that gate.
-- **Honesty over polish** — no fabricated multi-model roster, no fake
-  progress bars, no success toast without a real backend signal.
-
----
-
-### Phase 0 — Operator honesty (UI only, no new backend)
-
-Goal: make the current real path *tell the truth* about what Fine-tune
-does and does not do, before adding more machinery.
-
-- [ ] Model Operations card copy: state explicitly that Fine-tune
-      **registers a new candidate version** and does **not** swap
-      Production by itself; link to `/dashboard/models` for promote.
-- [ ] After a successful new-version poll, show a post-success panel:
-      new version id + key metrics (`test_mape`, coverage if present) +
-      primary CTA **"Promote to Production"** (calls existing
-      `promoteModelVersion`) + secondary "View in registry".
-- [ ] On promote success, re-fetch `fetchModelInfo()` so the Model Ops
-      table reflects the new served version once forecast-api hot-reloads
-      (or immediately shows the registry truth; note `loaded_at` may lag
-      until the watch loop picks it up — surface that honestly).
-- [ ] Prerequisites banner (best-effort, client-side): if
-      `modelInfo.status === "not_loaded"` OR versions list is empty,
-      disable Fine-tune and explain "run a full retrain + promote first
-      (`ecolens-pipeline train`)" — matches `incremental.py`'s real
-      `ValueError` precondition.
-- [ ] Fix Models page Train-tab docstring/subtitle that still claims
-      `POST /v1/model/train` "lands in Phase 2" — that endpoint exists
-      and is *incremental*, not full retrain. Don't pretend the Train
-      tab is wired.
-
-**Acceptance:** an operator who only reads the Operational Tasks UI
-understands: Fine-tune → new candidate; Promote → may serve; no warm-start
-base → button disabled with reason.
+- **Never delete from Neon before it's durably archived elsewhere.** The
+  one-time historical backfill (Phase 1) must complete and be verified
+  *before* any retention policy goes live (Phase 3) — otherwise pruning
+  destroys the only copy of anything older than 60 days.
+- **Prefer hypertable + `add_retention_policy` over manual `DELETE`**
+  wherever the table has a time column — chunk-drop is instant and
+  doesn't leave dead tuples needing a manual `VACUUM` (today's incident,
+  the hard way).
+- **Online/incremental training never changes source.** It stays on
+  Neon/`load_training_data` — this plan does not touch
+  `ml/incremental.py`'s data path at all, only the full-retrain/tune
+  call sites.
+- **Every training run logs which storage tier it trained from** (MLflow
+  param, matching the existing `data_source` pattern already used for
+  `ml_features_v1` vs mart) — so a model version is always auditable
+  back to its actual data source.
 
 ---
 
-### Phase 1 — Real completion loop (training-runs as source of truth)
+### Phase 1 — One-time historical backfill into local DuckDB (safety net)
 
-Goal: stop using "new MLflow version appeared" as the only success
-signal. Use `meta._training_log` for lifecycle; keep versions for
-registry identity.
+Goal: get a verified, full-history copy of everything currently in Neon
+onto local disk *before* anything is ever deleted from Postgres.
 
-- [ ] Dashboard: after `triggerTraining()`, poll
-      `fetchTrainingRuns()` (not only `pollForNewModelVersion`) until the
-      newest row for this attempt is `success` or `failed`.
-      Practical match key (no run id is returned by the trigger today):
-      `started_at >= trigger.queued_at` + `triggered_by` in
-      `{public, manual}` + `status` transition out of `running`/absent.
-- [ ] On `failed`: surface `error_message` in the Model Ops card and the
-      Training form (empty window, no warm-start, MLflow errors, etc.).
-      Do **not** leave the UI in silent idle.
-- [ ] On `success`: then fetch versions, highlight the new
-      `model_version`, offer promote CTA (Phase 0).
-- [ ] **Recent Training Runs** card: switch primary data source to
-      `GET /v1/model/training-runs` (attempts: running/success/failed,
-      window, regions, error). Keep a link to `/dashboard/models` for
-      registered versions — don't conflate the two concepts in one list.
-- [ ] Active Tasks `model_training` rows: drop fake `progress: 50`;
-      either omit the progress bar for training or show indeterminate
-      ("running…") until a real progress channel exists (Phase 4).
-- [ ] Raise / make configurable the client poll timeout (default ≥ 10 min
-      for fine-tune; 120s is too short for real windows). Cancel on
-      unmount (already done) and on explicit "Dismiss".
-- [ ] Optional small backend nicety (only if matching by timestamp proves
-      flaky): return a `training_log_id` (or correlation id) from
-      `POST /train` by inserting a `queued` row *at publish time*, then
-      have the worker claim/update that row. Today the log row is only
-      created when the worker *starts*, so a dead worker is invisible.
+- [ ] New persistent DuckDB warehouse file (distinct from the transient
+      per-run staging files), e.g.
+      `services/data-pipeline/data/warehouse/ecolens.duckdb`, with tables
+      mirroring `raw.*` (the 5 hypertables) at minimum; `raw_marts.
+      fct_energy_demand` optionally, for a query-ready copy (it's fully
+      derivable from `raw.*`, so not strictly required).
+    - Add `services/data-pipeline/data/warehouse/` to `.gitignore`
+      (matches `data/staging/`'s existing treatment).
+- [ ] One-off export script (`scripts/export_neon_to_duckdb.py` or a
+      `pipeline.warehouse_export` module): read each `raw.*` hypertable
+      **`WHERE ts >= '2025-08-01'`** (the decided archive start date
+      above) → write/append into the DuckDB file. Chunk the read (e.g. by
+      week) rather than one giant query, given `aemo_nem_dispatch` alone
+      is 528K rows.
+- [ ] **Recover, don't discard, the 330MB of orphaned `.duckdb` staging
+      files** found this session (`data/staging/*.duckdb`, mostly
+      `bom_observations`) — load them into the same warehouse file before
+      deleting them. This is real fetched data that never reached
+      Postgres at all; skipping it means a real, avoidable gap in local
+      history.
+- [ ] Verification step before moving to Phase 2/3: row counts and
+      `min(ts)`/`max(ts)` per source must match between Neon and the new
+      DuckDB warehouse (modulo the recovered staging files, which should
+      make DuckDB's count *higher*, never lower).
 
-**Acceptance:** kill `train-worker`, click Fine-tune → UI eventually
-shows a clear failure/timeout, not a quiet return to idle. Successful
-run shows the training-log row *and* the new version.
+**Acceptance:** local DuckDB warehouse has a verified superset of
+everything in Neon, including the orphaned staging backlog. Nothing
+about this phase changes Neon at all yet.
 
 ---
 
-### Phase 2 — Candidate staging + one-click promote from Operational Tasks
+### Phase 2 — Keep the local archive continuously current
 
-Goal: close the "registered but invisible to serving" gap with the
-minimum safe automation.
+Goal: once Phase 1 establishes the baseline, every *future* successful
+ingest must land in DuckDB too — not just Postgres — so Neon retention
+(Phase 3) is always safe to run.
 
-- [ ] **Decision (record here before coding):** on successful fine-tune,
-      should `log_and_register_run` / incremental path auto-transition the
-      new version to **Staging** (not Production)? Recommended: **yes** —
-      Staging is ungated, makes candidates discoverable in
-      `get_warm_start`'s fallback order, and matches the Models page
-      mental model. Production stays manual or gate-auto (Phase 3).
-- [ ] If auto-Staging: implement in data-pipeline only
-      (`mlops.registry.transition` after register when
-      `training_type=incremental`), tag the run, unit-test it.
-- [ ] Operational Tasks Model Ops: inline **Promote** on the latest
-      non-Production candidate (reuse `promoteModelVersion`). Handle 409
-      `worse_than_production` with the server message, not a generic error.
-- [ ] After Production promote: poll `fetchModelInfo()` until
-      `version` matches (or timeout + "registry updated; serving reload
-      may take up to N seconds" using `model_reload_interval_seconds`
-      if exposed, else a documented default).
-- [ ] Models page and Operational Tasks must not diverge: shared helper
-      for "trigger fine-tune → watch training-runs → optional promote"
-      in `lib/` (today the two pages duplicate poll/trigger logic).
+- [ ] Extend `warehouse_sync.sync_landed_event` (or add a second,
+      parallel consumer on the same landing queue) so a successful
+      Postgres load also appends/upserts the same batch into the
+      persistent DuckDB warehouse from Phase 1. Same idempotency
+      expectation as the Postgres path (`ON CONFLICT DO NOTHING`
+      equivalent — DuckDB upsert on the natural key).
+    - Decide: append-in-`sync_landed_event` (simplest, couples the two
+      writes) vs. a fully separate DuckDB-sync consumer reading the same
+      RabbitMQ queue (more resilient — a DuckDB write failure can't ever
+      block/fail the Postgres sync). **Recommended: separate consumer** —
+      matches this codebase's existing "one bad thing shouldn't sink
+      everything else" pattern used throughout the ingestion pipeline.
+- [ ] **Blocked on, and should not be marked done until:** the stale-clone
+      crontab issue above is resolved one way or another — otherwise
+      "continuously current" is only true for whichever repo actually has
+      cron pointed at it, and this plan's local DuckDB could silently
+      drift stale again exactly like the Neon side did.
+- [ ] Also fix (or confirm already-fixed-here) the `Event loop is closed`
+      RabbitMQ-publish bug — Phase 2 depends on that publish path being
+      reliable; today it's dropping ~65% of `bom` batches into orphaned
+      staging files instead of ever reaching a consumer.
 
-**Acceptance:** Fine-tune from Operational Tasks → new version in
-Staging (if that decision is yes) → one click Promote → Model Ops table
-shows the new Production version without leaving the page.
-
----
-
-### Phase 3 — Full retrain from the same ops surface
-
-Goal: bootstrap and periodic reset without SSH/`make train`. Fine-tune
-depends on this existing at least once.
-
-- [ ] Backend: `POST /v1/model/train` grows a mode (recommended):
-      `{ "mode": "incremental" | "full", ... }` default `incremental`
-      for backward compatibility. `full` publishes a distinct event
-      (or same queue with `training_type=full`) that the worker routes to
-      `train_and_register` instead of `train_and_register_incremental`.
-      Do **not** run full retrain in the API process.
-- [ ] Request fields for `full`: regions + optional history window
-      (days) + optional hyperparams *only if* `TrainConfig` is extended
-      to accept overrides; until then, only expose what the worker
-      actually honors (regions), and keep epochs/hidden/etc. as
-      Settings-driven — same honesty rule as the current Fine-tune form.
-- [ ] Worker: branch on mode; log `training_type=full|incremental` on
-      both MLflow tags and `meta._training_log` (may need a column or
-      encode in `triggered_by` / new `training_type` column — prefer an
-      explicit column if touching the migration).
-- [ ] UI: Models page **Train** tab becomes the full-retrain form
-      (enable submit). Operational Tasks keeps Fine-tune as the primary
-      action; add a secondary "Full retrain…" link to Models Train tab
-      rather than cramming two forms into one card.
-- [ ] Prerequisites banner from Phase 0 flips: empty registry → offer
-      Full retrain CTA instead of only a CLI hint.
-
-**Acceptance:** empty registry → Full retrain from Models UI → version
-registered → promote → Fine-tune on Operational Tasks works without CLI.
+**Acceptance:** a fresh ingest run for any of the 5 sources shows up in
+*both* Neon and the local DuckDB warehouse within the normal sync
+latency, with no manual step.
 
 ---
 
-### Phase 4 — Reliability, preflight, and progress
+### Phase 3 — Enforce the 2-month retention on Neon
 
-Goal: make Fine-tune safe to click in a real multi-operator / flaky-deps
-environment.
+Goal: cap Neon at a rolling ~60-day hot window, using chunk-drop
+retention (not manual `DELETE`) everywhere possible.
 
-- [ ] **Preflight endpoint or composite client check** before enabling
-      Fine-tune:
-      - MLflow reachable (forecast-api versions list or a tiny
-        data-pipeline health detail)
-      - `train-worker` liveness (new signal needed — options: heartbeats
-        in Redis, "last consumer ack" metric, or "no running row + queue
-        depth" from RabbitMQ management). Pick one; document it.
-      - Warm-start base exists (Production or Staging version)
-      - Optional: recent warehouse data present for the requested window
-        (cheap `COUNT` / max(ts) — only if cheap enough; otherwise skip)
-- [ ] **In-flight guard:** if `training-runs` has `status=running`,
-      disable Fine-tune globally (all tabs) with "training in progress
-      since …". Optionally still allow queueing with an explicit
-      "Queue another" confirm — default deny.
-- [ ] **MLflow as a real compose service** (persistent backend + artifact
-      store) — currently often a manual `mlflow server` on :5001 that
-      dies on reboot; Fine-tune fails closed without it. Tracked also
-      under storage/infra notes; blocks reliable demos.
-- [ ] **Progress (optional, only if cheap):** worker logs epoch N/M to
-      `meta._training_log` (JSONB `progress` column) or Redis key;
-      dashboard polls it. If not built, keep indeterminate UI — never
-      fake 50%.
-- [ ] **DLQ visibility:** surface or link training-trigger DLQ depth
-      (ops) so repeated failures aren't only in RabbitMQ UI.
-- [ ] Streaming to the dashboard (related root TODO "Stream inference
-      updates or pipeline progress"): SSE/WebSocket for training-run
-      status would replace poll loops — nice-to-have after poll path is
-      correct, not a prerequisite.
+- [ ] `add_retention_policy` on all 5 raw hypertables, `INTERVAL '60
+      days'` (new migration, same idempotent/no-op-if-no-timescaledb
+      pattern as `0009`/`0012`).
+- [ ] Convert `meta.anomalies` (time column `detected_at`) and
+      `meta._ingest_log` (time column `started_at`) to hypertables too,
+      then `add_retention_policy` the same way — this replaces the manual
+      `DELETE` this session had to run by hand (and its dead-tuple
+      aftermath) with the same cheap chunk-drop mechanism as `raw.*`.
+      Check both for constraints that would block `create_hypertable`
+      (a UNIQUE/PK not including the time column) before writing the
+      migration — `meta.anomalies.id` is a bare UUID PK, should be fine.
+- [ ] `raw_marts.fct_energy_demand` needs no explicit retention — it
+      self-truncates to match `raw.*` on the next full-refresh `dbt
+      build` (already ground-truthed above). Confirm this is actually
+      true post-migration (build once, check row count/date range
+      shrank) rather than just trusting the reasoning.
+- [ ] **Archive-then-drop `analytics.*`** (the pre-dbt orphan schema,
+      ~20MB, 72K rows, confirmed unused by any code): export its rows into
+      the Phase 1 DuckDB warehouse (a "why not, it's real historical
+      data" copy, not because anything reads it), then `DROP SCHEMA
+      analytics CASCADE` — finally closing the decision `0022`'s own
+      comment explicitly deferred.
+- [ ] Re-measure `pg_database_size` after retention is live and a few
+      chunks have actually dropped, to confirm the ~65-70MB back-of-
+      envelope estimate above holds in practice, not just in theory.
 
-**Acceptance:** with worker down or MLflow down, Fine-tune is disabled
-*or* fails fast with a specific reason within seconds. Concurrent double
-submit does not surprise the operator.
+**Acceptance:** Neon settles at a size that's a small, stable fraction of
+512MB going forward, with headroom, and no future manual DELETE/VACUUM
+babysitting is required to keep it there.
 
 ---
 
-### Phase 5 — Quality gates on the Fine-tune → Production path
+### Phase 4 — Split the model-training data source
 
-Goal: automatic or semi-automatic promote only when the candidate is
-actually better on fresh data — not only on training-time `test_mape`.
+Goal: initial/full training and hyperparameter tuning stop depending on
+Neon holding more than 60 days of history; online/incremental training is
+untouched.
 
-- [ ] Before offering "Promote" (or before auto-promote), run / display
-      a **fresh evaluation** on a holdout window *after* the fine-tune
-      training window (walk-forward piece from
-      `todo-model-training.md` Phase 0 `evaluate.py` — build that harness
-      once, reuse here).
-- [ ] Extend promote gate options:
-      - keep current `test_mape` comparison (already real)
-      - add optional live-window MAPE / coverage check
-      - configurable tolerance (allow tiny regressions for latency/size
-        later; not needed until pruning)
-- [ ] **Auto-promote policy** (explicit config, default off):
-      `incremental_auto_promote=true` only if gate passes; otherwise
-      leave Staging and notify Operational Tasks / logs.
-- [ ] Catastrophic-forgetting / weight-drift metric vs last full retrain
-      (see `todo-model-training.md` Phase 4) — log to MLflow; show on
-      candidate row if above threshold ("recommend full retrain").
-- [ ] Periodic **full retrain** schedule via Prefect (`training_due`
-      already exists in `pipeline.flows` but is not a real deployment
-      cadence for reset) — Operational Tasks "Scheduled Operations"
-      gains one *real* model row only when this schedule exists; until
-      then do not invent cron rows.
+- [ ] New loader in `ml/data.py` (or a sibling `ml/data_duckdb.py`):
+      `load_training_data_duckdb(con, regions, since=None)`, same
+      `_TRAINING_COLUMNS` output contract as `load_training_data`, reading
+      from the Phase 1/2 persistent DuckDB warehouse via the `duckdb`
+      Python API instead of an `AsyncSession`.
+- [ ] Switch these call sites to the new loader (all **full/initial**
+      training and tuning — not incremental):
+      - `ml/train.py:725` (`train_and_register`)
+      - `ml/train_tft.py:373` (full TFT retrain)
+      - `ml/tune.py:101,250` (`tune_optuna`)
+- [ ] **Do not touch** `ml/incremental.py:191`
+      (`train_and_register_incremental`) — stays on
+      `load_training_data(db, ...)` against Neon, per this plan's whole
+      premise: online training only ever needs a recent window, which a
+      60-day Neon retention always satisfies.
+- [ ] Log a `data_source` MLflow param (`"duckdb"` vs `"postgres_marts"`
+      vs the existing `"ml_features_v1"`) on every run, matching the
+      pattern `load_ml_features_v1_imputed_fraction`'s docstring already
+      established — every model version stays auditable back to what it
+      actually trained on.
+- [ ] Update `todo-model-training.md`'s data-source notes to point at
+      this split once implemented (it currently only discusses Postgres
+      marts vs. `ml_features_v1`).
 
-**Acceptance:** a deliberately overfit short-window fine-tune is
-refused for Production (409 or UI block) with a readable reason; a
-genuinely improved candidate can promote in one click or auto.
-
----
-
-### Phase 6 — Page-level finish (Model Ops adjacency on Operational Tasks)
-
-Once Phases 0–2 work, clean the rest of the page so Model Operations
-isn't surrounded by fiction.
-
-- [ ] KPIs: replace mock model KPIs with real ones —
-      `fetchModelInfo()` (version/stage), running training count from
-      `training-runs`, next *ingestion* run from scheduler (label
-      honestly — not "Next Retrain" until Phase 5 schedule exists).
-- [ ] Scheduled Operations: wire ingestion schedules only; add model
-      fine-tune/full-retrain rows only when Prefect deployments are real.
-- [ ] System Commands: keep only real actions (see
-      `todo-operational-tasks.md`); drop vacuum/reindex fiction.
-- [ ] Active Tasks: either (a) only real training + real ingestion runs,
-      or (b) keep other types behind an explicit "illustrative" marker —
-      no silent mixed fiction.
-- [ ] Sync `todo-operational-tasks.md` Model Operations / Training
-      sections with this file so the two docs stop contradicting each
-      other.
-
-**Acceptance:** Operational Tasks can be demoed without apologizing for
-half the cards; every enabled button has a real backend effect.
+**Acceptance:** a full LSTM/TFT retrain or Optuna tuning run succeeds
+using only the local DuckDB warehouse, with Neon's retention already
+active and older than 60 days — i.e. full-history training keeps working
+even though Postgres itself no longer has that history.
 
 ---
 
-### Suggested implementation order (if doing this now)
+### Phase 5 — Guardrails so this doesn't silently regress
+
+- [ ] Cheap periodic check on `pg_database_size(current_database())` vs.
+      the 512MB cap — a dashboard KPI, a `make db-size` target, or a cron
+      alert (any one is enough; this session's whole investigation started
+      from there being zero visibility into this until the UI was already
+      stuck).
+- [ ] Same for the local DuckDB warehouse file size / disk headroom on
+      the host, since it's now the durable copy of record for anything
+      older than 60 days.
+- [ ] Note in this file (or `todo-operational-tasks.md`) once the
+      stale-clone crontab question is actually resolved, so it stops
+      being an open unknown every time this area gets touched again.
+
+---
+
+### Sizing summary
+
+| Tier | Contents | Retention | Approx. size |
+| :--- | :--- | :--- | :--- |
+| Neon Postgres (free) | `raw.*` (5 hypertables) + derived marts + `meta.anomalies`/`_ingest_log` | rolling 60 days, chunk-drop | ~65-70MB steady-state (vs. 512MB cap) |
+| Local DuckDB | Full history since 2025-08-01, growing forever after | unbounded (local disk) | ~400MB+ today, grows ~1.1MB/day at current volume |
+
+### Suggested implementation order
 
 | Priority | Phase | Why |
 | :--- | :--- | :--- |
-| P0 | Phase 0 | Cheap, stops misleading operators immediately |
-| P0 | Phase 1 | Without failure visibility, Fine-tune is undebuggable |
-| P1 | Phase 2 | Completes the product promise: fine-tune can affect serving |
-| P1 | Phase 3 | Unblocks empty-registry / bootstrap without CLI |
-| P2 | Phase 4 | Needed before multi-user or flaky-infra use |
-| P2 | Phase 5 | Needed before any auto-promote or "set and forget" |
-| P3 | Phase 6 | Page polish once the model path is trustworthy |
+| P0 | Phase 1 | Nothing else is safe until history is durably copied out of Neon |
+| P0 | Phase 3 (blocked on Phase 1) | The actual cost-saving goal — do this as soon as the safety net exists |
+| P1 | Phase 4 | Makes Phase 3 actually safe for training, not just for storage cost |
+| P1 | Phase 2 | Needed for Phase 3 to stay safe *going forward*, not just for today's backfill |
+| P2 | Phase 5 | Prevents a quiet repeat of this session's incident |
 
 ### Out of scope here (tracked elsewhere)
 
-- TimesFM / TFT / blend experts → `todo-model-training.md`
-- Structured pruning + recovery fine-tune → same
-- Cloudflare R2 artifact storage → Storage section above
-- Gzip / Redis response cache for forecast payloads → Performance sections above
-
-
+- Fixing the `Event loop is closed` RabbitMQ-publish bug itself → belongs
+  wherever the actually-cron-driven code lives once the stale-clone
+  question (Phase 2) is resolved; this plan only depends on it being
+  fixed, doesn't own the fix.
+- TimesFM / TFT / blend model architecture work → `todo-model-training.md`
+- MLflow becoming a real persistent compose service → Model Operations
+  Phase 4 above

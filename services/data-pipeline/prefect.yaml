@@ -29,3 +29,26 @@ deployments:
       timezone: "Australia/Sydney"
       active: true
     parameters: {}
+
+  # `todo-model-training.md` Phase 4: "increase trigger frequency...
+  # likely a *separate* deployment rather than repurposing daily-demand"
+  # -- this is that deployment. Deliberately narrow (dbt build +
+  # training-trigger publish only, no ingestion, no full-retrain check --
+  # see `incremental_retrain_trigger`'s own docstring for why) and on a
+  # much tighter cadence than the once-daily full pipeline above, closing
+  # the real gap between real ingestion (`.github/workflows/ingest-*.yml`,
+  # 5-30 minute crons) landing new raw data and the mart + incremental
+  # fine-tune trigger only refreshing once/day. Same real caveat as
+  # `daily-demand-schedule` above: this file is real, apply-able
+  # deployment code, not something actually running in this dev
+  # environment (no Prefect server configured anywhere in
+  # docker-compose.yml/.env yet).
+  - name: incremental-retrain-trigger-schedule
+    entrypoint: app/service/pipeline/flows/__init__.py:incremental_retrain_trigger
+    work_pool:
+      name: ecolens-pool
+    schedule:
+      cron: "0 * * * *" # hourly
+      timezone: "Australia/Sydney"
+      active: true
+    parameters: {}

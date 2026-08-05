@@ -202,6 +202,75 @@ def collate(batch: Sequence[tuple[Tensor, Tensor]]) -> tuple[Tensor, Tensor]:
     return torch.stack(xs), torch.stack(ys)
 
 
+class TFTDataset(Dataset):
+    """Sliding-window dataset for `app.models.tft.DemandTFT`
+    (`todo-model-training.md` Phase 2). Each sample is `(x_encoder,
+    x_decoder, y)`:
+
+    - `x_encoder`: `lookback` past timesteps of `encoder_columns`
+      (`ml/features.py`'s `OBSERVED_PAST_COLUMNS + KNOWN_FUTURE_COLUMNS`
+      by convention, though this class accepts any column list).
+    - `x_decoder`: the next `horizon` timesteps of `decoder_columns`
+      (`KNOWN_FUTURE_COLUMNS` by convention) — the real subset TFT's
+      decoder is allowed to see for future timesteps.
+    - `y`: the next `horizon` timesteps of `target_col`.
+
+    Same per-region window discipline as `DemandDataset`: windows are
+    built one region at a time and never span a region boundary; a
+    window with a `NaN` anywhere in `x_encoder`/`x_decoder`/`y` is
+    dropped, not imputed, for the same reason `DemandDataset` drops
+    theirs (a real inference-time window is always fully populated).
+    """
+
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        encoder_columns: Sequence[str],
+        decoder_columns: Sequence[str],
+        target_col: str = TARGET_COLUMN,
+        lookback: int = 48,
+        horizon: int = 48,
+        group_col: str = "region",
+        ts_col: str = "ts",
+    ) -> None:
+        self.encoder_columns = list(encoder_columns)
+        self.decoder_columns = list(decoder_columns)
+        self.target_col = target_col
+        self.lookback = lookback
+        self.horizon = horizon
+
+        self._samples: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+        sorted_df = df.sort_values([group_col, ts_col])
+        window_span = lookback + horizon
+        for _, group in sorted_df.groupby(group_col, sort=False):
+            encoder_features = group[self.encoder_columns].to_numpy(dtype=np.float32)
+            decoder_features = group[self.decoder_columns].to_numpy(dtype=np.float32)
+            target = group[self.target_col].to_numpy(dtype=np.float32)
+            for start in range(len(group) - window_span + 1):
+                x_enc = encoder_features[start : start + lookback]
+                x_dec = decoder_features[start + lookback : start + window_span]
+                y = target[start + lookback : start + window_span]
+                if np.isnan(x_enc).any() or np.isnan(x_dec).any() or np.isnan(y).any():
+                    continue
+                self._samples.append((x_enc.copy(), x_dec.copy(), y.copy()))
+
+    def __len__(self) -> int:
+        return len(self._samples)
+
+    def __getitem__(self, index: int) -> tuple[Tensor, Tensor, Tensor]:
+        x_enc, x_dec, y = self._samples[index]
+        return torch.from_numpy(x_enc), torch.from_numpy(x_dec), torch.from_numpy(y)
+
+
+def collate_tft(
+    batch: Sequence[tuple[Tensor, Tensor, Tensor]],
+) -> tuple[Tensor, Tensor, Tensor]:
+    """`TFTDataset`'s counterpart to `collate` -- stacks `(x_encoder,
+    x_decoder, y)` samples into batched tensors."""
+    x_encs, x_decs, ys = zip(*batch, strict=True)
+    return torch.stack(x_encs), torch.stack(x_decs), torch.stack(ys)
+
+
 _TRAINING_COLUMNS = (
     "ts",
     "region",
@@ -273,3 +342,83 @@ async def load_holidays(db: AsyncSession) -> pd.DataFrame:
     `holidays` parameter (`date`, `region`)."""
     result = await db.execute(text("SELECT date, region FROM raw.aemo_holidays"))
     return pd.DataFrame(result.mappings().all(), columns=("date", "region"))
+
+
+# `ml.ml_features_demand_v1` -- an orphaned table found live in the
+# warehouse (no dbt model, no pipeline code, no git history references it
+# anywhere in this repo) that happens to cover a full year across all 6
+# real regions (103,734 rows total) versus `load_training_data`'s
+# dbt-tracked `fct_energy_demand` (~55K rows, ~4 months of history since
+# WEM/NEM only started landing recently). Real caveat, confirmed by direct
+# query before this was wired in: 66% of its rows
+# (`data_quality_status='imputed'`) are gap-filled/synthetic, not real
+# observations -- see `load_ml_features_v1_imputed_fraction`.
+_ML_FEATURES_V1_SCHEMA = "ml"
+_ML_FEATURES_V1_TABLE = "ml_features_demand_v1"
+
+
+async def load_ml_features_v1_training_data(
+    db: AsyncSession, regions: Sequence[str], since: pd.Timestamp | None = None
+) -> pd.DataFrame:
+    """Alternate raw-data source to `load_training_data`, same output
+    shape (`_TRAINING_COLUMNS`) and same downstream contract --
+    deliberately selects only `ml_features_demand_v1`'s *raw* columns,
+    not its own precomputed `demand_lag_*`/`*_sin`/`*_cos` columns, so
+    `build_features` re-derives lags/rolling stats/cyclical encodings
+    itself, identically to the production path. That keeps a model
+    trained on this source feature-contract-compatible with
+    `forecast-api`'s serving-time feature construction, which only knows
+    the production contract, not this table's bespoke columns.
+    `renewable_generation_mw` is renamed to `total_renewable_mw` here to
+    match `_TRAINING_COLUMNS` -- same real signal, different name in this
+    table.
+    """
+    where = ["region = ANY(:regions)"]
+    params: dict[str, object] = {"regions": list(regions)}
+    if since is not None:
+        where.append("ts >= :since")
+        params["since"] = since
+
+    result = await db.execute(
+        text(
+            # nosec B608 -- fixed module-level constants + fixed literal
+            # clause fragments only; values are bound params (same
+            # pattern as `load_training_data` above)
+            "SELECT ts, region, demand_mw, price_mwh, total_generation_mw, "  # nosec B608
+            "renewable_generation_mw AS total_renewable_mw, temp_c, "
+            "apparent_temp_c, humidity_pct, wind_speed_kmh "
+            f"FROM {_ML_FEATURES_V1_SCHEMA}.{_ML_FEATURES_V1_TABLE} "
+            f"WHERE {' AND '.join(where)} "
+            "ORDER BY region, ts"
+        ),
+        params,
+    )
+    df = pd.DataFrame(result.mappings().all(), columns=_TRAINING_COLUMNS)
+    df[list(_NUMERIC_TRAINING_COLUMNS)] = df[list(_NUMERIC_TRAINING_COLUMNS)].apply(
+        pd.to_numeric
+    )
+    return df
+
+
+async def load_ml_features_v1_imputed_fraction(
+    db: AsyncSession, regions: Sequence[str]
+) -> float:
+    """Real `data_quality_status='imputed'` fraction for `regions` in
+    `ml.ml_features_demand_v1` -- logged as an MLflow param by any run
+    trained from that source (`ml.tune.tune_optuna`'s `data_source`
+    option), so the imputation ratio is visible on the run itself, not
+    just in whatever investigation first found it. `0.0` (not an error)
+    when `regions` has no rows at all -- an empty-data problem is
+    already reported elsewhere (the caller's own `raw_df.empty` check)."""
+    result = await db.execute(
+        text(
+            "SELECT count(*) FILTER (WHERE data_quality_status = 'imputed')::float "
+            "/ NULLIF(count(*), 0) AS frac "
+            f"FROM {_ML_FEATURES_V1_SCHEMA}.{_ML_FEATURES_V1_TABLE} "  # nosec B608
+            "WHERE region = ANY(:regions)"
+        ),
+        {"regions": list(regions)},
+    )
+    row = result.mappings().first()
+    frac = row["frac"] if row else None
+    return float(frac) if frac is not None else 0.0

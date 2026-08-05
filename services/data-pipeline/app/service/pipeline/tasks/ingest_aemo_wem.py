@@ -48,10 +48,6 @@ _PRICE_URL = (
     "https://data.wa.aemo.com.au/public/market-data/wemde/"
     "referenceTradingPrice/previous/ReferenceTradingPrice_{day_compact}.zip"
 )
-# WEM trading intervals are 30-min, on the WST (+08:00, no DST) :00/:30
-# marks -- demand is published at 5-min resolution, so it's filtered down
-# to just those marks to align 1:1 with price.
-_TRADING_MINUTES = {0, 30}
 
 
 @timed("aemo_wem")
@@ -171,11 +167,13 @@ def _synthetic_stub(lookback_minutes: int) -> pd.DataFrame:
 
 
 async def _fetch_historical_range(start: datetime, end: datetime) -> pd.DataFrame:
-    """One row per (30-min trading interval) across every day in
+    """One row per (5-min demand interval) across every day in
     `[start.date(), end.date()]` inclusive -- single region ("WEM"),
-    real data from AEMO WA's post-reform portal. A day that fails
-    (404 outside retention, network error) is logged and skipped
-    rather than aborting the whole range."""
+    real data from AEMO WA's post-reform portal. `price_mwh` is only
+    populated on the native 30-min marks (see `_fetch_wem_day`'s
+    docstring). A day that fails (404 outside retention, network
+    error) is logged and skipped rather than aborting the whole
+    range."""
     import httpx
 
     frames: list[pd.DataFrame] = []
@@ -221,11 +219,14 @@ async def _fetch_historical_range(start: datetime, end: datetime) -> pd.DataFram
 async def _fetch_wem_day(client: Any, day: date) -> pd.DataFrame:
     """Two separate real endpoints for one day, joined on timestamp:
       - demand: .../operationalDemandWithdrawal/dailyFiles/
-        OperationalDemandAndWithdrawal_{YYYY-MM-DD}.json (5-min,
-        filtered down to the :00/:30 marks)
+        OperationalDemandAndWithdrawal_{YYYY-MM-DD}.json -- every real
+        5-min interval is kept, no subsampling.
       - price: .../referenceTradingPrice/previous/
         ReferenceTradingPrice_{YYYYMMDD}.zip (a zip containing one
-        JSON, already 30-min)
+        JSON, already 30-min -- AEMO WA doesn't publish price any
+        finer than this, so `price_mwh` is only populated on the
+        :00/:30 marks; the 5-min-only demand rows in between get a
+        real, honest `NaN` there rather than an interpolated value).
     Both verified against real downloaded samples before writing this.
     """
     demand_by_ts: dict[pd.Timestamp, float | None] = {}
@@ -234,8 +235,6 @@ async def _fetch_wem_day(client: Any, day: date) -> pd.DataFrame:
     demand_json = demand_resp.json()
     for row in demand_json.get("data", {}).get("data", []):
         ts_local = pd.Timestamp(row["dispatchInterval"])
-        if ts_local.minute not in _TRADING_MINUTES:
-            continue
         demand_by_ts[ts_local.tz_convert("UTC")] = row.get("operationalDemand")
 
     price_by_ts: dict[pd.Timestamp, float | None] = {}

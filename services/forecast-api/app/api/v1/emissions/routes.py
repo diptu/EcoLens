@@ -1,7 +1,12 @@
 """`GET /v1/emissions` (`README.md` § API reference) — live carbon
 intensity for a region, from `raw_marts.fct_carbon_intensity`'s most
-recent hour (`data-pipeline`'s dbt project, README's `live_mix_weighted`
-method).
+recent hour. `todo-model-training.md` Phase 7: real external-provider-
+first with derived fallback -- every route below prefers OpenElectricity's
+own `live_provider_intensity_kgco2e_per_mwh` when it's fresh
+(`Settings.emissions_provider_freshness_minutes`), falling back to the
+derived `live_mix_weighted` figure otherwise, and reports which one
+actually served the response via each schema's real `method` field (see
+`service/ml/data.resolve_intensity_method`).
 
 `GET /v1/emissions/ytd` — all-region rollup from the start of the
 current calendar year (UTC) to now, backing the dashboard's Executive
@@ -50,14 +55,60 @@ from app.schemas.emissions import (
 )
 from app.core.config import Settings
 from app.service.ml.data import (
+    IntensityMethod,
     load_current_intensity,
     load_emissions_timeseries,
     load_latest_intensity,
     load_ytd_intensity,
+    resolve_intensity_method,
 )
 from app.service.ml.registry import ModelRegistry
 
 router = APIRouter(prefix="/v1", tags=["emissions"])
+
+
+def _resolve_row_intensity(
+    row: dict, latest_hour_key: str, settings: Settings
+) -> tuple[float | None, IntensityMethod]:
+    """Real external-provider-first fallback (`todo-model-training.md`
+    Phase 7), shared by every route below that reads an aggregated
+    `fct_carbon_intensity` row: computes the provider's own generation-
+    weighted intensity from `row`'s real `provider_generation_mwh`/
+    `provider_emissions_kgco2e` sums, checks it against `Settings.
+    emissions_provider_freshness_minutes` via `resolve_intensity_method`,
+    and returns `(intensity, method)` -- `intensity` from whichever
+    method actually won, `method` honestly reporting which one that was.
+    """
+    provider_generation_mwh = row.get("provider_generation_mwh")
+    provider_emissions_kgco2e = row.get("provider_emissions_kgco2e")
+    provider_intensity = (
+        float(provider_emissions_kgco2e) / float(provider_generation_mwh)
+        if provider_generation_mwh not in (None, 0)
+        and provider_emissions_kgco2e is not None
+        else None
+    )
+    latest_hour = row.get(latest_hour_key)
+    method = (
+        resolve_intensity_method(
+            latest_hour,
+            provider_intensity,
+            settings.emissions_provider_freshness_minutes,
+        )
+        if latest_hour is not None
+        else "live_mix_weighted"
+    )
+
+    if method == "live_provider":
+        return provider_intensity, method
+
+    total_generation_mwh = row.get("total_generation_mwh")
+    total_emissions_kgco2e = row.get("total_emissions_kgco2e")
+    derived_intensity = (
+        float(total_emissions_kgco2e) / float(total_generation_mwh)
+        if total_generation_mwh not in (None, 0) and total_emissions_kgco2e is not None
+        else None
+    )
+    return derived_intensity, "live_mix_weighted"
 
 
 @router.get("/emissions", response_model=EmissionsResponse)
@@ -80,14 +131,29 @@ async def get_emissions(
             f"No carbon-intensity data available for region '{region}'",
         )
 
-    response = EmissionsResponse(
-        region=region,
-        as_of=row["hour"] if row["hour"].tzinfo else row["hour"].replace(tzinfo=UTC),
-        intensity_kgco2e_per_mwh=(
+    method = resolve_intensity_method(
+        row["hour"],
+        (
+            float(row["live_provider_intensity_kgco2e_per_mwh"])
+            if row["live_provider_intensity_kgco2e_per_mwh"] is not None
+            else None
+        ),
+        settings.emissions_provider_freshness_minutes,
+    )
+    intensity = (
+        float(row["live_provider_intensity_kgco2e_per_mwh"])
+        if method == "live_provider"
+        else (
             float(row["intensity_kgco2e_per_mwh"])
             if row["intensity_kgco2e_per_mwh"] is not None
             else None
-        ),
+        )
+    )
+
+    response = EmissionsResponse(
+        region=region,
+        as_of=row["hour"] if row["hour"].tzinfo else row["hour"].replace(tzinfo=UTC),
+        intensity_kgco2e_per_mwh=intensity,
         total_generation_mwh=(
             float(row["total_generation_mwh"])
             if row["total_generation_mwh"] is not None
@@ -99,6 +165,7 @@ async def get_emissions(
             else None
         ),
         factors_version=row["factors_version"],
+        method=method,
     )
     await redis.set(
         cache_key, response.model_dump_json(), ex=settings.emissions_cache_ttl_seconds
@@ -138,6 +205,7 @@ async def get_emissions_ytd(
         if row["total_emissions_kgco2e"] is not None
         else None
     )
+    intensity, method = _resolve_row_intensity(row, "latest_hour", settings)
 
     response = EmissionsYtdResponse(
         since=since,
@@ -149,14 +217,9 @@ async def get_emissions_ytd(
             if total_emissions_kgco2e is not None
             else None
         ),
-        intensity_kgco2e_per_mwh=(
-            total_emissions_kgco2e / total_generation_mwh
-            if total_emissions_kgco2e is not None
-            and total_generation_mwh is not None
-            and total_generation_mwh != 0
-            else None
-        ),
+        intensity_kgco2e_per_mwh=intensity,
         factors_version=row["factors_version"],
+        method=method,
     )
     await redis.set(
         cache_key,
@@ -197,18 +260,15 @@ async def get_emissions_current(
     if as_of.tzinfo is None:
         as_of = as_of.replace(tzinfo=UTC)
 
+    intensity, method = _resolve_row_intensity(row, "latest_hour", settings)
+
     response = EmissionsCurrentResponse(
         as_of=as_of,
         total_generation_mwh=total_generation_mwh,
         total_emissions_kgco2e=total_emissions_kgco2e,
-        intensity_kgco2e_per_mwh=(
-            total_emissions_kgco2e / total_generation_mwh
-            if total_emissions_kgco2e is not None
-            and total_generation_mwh is not None
-            and total_generation_mwh != 0
-            else None
-        ),
+        intensity_kgco2e_per_mwh=intensity,
         factors_version=row["factors_version"],
+        method=method,
     )
     await redis.set(
         cache_key, response.model_dump_json(), ex=settings.emissions_cache_ttl_seconds

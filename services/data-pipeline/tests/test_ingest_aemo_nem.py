@@ -167,7 +167,7 @@ def test_parse_dispatchis_csv_ignores_unrelated_tables():
     assert ingest_aemo_nem._parse_dispatchis_csv(text) == []
 
 
-async def test_fetch_archive_day_samples_only_the_30_min_marks(monkeypatch):
+async def test_fetch_archive_day_keeps_every_5_min_interval(monkeypatch):
     csv_0000 = _dispatchis_csv("2026/08/01 00:00:00", "NSW1", 8000.0, 50.0)
     csv_0005 = _dispatchis_csv("2026/08/01 00:05:00", "NSW1", 8100.0, 51.0)
     csv_0030 = _dispatchis_csv("2026/08/01 00:30:00", "NSW1", 8200.0, 52.0)
@@ -183,9 +183,9 @@ async def test_fetch_archive_day_samples_only_the_30_min_marks(monkeypatch):
 
     df = await ingest_aemo_nem._fetch_archive_day(client, date(2026, 8, 1))
 
-    # Only the :00 and :30 marks are sampled -- :05 is skipped.
-    assert len(df) == 2
-    assert set(df["demand_mw"]) == {8000.0, 8200.0}
+    # No subsampling -- every real interval in the archive, including :05, survives.
+    assert len(df) == 3
+    assert set(df["demand_mw"]) == {8000.0, 8100.0, 8200.0}
 
 
 async def test_fetch_historical_range_skips_a_failing_day_and_keeps_going(monkeypatch):

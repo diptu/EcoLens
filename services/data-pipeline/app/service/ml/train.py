@@ -33,9 +33,10 @@ in-memory), just without the separate artifact-store hop.
 from __future__ import annotations
 
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Self
 
 import joblib
 import mlflow
@@ -44,6 +45,7 @@ import numpy as np
 import pandas as pd
 import torch
 from sklearn.preprocessing import StandardScaler
+from torch import nn
 from torch.utils.data import DataLoader
 
 from app.core.config import Settings, get_settings
@@ -59,6 +61,8 @@ from app.service.ml.data import (
     collate,
     fit_scalers,
     load_holidays,
+    load_ml_features_v1_imputed_fraction,
+    load_ml_features_v1_training_data,
     load_training_data,
     split_by_time,
 )
@@ -91,11 +95,21 @@ class TrainConfig:
     # selection signal leak into the coverage guarantee.
     cal_frac: float = 0.5
     early_stopping_patience: int = 5
-    train_frac: float = 0.7
-    val_frac: float = 0.15
+    # 60/20/20 (2026-08-05, changed from 70/15/15 at the user's explicit
+    # request) -- once the full OE historical backfill lands (this
+    # file's own tracked follow-up), training uses the *entire*
+    # `fct_energy_demand` range instead of a `--since`-scoped recent
+    # window, so `test`'s share needed to grow to still be a
+    # meaningful, non-trivial holdout.
+    train_frac: float = 0.6
+    val_frac: float = 0.2
 
     @classmethod
-    def from_settings(cls, settings: Settings) -> TrainConfig:
+    def from_settings(cls, settings: Settings) -> Self:
+        # `Self`, not `TrainConfig` -- `TFTTrainConfig` (`train_tft.py`)
+        # subclasses this and relies on `TFTTrainConfig.from_settings(...)`
+        # actually returning a `TFTTrainConfig` (with its own `n_heads`
+        # default intact), not a plain `TrainConfig` upcast.
         return cls(
             lookback=settings.model_lookback,
             horizon=settings.model_horizon,
@@ -132,7 +146,12 @@ class TrainConfig:
 
 @dataclass
 class TrainResult:
-    model: DemandLSTM
+    # `nn.Module`, not `DemandLSTM` -- `log_and_register_run` only ever
+    # treats `model` as a generic torch module (`mlflow.pytorch.log_model`
+    # + `.state_dict()`), so this is genuinely architecture-agnostic and
+    # is reused as-is by `train_tft.py` (`todo-model-training.md` Phase
+    # 2) for `DemandTFT`, not just `DemandLSTM`.
+    model: nn.Module
     calibration: ConformalCalibration
     feature_scalers: dict[str, StandardScaler]
     target_scaler: StandardScaler
@@ -144,6 +163,20 @@ class TrainResult:
     n_test_windows: int = 0
 
 
+def state_dict_bytes(model: nn.Module) -> int:
+    """Real on-disk size of `torch.save(model.state_dict())` -- the exact
+    artifact `log_and_register_run` persists as `serving/model_state_dict.pt`
+    and what `forecast-api` actually loads at serving time, not a
+    parameter-count estimate. Same measurement approach as `ml/prune.py`'s
+    `_artifact_bytes` (kept separate rather than imported -- that one is a
+    private, pruning-specific helper; this is the general-purpose version
+    every training run logs)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "model_state_dict.pt"
+        torch.save(model.state_dict(), path)
+        return path.stat().st_size
+
+
 def mape(pred: np.ndarray, target: np.ndarray) -> float:
     """Mean absolute percentage error, in percent. Rows where `target==0`
     are excluded (a zero-demand interval is never real for this domain,
@@ -153,6 +186,20 @@ def mape(pred: np.ndarray, target: np.ndarray) -> float:
     if not mask.any():
         return float("nan")
     return float(np.mean(np.abs((target[mask] - pred[mask]) / target[mask])) * 100)
+
+
+def rmse(pred: np.ndarray, target: np.ndarray) -> float:
+    """Root mean square error, in the same real units as `pred`/`target`
+    (MW, once called on inverse-scaled values -- same convention `mape`
+    above already uses). No zero-target masking needed here (unlike
+    `mape`, this never divides by `target`)."""
+    return float(np.sqrt(np.mean((pred - target) ** 2)))
+
+
+def mae(pred: np.ndarray, target: np.ndarray) -> float:
+    """Mean absolute error, in the same real units as `pred`/`target`
+    (MW). Same no-masking reasoning as `rmse`."""
+    return float(np.mean(np.abs(pred - target)))
 
 
 def _fit_target_scaler(
@@ -224,12 +271,35 @@ def _predict(
     )
 
 
+def _compute_val_loss(
+    model: DemandLSTM, loader: DataLoader, quantile_weight: float
+) -> float:
+    """Real validation loss -- the exact same `demand_loss` (Huber P50 +
+    weighted pinball P10/P90, on *scaled* targets) the training loop
+    itself minimizes, just eval-mode/no-grad and on the validation
+    split. Deliberately distinct from `val_mape` (an inverse-scaled-MW
+    percentage-error metric computed from P50 alone, not a loss) --
+    plotting `val_mape` next to `train_loss` on one "training vs
+    validation loss" chart would silently compare two different units
+    on one axis. Both get logged; this is what makes that comparison
+    genuinely apples-to-apples."""
+    model.eval()
+    losses = []
+    with torch.no_grad():
+        for x, y in loader:
+            out = model(x)
+            loss = demand_loss(out, y, quantile_weight=quantile_weight)
+            losses.append(loss.item())
+    return float(np.mean(losses))
+
+
 def train_model(
     raw_df: pd.DataFrame,
     config: TrainConfig,
     *,
     holidays: pd.DataFrame | None = None,
     warm_start_state_dict: dict[str, torch.Tensor] | None = None,
+    epoch_callback: Callable[[int, dict[str, float]], None] | None = None,
 ) -> TrainResult:
     """`raw_df`: `ml/data.py`'s `load_training_data` shape (long-form, one
     row per `(ts, region)`, `TARGET_COLUMN` + the raw context columns
@@ -247,6 +317,15 @@ def train_model(
     (`hidden_size`/`num_layers`/`dropout`/`horizon`) match whatever
     produced the state dict — a mismatch surfaces as `load_state_dict`
     raising a shape error, not a silent no-op.
+
+    `epoch_callback`, if given, is invoked after every epoch's history
+    entry is appended, as `epoch_callback(epoch, history[-1])`. Deliberately
+    generic (not an Optuna-specific parameter) so this module stays free of
+    a hard `optuna` import — `ml/tune.py`'s `tune_optuna` is the one real
+    caller today, wrapping it to call `trial.report(...)` and raise
+    `optuna.TrialPruned()` for real mid-training pruning of bad
+    hyperparameter trials; any exception raised by the callback propagates
+    out of `train_model` uncaught, aborting the run.
     """
     engineered = build_features(raw_df, holidays=holidays)
     split = split_by_time(
@@ -354,25 +433,40 @@ def train_model(
             train_losses.append(loss.item())
 
         y_val, _, p50_val, _ = _predict(model, val_loader)
-        val_mape = mape(
-            _inverse_target(target_scaler, p50_val),
-            _inverse_target(target_scaler, y_val),
-        )
+        y_val_mw = _inverse_target(target_scaler, y_val)
+        p50_val_mw = _inverse_target(target_scaler, p50_val)
+        val_mape = mape(p50_val_mw, y_val_mw)
+        # Real MW-unit error metrics (2026-08-05, Performance page's
+        # "validation RMSE & MAE" chart) -- computed on the same
+        # inverse-scaled P50-vs-actual pair `val_mape` already uses, so
+        # this is genuinely free (no extra forward pass), just two more
+        # real numbers from data already in hand.
+        val_rmse = rmse(p50_val_mw, y_val_mw)
+        val_mae = mae(p50_val_mw, y_val_mw)
+        val_loss = _compute_val_loss(model, val_loader, config.quantile_weight)
         scheduler.step(val_mape)
 
         history.append(
             {
                 "epoch": float(epoch),
                 "train_loss": float(np.mean(train_losses)),
+                "val_loss": val_loss,
                 "val_mape": val_mape,
+                "val_rmse": val_rmse,
+                "val_mae": val_mae,
             }
         )
         log.info(
             "train.epoch",
             epoch=epoch,
             train_loss=history[-1]["train_loss"],
+            val_loss=val_loss,
             val_mape=val_mape,
+            val_rmse=val_rmse,
+            val_mae=val_mae,
         )
+        if epoch_callback is not None:
+            epoch_callback(epoch, history[-1])
 
         if val_mape < best_val_mape - 1e-4:
             best_val_mape = val_mape
@@ -444,34 +538,58 @@ def log_and_register_run(
     *,
     register: bool,
     extra_tags: dict[str, str] | None = None,
+    extra_params: dict[str, object] | None = None,
 ) -> TrainAndRegisterResult:
     """Logs one training run to MLflow (params/per-epoch metrics/test
     metrics/conformal calibration/model artifacts) and, if `register`,
     registers it as a new `model_name` version in the `None` stage.
-    Shared by `train_and_register` (full retrain) and `ml.incremental`'s
-    `train_and_register_incremental` (warm-started fine-tune) — *what*
-    gets logged is identical between the two; only `extra_tags`
-    (`training_type`/`warm_start_run_id` for the incremental path)
-    differs. Promoting to `Production`/`Staging` is a separate,
-    deliberately-gated step (`scripts/promote_model.sh`) for either path,
-    not automatic here.
+    Shared by `train_and_register` (full retrain), `ml.incremental`'s
+    `train_and_register_incremental` (warm-started fine-tune), and
+    `train_tft.py`'s TFT training path (`todo-model-training.md` Phase
+    2) — *what* gets logged is architecture-agnostic (`result.model` is
+    only ever treated as a generic `nn.Module`); `extra_tags`
+    (`training_type`/`warm_start_run_id` for the incremental path,
+    `architecture` for TFT) and `extra_params` (e.g. TFT's real
+    `n_encoder_features`/`n_decoder_features`, which don't fit this
+    function's own LSTM-shaped `n_features` param below) are how each
+    caller supplies what's genuinely architecture-specific. Promoting to
+    `Production`/`Staging` is a separate, deliberately-gated step
+    (`scripts/promote_model.sh`) for any path, not automatic here.
     """
     with mlflow.start_run() as run:
         mlflow.log_params(config.as_mlflow_params())
         mlflow.log_param("regions", ",".join(regions))
+        # `FEATURE_COLUMNS`' count -- accurate for `DemandLSTM` (one
+        # homogeneous input window), a rough total for TFT (whose real
+        # encoder/decoder feature counts differ and are logged
+        # separately via `extra_params`), which is why this alone isn't
+        # gated behind an architecture check: it's still meaningful
+        # informational context either way, just not the full picture
+        # for TFT on its own.
         mlflow.log_param("n_features", len(FEATURE_COLUMNS))
+        if extra_params:
+            mlflow.log_params(extra_params)
         tags = {"git_sha": git_sha() or "unknown", "target_column": TARGET_COLUMN}
         tags.update(extra_tags or {})
         mlflow.set_tags(tags)
 
         for epoch_metrics in result.history:
-            mlflow.log_metrics(
-                {
-                    "train_loss": epoch_metrics["train_loss"],
-                    "val_mape": epoch_metrics["val_mape"],
-                },
-                step=int(epoch_metrics["epoch"]),
-            )
+            step_metrics = {
+                "train_loss": epoch_metrics["train_loss"],
+                "val_mape": epoch_metrics["val_mape"],
+            }
+            # `.get()`/`in` checks, not `[...]` -- `val_loss` (2026-08-05,
+            # "training vs validation loss" chart) and `val_rmse`/`val_mae`
+            # (2026-08-05, "validation RMSE & MAE" chart), both real MW-
+            # unit error metrics computed alongside `val_mape`, are only
+            # present in `history` dicts built by the current
+            # `train_model`/`train_tft_model`; a caller passing an
+            # older-shaped `TrainResult` shouldn't crash logging the
+            # metrics it does have.
+            for key in ("val_loss", "val_rmse", "val_mae"):
+                if key in epoch_metrics:
+                    step_metrics[key] = epoch_metrics[key]
+            mlflow.log_metrics(step_metrics, step=int(epoch_metrics["epoch"]))
         if result.test_metrics:
             mlflow.log_metrics(result.test_metrics)
         mlflow.log_metrics(
@@ -480,6 +598,16 @@ def log_and_register_run(
                 "n_val_windows": result.n_val_windows,
                 "n_cal_windows": result.n_cal_windows,
                 "n_test_windows": result.n_test_windows,
+            }
+        )
+        # GB (10^9 bytes, the conventional storage-size unit), not GiB
+        # (2^30) -- matches how cloud artifact stores/disks report size,
+        # the audience this metric is actually for.
+        model_size_bytes = state_dict_bytes(result.model)
+        mlflow.log_metrics(
+            {
+                "model_size_bytes": model_size_bytes,
+                "model_size_gb": model_size_bytes / 1_000_000_000,
             }
         )
         mlflow.log_dict(result.calibration.to_dict(), "conformal_calibration.json")
@@ -546,6 +674,9 @@ async def train_and_register(
     settings: Settings | None = None,
     config: TrainConfig | None = None,
     register: bool = True,
+    data_source: str = "fct_energy_demand",
+    extra_tags: dict[str, str] | None = None,
+    since: pd.Timestamp | None = None,
 ) -> TrainAndRegisterResult:
     """The real, DB + MLflow-backed entrypoint — `cli.py`'s `train`
     command and `pipeline.flows.daily_demand` (`README.md`'s Prefect
@@ -553,19 +684,59 @@ async def train_and_register(
     trained model as a new `model_name` version in the `None` stage —
     promoting it to `Production` is a separate, deliberately-gated step
     (`scripts/promote_model.sh`), not automatic here.
+
+    `data_source="ml_features_v1"` (`cli.py`'s `tune-optuna` command,
+    `ml/tune.py`'s `tune_optuna`) sources from the orphaned
+    `ml.ml_features_demand_v1` table instead of the dbt-tracked
+    `fct_energy_demand` — see `ml/data.py`'s
+    `load_ml_features_v1_training_data` module comment for what that
+    trades off (more history, 66% imputed rows). The real imputed
+    fraction is logged as an MLflow param either way, not silently
+    dropped.
+
+    `since` (`todo-model-training.md`'s OE region-join blocker follow-up,
+    2026-08-05): `split_by_time`'s 70/15/15 split is chronological over
+    *every* unique `ts` in `raw_df`, applied globally, not per-region —
+    if `raw_df` spans a much longer real history than the columns a
+    given training run actually has non-NaN data for (e.g.
+    `total_generation_mw`, only backfilled for a recent window, not the
+    full ~370-day AEMO history), nearly all of the real usable rows land
+    in the *test* split (the tail end of that long history), starving
+    train/val/calibration of real data even though plenty of usable rows
+    exist in aggregate — confirmed the hard way: a real run against the
+    full history produced 20/5/0 train/val/calibration rows against
+    27,328 real usable rows total. Passing `since` scopes
+    `load_training_data`'s query so the 70/15/15 split happens *within*
+    the window real data actually covers, not silently diluted across
+    a mostly-NaN older history.
     """
     settings = settings or get_settings()
     config = config or TrainConfig.from_settings(settings)
     configure_mlflow(settings)
 
+    extra_params: dict[str, object] = {"data_source": data_source}
     async with get_session() as db:
-        raw_df = await load_training_data(db, regions)
+        if data_source == "ml_features_v1":
+            raw_df = await load_ml_features_v1_training_data(db, regions)
+            extra_params[
+                "imputed_fraction"
+            ] = await load_ml_features_v1_imputed_fraction(db, regions)
+        else:
+            raw_df = await load_training_data(db, regions, since=since)
         holidays_df = await load_holidays(db)
 
     if raw_df.empty:
         raise ValueError(
-            f"no training data found in the warehouse for regions={list(regions)}"
+            f"no training data found in {data_source!r} for regions={list(regions)}"
         )
 
     result = train_model(raw_df, config, holidays=holidays_df)
-    return log_and_register_run(result, config, regions, model_name, register=register)
+    return log_and_register_run(
+        result,
+        config,
+        regions,
+        model_name,
+        register=register,
+        extra_tags=extra_tags,
+        extra_params=extra_params,
+    )

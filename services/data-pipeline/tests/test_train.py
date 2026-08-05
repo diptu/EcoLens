@@ -12,7 +12,10 @@ from app.models.ml import DemandLSTM
 from app.service.ml.train import (
     TrainConfig,
     _split_val_for_calibration,
+    mae,
     mape,
+    rmse,
+    state_dict_bytes,
     train_model,
 )
 
@@ -84,6 +87,39 @@ class TestMape:
         assert mape(pred, target) == pytest.approx(900.0)
 
 
+class TestRmse:
+    def test_zero_when_exact(self):
+        assert rmse(np.array([10.0]), np.array([10.0])) == pytest.approx(0.0)
+
+    def test_matches_hand_computed_value(self):
+        pred = np.array([9.0, 12.0])
+        target = np.array([10.0, 10.0])
+
+        # errors: -1, 2 -> squared: 1, 4 -> mean: 2.5 -> sqrt: ~1.5811
+        assert rmse(pred, target) == pytest.approx(np.sqrt(2.5))
+
+    def test_penalizes_large_errors_more_than_mae_does(self):
+        # RMSE is more sensitive to outliers than MAE (squaring) -- a
+        # single large error should move RMSE above MAE for the same
+        # pred/target pair, not leave them equal.
+        pred = np.array([10.0, 10.0, 100.0])
+        target = np.array([10.0, 10.0, 10.0])
+
+        assert rmse(pred, target) > mae(pred, target)
+
+
+class TestMae:
+    def test_zero_when_exact(self):
+        assert mae(np.array([10.0]), np.array([10.0])) == pytest.approx(0.0)
+
+    def test_matches_hand_computed_value(self):
+        pred = np.array([9.0, 12.0])
+        target = np.array([10.0, 10.0])
+
+        # errors: |-1|, |2| -> mean: 1.5
+        assert mae(pred, target) == pytest.approx(1.5)
+
+
 class TestSplitValForCalibration:
     def test_splits_chronologically_and_disjointly(self):
         df = pd.DataFrame(
@@ -120,6 +156,23 @@ class TestTrainModel:
         # not just "ran without crashing".
         assert last_epoch_mape < first_epoch_mape * 0.9
 
+        # `val_loss` (2026-08-05, for the Performance page's "training
+        # vs validation loss" chart) -- real `demand_loss` on the
+        # validation split, same units as `train_loss`, distinct from
+        # `val_mape` (an inverse-scaled-MW percentage-error metric, not
+        # a loss). Every epoch must have one, and it should also trend
+        # down as the model actually learns, same as train_loss.
+        assert all("val_loss" in h for h in result.history)
+        assert result.history[-1]["val_loss"] < result.history[0]["val_loss"]
+
+        # `val_rmse`/`val_mae` (2026-08-05, Performance page's
+        # "validation RMSE & MAE" chart) -- real MW-unit error metrics
+        # computed on the same inverse-scaled P50-vs-actual pair
+        # `val_mape` uses. Same learn-something bar as val_mape.
+        assert all("val_rmse" in h and "val_mae" in h for h in result.history)
+        assert result.history[-1]["val_rmse"] < result.history[0]["val_rmse"] * 0.9
+        assert result.history[-1]["val_mae"] < result.history[0]["val_mae"] * 0.9
+
         assert "test_mape" in result.test_metrics
         assert "test_coverage_calibrated" in result.test_metrics
         assert 0.0 <= result.test_metrics["test_coverage_calibrated"] <= 1.0
@@ -135,6 +188,47 @@ class TestTrainModel:
         result = train_model(df, _FAST_CONFIG)
 
         assert result.calibration.q.shape == (_FAST_CONFIG.horizon,)
+
+    def test_epoch_callback_is_invoked_once_per_epoch_with_real_history(self):
+        df = _synthetic_demand_df(n_per_region=800)
+        calls: list[tuple[int, dict[str, float]]] = []
+
+        result = train_model(
+            df,
+            _FAST_CONFIG,
+            epoch_callback=lambda epoch, hist: calls.append((epoch, dict(hist))),
+        )
+
+        assert len(calls) == len(result.history)
+        assert [c[0] for c in calls] == list(range(len(result.history)))
+        assert calls[-1][1] == result.history[-1]
+
+    def test_epoch_callback_exception_aborts_training(self):
+        df = _synthetic_demand_df(n_per_region=800)
+
+        class _Stop(Exception):
+            pass
+
+        def blow_up(epoch: int, hist: dict[str, float]) -> None:
+            raise _Stop
+
+        with pytest.raises(_Stop):
+            train_model(df, _FAST_CONFIG, epoch_callback=blow_up)
+
+
+class TestStateDictBytes:
+    def test_returns_a_positive_real_byte_count(self):
+        model = DemandLSTM(n_features=len(FEATURE_COLUMNS), horizon=4, hidden_size=8)
+
+        size = state_dict_bytes(model)
+
+        assert size > 0
+
+    def test_a_bigger_model_has_a_bigger_state_dict(self):
+        small = DemandLSTM(n_features=len(FEATURE_COLUMNS), horizon=4, hidden_size=8)
+        big = DemandLSTM(n_features=len(FEATURE_COLUMNS), horizon=4, hidden_size=128)
+
+        assert state_dict_bytes(big) > state_dict_bytes(small)
 
 
 class TestWarmStart:

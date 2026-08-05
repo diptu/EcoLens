@@ -2,8 +2,10 @@
  * /dashboard/admin/models — model registry, training, fine-tuning.
  *
  * Lists all model versions with their stage + metrics. Lets the
- * admin (diptu) start a full retrain, a fine-tune job, or promote
- * a Staging model to Production.
+ * admin (diptu) start a full retrain, a fine-tune job, promote a
+ * Staging model to Production, or permanently delete a version
+ * (2026-08-05 -- gated server-side against deleting the current
+ * Production version, see `deleteModelVersion`'s own docstring).
  */
 "use client";
 
@@ -16,13 +18,16 @@ import {
   PlayCircle,
   Rocket,
   Sliders,
+  Trash2,
   XCircle,
 } from "lucide-react";
 
 import { Card } from "@/components/dashboard/card";
 import { cn } from "@/lib/utils";
 import {
+  deleteModelVersion,
   fetchModelVersions,
+  MODEL_ARCHITECTURES,
   pollForNewModelVersion,
   promoteModelVersion,
   type ModelVersion,
@@ -33,6 +38,9 @@ type Tab = "registry" | "train" | "fine-tune";
 
 export default function AdminModelsPage() {
   const [tab, setTab] = useState<Tab>("registry");
+  const [architecture, setArchitecture] = useState<string>(
+    MODEL_ARCHITECTURES[0].modelName,
+  );
   const [versions, setVersions] = useState<ModelVersion[] | null>(null);
   const [modelName, setModelName] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -40,7 +48,8 @@ export default function AdminModelsPage() {
 
   useEffect(() => {
     let cancelled = false;
-    fetchModelVersions()
+    setLoaded(false);
+    fetchModelVersions(architecture)
       .then((r) => {
         if (!cancelled) {
           setVersions(r.data);
@@ -48,14 +57,19 @@ export default function AdminModelsPage() {
           setExpandedVersion(r.data[0]?.version ?? null);
         }
       })
-      .catch(() => {})
+      .catch(() => {
+        if (!cancelled) {
+          setVersions([]);
+          setModelName(architecture);
+        }
+      })
       .finally(() => {
         if (!cancelled) setLoaded(true);
       });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [architecture]);
 
   function refreshVersions(fresh: ModelVersion[]) {
     setVersions(fresh);
@@ -68,13 +82,40 @@ export default function AdminModelsPage() {
   function handlePromote(version: string, stage: "Production" | "Staging" | "Archived") {
     setPromoting(version);
     setPromoteError(null);
-    promoteModelVersion(version, stage)
-      .then(() => fetchModelVersions())
+    promoteModelVersion(version, stage, architecture)
+      .then(() => fetchModelVersions(architecture))
       .then((r) => refreshVersions(r.data))
       .catch((err) => {
         setPromoteError(err instanceof Error ? err.message : "promotion failed");
       })
       .finally(() => setPromoting(null));
+  }
+
+  const [deleting, setDeleting] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  function handleDelete(version: string) {
+    // Client-side confirm too, not just the server-side Production
+    // gate -- this is permanent (the registry entry, not the
+    // underlying run/artifacts, but still irreversible from the UI's
+    // point of view: a deleted version can't be promoted or served
+    // again without re-registering it from the run directly).
+    if (
+      !window.confirm(
+        `Permanently delete v${version}? This removes it from the registry -- it can't be promoted or served again.`,
+      )
+    ) {
+      return;
+    }
+    setDeleting(version);
+    setDeleteError(null);
+    deleteModelVersion(version, architecture)
+      .then(() => fetchModelVersions(architecture))
+      .then((r) => refreshVersions(r.data))
+      .catch((err) => {
+        setDeleteError(err instanceof Error ? err.message : "deletion failed");
+      })
+      .finally(() => setDeleting(null));
   }
 
   return (
@@ -107,7 +148,7 @@ export default function AdminModelsPage() {
           title={
             <span className="flex items-center gap-2">
               <Box className="h-4 w-4 text-emerald-200" />
-              {modelName ?? "ecolens_lstm_demand"}
+              {modelName ?? architecture}
               {versions ? ` · ${versions.length} version${versions.length === 1 ? "" : "s"}` : ""}
             </span>
           }
@@ -117,8 +158,28 @@ export default function AdminModelsPage() {
             </span>
           }
         >
+          <div
+            className="mb-3 flex flex-wrap gap-1"
+            role="tablist"
+            aria-label="Model architecture"
+            data-testid="architecture-selector"
+          >
+            {MODEL_ARCHITECTURES.map((arch) => (
+              <TabButton
+                key={arch.modelName}
+                active={architecture === arch.modelName}
+                onClick={() => setArchitecture(arch.modelName)}
+                data-testid={`architecture-${arch.modelName}`}
+              >
+                {arch.label}
+              </TabButton>
+            ))}
+          </div>
           {promoteError && (
             <p className="mb-2 text-xs text-rose-300">{promoteError}</p>
+          )}
+          {deleteError && (
+            <p className="mb-2 text-xs text-rose-300">{deleteError}</p>
           )}
           <div className="space-y-2" data-testid="model-registry">
             <RealModelVersions
@@ -128,6 +189,8 @@ export default function AdminModelsPage() {
               onToggle={(v) => setExpandedVersion(expandedVersion === v ? null : v)}
               onPromote={handlePromote}
               promoting={promoting}
+              onDelete={handleDelete}
+              deleting={deleting}
             />
           </div>
         </Card>
@@ -140,6 +203,7 @@ export default function AdminModelsPage() {
       {tab === "fine-tune" && (
         <FineTuneForm
           currentVersion={versions?.[0]?.version ?? null}
+          architecture={architecture}
           onNewVersion={(fresh) => {
             refreshVersions(fresh);
             setTab("registry");
@@ -197,7 +261,7 @@ const STAGE_COLORS: Record<string, string> = {
  * not an error -- rendered as an honest empty state rather than a
  * fabricated list. */
 function RealModelVersions({
-  versions, loaded, expandedVersion, onToggle, onPromote, promoting,
+  versions, loaded, expandedVersion, onToggle, onPromote, promoting, onDelete, deleting,
 }: {
   versions: ModelVersion[] | null;
   loaded: boolean;
@@ -205,6 +269,8 @@ function RealModelVersions({
   onToggle: (version: string) => void;
   onPromote: (version: string, stage: "Production" | "Staging" | "Archived") => void;
   promoting: string | null;
+  onDelete: (version: string) => void;
+  deleting: string | null;
 }) {
   if (!loaded) {
     return <p className="px-1 py-6 text-center text-xs text-white/40">Loading model versions…</p>;
@@ -226,6 +292,8 @@ function RealModelVersions({
           onToggle={() => onToggle(v.version)}
           onPromote={onPromote}
           promoting={promoting === v.version}
+          onDelete={onDelete}
+          deleting={deleting === v.version}
         />
       ))}
     </>
@@ -233,13 +301,15 @@ function RealModelVersions({
 }
 
 function RealModelVersionRow({
-  version, expanded, onToggle, onPromote, promoting,
+  version, expanded, onToggle, onPromote, promoting, onDelete, deleting,
 }: {
   version: ModelVersion;
   expanded: boolean;
   onToggle: () => void;
   onPromote: (version: string, stage: "Production" | "Staging" | "Archived") => void;
   promoting: boolean;
+  onDelete: (version: string) => void;
+  deleting: boolean;
 }) {
   return (
     <div
@@ -309,6 +379,22 @@ function RealModelVersionRow({
                 className="inline-flex items-center gap-1.5 rounded-md border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] text-white/70 hover:bg-white/10 disabled:opacity-50"
               >
                 <XCircle className="h-3 w-3" /> Archive
+              </button>
+            )}
+            {/* Production is never offered here at all -- the server
+             * rejects it (409) regardless, but hiding it client-side is
+             * more honest than showing a button that's guaranteed to
+             * fail. Staging/Archived/None-stage versions delete freely,
+             * matching delete_model_version's own real gate. */}
+            {version.stage !== "Production" && (
+              <button
+                type="button"
+                onClick={() => onDelete(version.version)}
+                disabled={deleting}
+                data-testid={`delete-${version.version}`}
+                className="ml-auto inline-flex items-center gap-1.5 rounded-md border border-rose-400/20 bg-rose-500/10 px-2.5 py-1 text-[11px] text-rose-200 hover:bg-rose-500/20 disabled:opacity-50"
+              >
+                <Trash2 className="h-3 w-3" /> {deleting ? "Deleting…" : "Delete"}
               </button>
             )}
           </div>
@@ -408,9 +494,11 @@ type FineTuneState =
  * doesn't have. */
 function FineTuneForm({
   currentVersion,
+  architecture,
   onNewVersion,
 }: {
   currentVersion: string | null;
+  architecture: string;
   onNewVersion: (versions: ModelVersion[]) => void;
 }) {
   const [regionsInput, setRegionsInput] = useState("");
@@ -436,13 +524,19 @@ function FineTuneForm({
     triggerTraining({ regions: regions.length ? regions : undefined, windowHours })
       .then((trigger) => {
         setStatus({ state: "queued", trigger });
-        cancelPoll.current = pollForNewModelVersion(currentVersion, (versions) => {
-          setStatus({ state: "polling", trigger });
-          const newest = versions.data[0]?.version ?? null;
-          if (newest !== currentVersion) {
-            onNewVersion(versions.data);
-          }
-        });
+        cancelPoll.current = pollForNewModelVersion(
+          currentVersion,
+          (versions) => {
+            setStatus({ state: "polling", trigger });
+            const newest = versions.data[0]?.version ?? null;
+            if (newest !== currentVersion) {
+              onNewVersion(versions.data);
+            }
+          },
+          5000,
+          120_000,
+          architecture,
+        );
       })
       .catch((err) => {
         const message = err instanceof Error ? err.message : "training trigger failed";

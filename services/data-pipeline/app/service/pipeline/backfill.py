@@ -62,12 +62,23 @@ async def already_succeeded(source: str, day: date) -> bool:
         return result.first() is not None
 
 
-#  aemo-nem/aemo-wem have a real historical fetch keyed on an actual
-# date range (see ingest_aemo_nem/wem's `_fetch_historical_range`) --
-# route those two through `start`/`end` instead of `lookback_minutes`,
-# which is always "last N minutes from *now*" and structurally can't
-# target a specific past day no matter how many days this loops over.
-_DATE_RANGE_SOURCES: tuple[str, ...] = ("aemo-nem", "aemo-wem")
+#  aemo-nem/aemo-wem/bom/oe have a real historical fetch keyed on an
+# actual date range (see ingest_aemo_nem/wem/bom/openelectricity's
+# `_fetch_historical_range`) -- route those through `start`/`end`
+# instead of `lookback_minutes`, which is always "last N minutes from
+# *now*" and structurally can't target a specific past day no matter how
+# many days this loops over. `bom` joined this list 2026-08-05 --
+# previously BoM's own API had no date-range query at all (only a
+# rolling ~72h window), so its backfill would have silently re-fetched
+# today's data once per day in the range instead of the actual requested
+# days; `ingest_bom.py`'s `_fetch_historical_range` now sources real
+# historical weather from Open-Meteo's ERA5 archive instead, closing
+# that gap for real. `oe` joined the same day for the same reason --
+# `ingest_openelectricity.py`'s `_fetch_historical_range` now targets a
+# real day via `network_region`/`date_start`/`date_end` (the OE
+# region-join blocker fix, `todo-model-training.md`) instead of always
+# meaning "last N minutes from now".
+_DATE_RANGE_SOURCES: tuple[str, ...] = ("aemo-nem", "aemo-wem", "bom", "oe")
 
 
 async def backfill_day(
@@ -84,12 +95,22 @@ async def backfill_day(
 
     try:
         if key in _DATE_RANGE_SOURCES:
+            # `ingest_aemo_{nem,wem}.py`'s `_fetch_historical_range` treats
+            # `[start.date(), end.date()]` as an INCLUSIVE calendar-day
+            # range (its own docstring/tests) -- passing `end=day_start +
+            # 1 day` here (a half-open-range instinct) made every single
+            # day of backfill fetch *two* real calendar days (this day
+            # plus the next), silently doubling AEMO archive requests and
+            # inflating the `rows_landed` this function returns, e.g.
+            # ~576 instead of the real 288/day for `aemo-wem`. `start` and
+            # `end` both resolving to the same calendar date is what
+            # actually asks for exactly one day.
             day_start = datetime(day.year, day.month, day.day, tzinfo=UTC)
             rows = await run_source(
                 key,
                 triggered_by="backfill",
                 start=day_start,
-                end=day_start + timedelta(days=1),
+                end=day_start,
             )
         else:
             rows = await run_source(

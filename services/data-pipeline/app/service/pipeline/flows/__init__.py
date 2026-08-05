@@ -55,6 +55,7 @@ from app.core.config import get_settings
 from app.db.session import get_session
 from app.service.dbt_runner import run_dbt
 from app.service.ml.train import train_and_register
+from app.service.ml.train_tft import TFT_MODEL_NAME, train_and_register_tft
 from app.service.mlops.registry import get_version_in_stage
 from app.db.rabbitmq import publish_training_trigger_event
 from app.core.logging import get_logger
@@ -131,9 +132,22 @@ def dbt_build_task(target: str = "prod") -> int:
     return run_dbt("build", settings.dbt_project_dir, target, [])
 
 
+#: Architectures that get a warm-started incremental fine-tune off of
+#: every training-trigger event (`todo-model-training.md` Phase 4:
+#: "apply the same higher-frequency treatment to TFT once it exists" --
+#: it now does, Phase 2). TimesFM is deliberately absent -- zero-shot,
+#: no weights to incrementally update (that phase's own explicit
+#: exemption).
+INCREMENTAL_ARCHITECTURES: tuple[str, ...] = ("lstm", "tft")
+
+
 @task(name="publish-training-trigger")
 async def publish_training_trigger(
-    regions: list[str], window_hours: int, *, triggered_by: str = "schedule"
+    regions: list[str],
+    window_hours: int,
+    *,
+    architecture: str = "lstm",
+    triggered_by: str = "schedule",
 ) -> dict:
     """`TODO.md` item 1's "Event Publisher": fires once `dbt_build_task`
     (the "dbt post-execution hook", adapted to a Prefect task-completion
@@ -143,6 +157,14 @@ async def publish_training_trigger(
     should query (`Settings.incremental_train_window_hours` back from
     now), and a real anomaly-summary flag count from `meta.anomalies`
     over that same window — not a placeholder field.
+
+    `architecture` (`"lstm"` or `"tft"`) is threaded into the payload so
+    `training_worker.handle_training_trigger` (`todo-model-training.md`
+    Phase 4) dispatches to the right incremental trainer and registered
+    model name -- callers that want both fine-tuned from the same build
+    call this once per `INCREMENTAL_ARCHITECTURES` entry, not once
+    overall (two independent fine-tunes off of one shared dbt build, not
+    one event trying to mean both).
 
     `triggered_by` defaults to `"schedule"` (this flow's own automatic
     path); `app.service.model.actions.trigger_training` (the manual,
@@ -173,6 +195,7 @@ async def publish_training_trigger(
         "window_since": window_since.isoformat(),
         "window_until": window_until.isoformat(),
         "anomalies_flagged": anomalies_flagged,
+        "architecture": architecture,
         "triggered_by": triggered_by,
     }
     await publish_training_trigger_event(payload)
@@ -181,6 +204,7 @@ async def publish_training_trigger(
         regions=regions,
         window_since=payload["window_since"],
         anomalies_flagged=anomalies_flagged,
+        architecture=architecture,
     )
     return payload
 
@@ -204,6 +228,12 @@ async def train_and_register_task(model_name: str, regions: list[str]) -> str:
     return result.run_id
 
 
+@task(name="train-and-register-tft")
+async def train_and_register_tft_task(model_name: str, regions: list[str]) -> str:
+    result = await train_and_register_tft(model_name, regions, register=True)
+    return result.run_id
+
+
 @flow(name="daily-demand")
 async def daily_demand(
     regions: list[str] | None = None, target: str | None = None
@@ -218,20 +248,77 @@ async def daily_demand(
 
     dbt_exit_code = dbt_build_task(target=resolved_target)
     if dbt_exit_code == 0:
-        await publish_training_trigger(
-            resolved_regions, settings.incremental_train_window_hours
-        )
+        # One fine-tune trigger per architecture (`todo-model-training.md`
+        # Phase 4) -- two independent incremental fine-tunes off of the
+        # one shared dbt build that just succeeded, not one event trying
+        # to mean both.
+        for architecture in INCREMENTAL_ARCHITECTURES:
+            await publish_training_trigger(
+                resolved_regions,
+                settings.incremental_train_window_hours,
+                architecture=architecture,
+            )
     else:
         log.warning(
             "flows.dbt_build_failed_skipping_training_trigger", exit_code=dbt_exit_code
         )
 
+    # Periodic full-retrain reset (Phase 4's "known-good anchor" item) --
+    # `training_due`'s staleness check, same as before this pass for
+    # LSTM, now applied to TFT too so its incremental path also gets a
+    # real, non-incrementally-drifted anchor to warm-start from and to be
+    # measured against in `divergence.check_drift`.
     model_name = settings.mlflow_registry_model_name
     if training_due(model_name):
         run_id = await train_and_register_task(model_name, resolved_regions)
         log.info("flows.trained", model_name=model_name, run_id=run_id)
     else:
         log.info("flows.training_not_due", model_name=model_name)
+
+    if training_due(TFT_MODEL_NAME):
+        tft_run_id = await train_and_register_tft_task(TFT_MODEL_NAME, resolved_regions)
+        log.info("flows.trained", model_name=TFT_MODEL_NAME, run_id=tft_run_id)
+    else:
+        log.info("flows.training_not_due", model_name=TFT_MODEL_NAME)
+
+
+@flow(name="incremental-retrain-trigger")
+async def incremental_retrain_trigger(
+    regions: list[str] | None = None, target: str | None = None
+) -> None:
+    """Higher-frequency counterpart to `daily_demand`'s training-trigger
+    publish (`todo-model-training.md` Phase 4: "increase trigger
+    frequency... likely a *separate* deployment rather than repurposing
+    daily-demand"). Deliberately narrow scope compared to `daily_demand`:
+    only `dbt build` + training-trigger publish, no ingestion (assumes
+    upstream ingestion is already kept fresh by its own real, independent
+    schedule -- `.github/workflows/ingest-*.yml`'s 5-30 minute crons) and
+    no full-retrain-if-stale check (that stays a `daily_demand`-cadence
+    concern, `training_due`'s own `min_age_days` default is measured in
+    days, not minutes).
+
+    Real gap this closes: `.github/workflows/ingest-*.yml` lands new raw
+    data every 5-30 minutes, but until this flow exists, the mart + the
+    incremental-fine-tune trigger only refresh once/day
+    (`daily_demand`'s own cron) -- a real, honestly-measurable staleness
+    gap between "data available" and "model sees it".
+    """
+    settings = get_settings()
+    resolved_regions = regions or settings.model_default_regions
+    resolved_target = target or settings.dbt_target
+
+    dbt_exit_code = dbt_build_task(target=resolved_target)
+    if dbt_exit_code == 0:
+        for architecture in INCREMENTAL_ARCHITECTURES:
+            await publish_training_trigger(
+                resolved_regions,
+                settings.incremental_train_window_hours,
+                architecture=architecture,
+            )
+    else:
+        log.warning(
+            "flows.dbt_build_failed_skipping_training_trigger", exit_code=dbt_exit_code
+        )
 
 
 if __name__ == "__main__":

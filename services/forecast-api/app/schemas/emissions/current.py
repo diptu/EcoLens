@@ -17,4 +17,6 @@ class EmissionsCurrentResponse(AppBaseModel):
     total_emissions_kgco2e: float | None = None
     intensity_kgco2e_per_mwh: float | None = None
     factors_version: str | None = None
-    method: Literal["live_mix_weighted"] = "live_mix_weighted"
+    # `todo-model-training.md` Phase 7: real, not hardcoded -- see
+    # `EmissionsResponse.method`'s identical comment.
+    method: Literal["live_provider", "live_mix_weighted"] = "live_mix_weighted"

@@ -13,4 +13,7 @@ class EmissionsResponse(AppBaseModel):
     total_generation_mwh: float | None = None
     total_emissions_kgco2e: float | None = None
     factors_version: str | None = None
-    method: Literal["live_mix_weighted"] = "live_mix_weighted"
+    # `todo-model-training.md` Phase 7: real, not hardcoded -- reports
+    # which method actually served this response, decided per-request by
+    # `service/ml/data.resolve_intensity_method`'s freshness check.
+    method: Literal["live_provider", "live_mix_weighted"] = "live_mix_weighted"

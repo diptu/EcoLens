@@ -24,6 +24,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import {
   Activity,
   BookOpen,
@@ -259,9 +260,9 @@ export default function EmissionsPage() {
           <p className="mt-1 text-sm text-white/55">
             Scope 2 (location-based) grid emissions from the ecoLens
             warehouse, per NEM/WEM region.{" "}
-            <a href="/dashboard/carbon/methodology/" className="text-emerald-100 hover:text-emerald-100 underline-offset-2 hover:underline">
+            <Link href="/dashboard/carbon/methodology/" className="text-emerald-100 hover:text-emerald-100 underline-offset-2 hover:underline">
               See the full calculation chain →
-            </a>
+            </Link>
           </p>
         </div>
         <div className="text-right text-xs text-white/40">

@@ -101,8 +101,16 @@ test: check-env ## Run test suite with security checks.
 	$(UV) run --directory services/forecast-api pytest -m "not e2e" \
 		--cov=app \
 		--cov-fail-under=90
-	$(UV) run pip-audit
-	$(UV) run --directory services/forecast-api pip-audit
+	# PYSEC-2026-3552 (cryptography <50) is ignored deliberately, not
+	# silently: `mlflow` (every released version through 3.15.0, the
+	# latest) pins `cryptography<50`, so `cryptography>=50.0.0` is
+	# currently unsatisfiable in either project's dependency graph
+	# without dropping to an mlflow pre-release (confirmed via `uv lock
+	# --upgrade-package "cryptography>=50.0.0"`'s resolver conflict, not
+	# assumed) -- re-check this ignore next time mlflow's own
+	# `cryptography` ceiling moves.
+	$(UV) run pip-audit --ignore-vuln PYSEC-2026-3552
+	$(UV) run --directory services/forecast-api pip-audit --ignore-vuln PYSEC-2026-3552
 
 # ── Services ────────────────────────────────────────────────────────────────
 .PHONY: api
@@ -117,14 +125,71 @@ pipeline: ## Run data-pipeline locally.
 web: ## Run Next.js (requires pnpm).
 	cd services/dashboard && pnpm dev
 
+# ── dbt ─────────────────────────────────────────────────────────────────────
+.PHONY: dbt-build
+dbt-build: ## Run `dbt build` against the warehouse (services/data-pipeline/dbt/ecolens). Pass TARGET=dev to override.
+	$(UV) run --package data-pipeline ecolens-pipeline dbt build $(if $(TARGET),--target $(TARGET))
+
 # ── ML ──────────────────────────────────────────────────────────────────────
+# `todo-model-training.md`'s "Training all three models" plan: one joint
+# LSTM/TFT model conditioned on all 6 real regions in a single run, not 6
+# separate single-region models (`train_and_register`'s `regions` arg
+# already supports this -- confirmed directly against its own code).
+# `--region` is `multiple=True` (cli.py) -- passing it once per region is
+# the real CLI contract, not a comma-joined list. UPDATE 2026-08-05: the
+# root region-join bug is fixed (`ingest_openelectricity.py` now queries
+# OE per-region for real) and a real 21-day historical backfill landed
+# (2026-07-15 -> 2026-08-04, 34,548 real rows, all 6 regions) -- 27,328
+# real usable feature rows exist now. `--since` (also new) is required
+# to actually use them: `split_by_time`'s 70/15/15 split is chronological
+# over the *entire* AEMO history (~370 days), so without it, real data
+# confined to this recent 21-day window mostly lands in the `test` split
+# and starves train/val/calibration (confirmed live: got 20/5/0 rows
+# without --since). `SINCE` below defaults to the real backfill's start
+# date -- override if a different/wider backfill exists later. See
+# `todo-model-training.md`'s "Blocker" section for the full writeup.
+ALL_TRAIN_REGIONS := NSW1 QLD1 VIC1 SA1 TAS1 WEM
+SINCE ?= 2026-07-15
+
 .PHONY: train
-train: ## Train the demand-forecast LSTM and log/register it in MLflow. Pass REGION=NSW1 to override.
-	$(UV) run --package data-pipeline ecolens-pipeline train $(if $(REGION),--region $(REGION))
+train: ## Train the demand-forecast LSTM jointly across all 6 real regions and log/register it in MLflow. Pass REGION=NSW1 to train a single region, SINCE=YYYY-MM-DD to override the real-data window (see todo-model-training.md).
+	$(UV) run --package data-pipeline ecolens-pipeline train --since $(SINCE) $(if $(REGION),--region $(REGION),$(foreach r,$(ALL_TRAIN_REGIONS),--region $(r)))
+
+.PHONY: train-tft
+train-tft: ## Train the demand-forecast TFT jointly across all 6 real regions and log/register it under lstm_demand_tft in MLflow. Pass REGION=NSW1 to train a single region, SINCE=YYYY-MM-DD to override the real-data window (see todo-model-training.md).
+	$(UV) run --package data-pipeline ecolens-pipeline train-tft --since $(SINCE) $(if $(REGION),--region $(REGION),$(foreach r,$(ALL_TRAIN_REGIONS),--region $(r)))
 
 .PHONY: tune
 tune: ## Small grid search over hidden_size/lr, each trial logged to MLflow. Pass REGION=NSW1 to override.
 	$(UV) run --package data-pipeline ecolens-pipeline tune $(if $(REGION),--region $(REGION))
+
+.PHONY: tune-optuna
+tune-optuna: ## Real Optuna TPE search + final full retrain/register. Pass REGION=NSW1, N_TRIALS=20, DATA_SOURCE=ml_features_v1, TRAIN_FRAC=0.6, VAL_FRAC=0.2 to override.
+	$(UV) run --package data-pipeline ecolens-pipeline tune-optuna \
+		$(if $(REGION),--region $(REGION)) \
+		$(if $(N_TRIALS),--n-trials $(N_TRIALS)) \
+		$(if $(DATA_SOURCE),--data-source $(DATA_SOURCE)) \
+		$(if $(TRAIN_FRAC),--train-frac $(TRAIN_FRAC)) \
+		$(if $(VAL_FRAC),--val-frac $(VAL_FRAC))
+
+.PHONY: evaluate
+evaluate: ## Walk-forward backtest a registered model version vs. the seasonal-naive baseline. Usage: make evaluate VERSION=1 [MODEL_NAME=lstm_demand] [REGION=NSW1].
+	@if [ -z "$(VERSION)" ]; then echo "Usage: make evaluate VERSION=1 [MODEL_NAME=lstm_demand] [REGION=NSW1]"; exit 1; fi
+	$(UV) run --package data-pipeline ecolens-pipeline evaluate --version $(VERSION) $(if $(MODEL_NAME),--model-name $(MODEL_NAME)) $(if $(REGION),--region $(REGION))
+
+.PHONY: evaluate-tft
+evaluate-tft: ## Walk-forward backtest a registered TFT version vs. the seasonal-naive baseline. Usage: make evaluate-tft VERSION=1 [REGION=NSW1].
+	@if [ -z "$(VERSION)" ]; then echo "Usage: make evaluate-tft VERSION=1 [REGION=NSW1]"; exit 1; fi
+	$(UV) run --package data-pipeline ecolens-pipeline evaluate-tft --version $(VERSION) $(if $(REGION),--region $(REGION))
+
+.PHONY: prune
+prune: ## Structured pruning + fine-tune recovery for a registered LSTM version. Usage: make prune VERSION=1 [KEEP_FRACTION=0.5] [REGION=NSW1].
+	@if [ -z "$(VERSION)" ]; then echo "Usage: make prune VERSION=1 [KEEP_FRACTION=0.5] [REGION=NSW1]"; exit 1; fi
+	$(UV) run --package data-pipeline ecolens-pipeline prune --version $(VERSION) $(if $(KEEP_FRACTION),--keep-fraction $(KEEP_FRACTION)) $(if $(REGION),--region $(REGION))
+
+.PHONY: evaluate-timesfm
+evaluate-timesfm: ## Walk-forward backtest TimesFM (zero-shot) vs. the seasonal-naive baseline. Pass REGION=WEM to override.
+	$(UV) run --package data-pipeline ecolens-pipeline evaluate-timesfm $(if $(REGION),--region $(REGION))
 
 # ── Release ─────────────────────────────────────────────────────────────────
 .PHONY: deploy

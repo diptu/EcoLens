@@ -128,7 +128,15 @@ function _seededRng(seed: number) {
   };
 }
 
-const ANCHOR_DATE = new Date("2026-05-19T12:00:00Z").getTime();
+// Was hardcoded to a fixed "2026-05-19" -- reasonable when that really
+// was "today" for whoever built this mock, but it silently drifts out of
+// date after: the Executive Dashboard's "Emissions Trend" (falls back to
+// this mock whenever the real 8-day fetch doesn't have enough points --
+// see that page's own fetch handler) kept showing a fixed mid-May window
+// no matter what day it actually was. `Date.now()` at module-load time --
+// this is mock/placeholder data, not something that needs to update
+// live within a single page session.
+const ANCHOR_DATE = Date.now();
 
 function _ago(days: number): string {
   return new Date(ANCHOR_DATE - days * 86_400_000).toISOString();

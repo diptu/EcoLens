@@ -43,8 +43,25 @@ from app.db.session import get_session
 # Which columns are worth scanning per ingest source (registry.py's
 # `IngestSource.source` values), and the plausible range for each column
 # that appears in more than one source's table.
+#
+# `openelectricity` excludes `demand_mw`/`price_mwh` -- `ingest_
+# openelectricity.py`'s `_pivot_long_to_wide` sources them by filtering
+# `long_df["fuel_type"] == "demand"/"price"`, but `long_df` only ever
+# contains `DataMetric.POWER` (fueltech) rows from `fetch_network_data`;
+# demand/price live on the OE SDK's separate `MarketMetric` enum, only
+# reachable via `client.get_market()`, which this codebase doesn't call
+# yet. That filter has therefore never matched a single row -- both
+# columns are unconditionally `None` on every OE row, every run --
+# so scanning them here doesn't detect real anomalies, it just flags
+# ~every row of every batch as `missing_value` on every single run
+# (confirmed live 2026-08-05: 63 runs in ~2h each re-inserted the same
+# ~1728-row batch into `meta.anomalies`, 108,864 duplicate rows/~110MB,
+# enough on its own to push a 512MB Neon project over its limit and wedge
+# every subsequent run in `status='running'` forever). Drop these two
+# until `get_market()`/`MarketMetric.PRICE`/`MarketMetric.DEMAND` are
+# actually wired up to populate real values.
 _NUMERIC_COLUMNS: dict[str, tuple[str, ...]] = {
-    "openelectricity": ("demand_mw", "price_mwh", "total_generation_mw"),
+    "openelectricity": ("total_generation_mw",),
     "aemo_nem": ("demand_mw", "price_mwh"),
     "aemo_wem": ("demand_mw", "price_mwh"),
     "bom": ("temp_c", "humidity_pct", "wind_speed_kmh"),
@@ -184,6 +201,24 @@ def detect_anomalies(df: pd.DataFrame, source: str) -> pd.DataFrame:
     return result
 
 
+def _json_safe_snapshot(row: pd.Series) -> dict:
+    """`row`'s non-`_RESULT_COLUMNS` fields as a dict, with NaN/NaT
+    (a real, honest missing value -- e.g. `aemo_wem`'s `price_mwh` on
+    5-min-only rows, which is exactly the kind of value `detect_
+    anomalies`'s `missing_value:` check flags in the first place) mapped
+    to `None`. Plain `json.dumps` happily serializes a float NaN as the
+    bare `NaN` token -- valid Python, not valid JSON -- which Postgres's
+    `jsonb` input parser then rejects outright (`invalid input syntax for
+    type json`). Since this insert runs inside `standard_run`'s try
+    block, that failure previously took the *entire* ingest attempt down
+    with it, not just this one anomaly row -- confirmed the hard way:
+    every `aemo_wem` backfill day failed on exactly this, because WEM's
+    demand-only rows (5/6 of them) always have a NaN `price_mwh` and
+    therefore always get flagged."""
+    snapshot = row.drop(labels=list(_RESULT_COLUMNS)).to_dict()
+    return {key: (None if pd.isna(value) else value) for key, value in snapshot.items()}
+
+
 async def record_anomalies(
     run_id: uuid.UUID, source: str, table: str, anomalies: pd.DataFrame
 ) -> None:
@@ -194,7 +229,7 @@ async def record_anomalies(
 
     rows = []
     for _, row in anomalies.iterrows():
-        snapshot = row.drop(labels=list(_RESULT_COLUMNS)).to_dict()
+        snapshot = _json_safe_snapshot(row)
         rows.append(
             {
                 "run_id": str(run_id),

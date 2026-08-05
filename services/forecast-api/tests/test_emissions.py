@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from app.main import app
 from app.api.v1.deps import get_db, get_redis_client
@@ -47,6 +47,7 @@ def test_returns_latest_intensity(client):
         "total_emissions_kgco2e": 446000.0,
         "intensity_kgco2e_per_mwh": 446.0,
         "factors_version": "nger-2025-q4",
+        "live_provider_intensity_kgco2e_per_mwh": None,
     }
     app.dependency_overrides[get_db] = lambda: _FakeSession(row)
     app.dependency_overrides[get_redis_client] = lambda: _FakeRedis()
@@ -61,6 +62,55 @@ def test_returns_latest_intensity(client):
     assert body["intensity_kgco2e_per_mwh"] == 446.0
     assert body["method"] == "live_mix_weighted"
     assert body["factors_version"] == "nger-2025-q4"
+
+
+def test_prefers_a_fresh_live_provider_figure(client):
+    """`todo-model-training.md` Phase 7: a fresh, non-null provider
+    figure wins over the derived one, and the response honestly reports
+    which method actually served it."""
+    row = {
+        "hour": datetime.now(UTC),
+        "region": "NSW1",
+        "total_generation_mwh": 1000.0,
+        "total_emissions_kgco2e": 446000.0,
+        "intensity_kgco2e_per_mwh": 446.0,
+        "factors_version": "nger-2025-q4",
+        "live_provider_intensity_kgco2e_per_mwh": 512.0,
+    }
+    app.dependency_overrides[get_db] = lambda: _FakeSession(row)
+    app.dependency_overrides[get_redis_client] = lambda: _FakeRedis()
+    try:
+        response = client.get("/v1/emissions?region=NSW1")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["method"] == "live_provider"
+    assert body["intensity_kgco2e_per_mwh"] == 512.0
+
+
+def test_falls_back_when_the_live_provider_figure_is_stale(client):
+    row = {
+        "hour": datetime.now(UTC) - timedelta(hours=6),
+        "region": "NSW1",
+        "total_generation_mwh": 1000.0,
+        "total_emissions_kgco2e": 446000.0,
+        "intensity_kgco2e_per_mwh": 446.0,
+        "factors_version": "nger-2025-q4",
+        "live_provider_intensity_kgco2e_per_mwh": 512.0,
+    }
+    app.dependency_overrides[get_db] = lambda: _FakeSession(row)
+    app.dependency_overrides[get_redis_client] = lambda: _FakeRedis()
+    try:
+        response = client.get("/v1/emissions?region=NSW1")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["method"] == "live_mix_weighted"
+    assert body["intensity_kgco2e_per_mwh"] == 446.0
 
 
 def test_404_when_no_data_for_region(client):
@@ -83,6 +133,7 @@ def test_result_is_cached(client):
         "total_emissions_kgco2e": 446000.0,
         "intensity_kgco2e_per_mwh": 446.0,
         "factors_version": "nger-2025-q4",
+        "live_provider_intensity_kgco2e_per_mwh": None,
     }
     session = _FakeSession(row)
     redis = _FakeRedis()

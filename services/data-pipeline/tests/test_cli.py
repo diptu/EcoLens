@@ -5,7 +5,9 @@ from click.testing import CliRunner
 
 from app import cli
 from app.service import auth as auth_service
+from app.service.ml import evaluate as ml_evaluate
 from app.service.ml import train as ml_train
+from app.service.ml import train_tft as ml_train_tft
 from app.service.ml import tune as ml_tune
 from app.service.pipeline.tasks import registry
 
@@ -261,6 +263,47 @@ class TestTrainCommand:
         assert result.exit_code == 0, result.output
         assert captured["regions"] == ["QLD1", "SA1"]
 
+    def test_since_option_is_parsed_and_forwarded(self, runner, monkeypatch):
+        """`--since` (`todo-model-training.md`'s OE region-join blocker
+        follow-up, 2026-08-05) -- without it, a real run against the full
+        AEMO history starves train/val/calibration of real data whenever
+        the newest feature (`total_generation_mw`) only covers a recent
+        window (confirmed live: 20/5/0 rows against 27,328 real usable
+        rows). CLI must parse the ISO date into a UTC-aware
+        `pd.Timestamp` before forwarding it."""
+        import pandas as pd
+
+        captured = {}
+
+        async def fake_train_and_register(model_name, regions, **kwargs):
+            captured["since"] = kwargs["since"]
+            return ml_train.TrainAndRegisterResult(
+                run_id="run-1", model_version=None, test_metrics={}, final_val_mape=None
+            )
+
+        monkeypatch.setattr(ml_train, "train_and_register", fake_train_and_register)
+
+        result = runner.invoke(cli.main, ["train", "--since", "2026-07-15"])
+
+        assert result.exit_code == 0, result.output
+        assert captured["since"] == pd.Timestamp("2026-07-15", tz="UTC")
+
+    def test_since_option_defaults_to_none(self, runner, monkeypatch):
+        captured = {}
+
+        async def fake_train_and_register(model_name, regions, **kwargs):
+            captured["since"] = kwargs["since"]
+            return ml_train.TrainAndRegisterResult(
+                run_id="run-1", model_version=None, test_metrics={}, final_val_mape=None
+            )
+
+        monkeypatch.setattr(ml_train, "train_and_register", fake_train_and_register)
+
+        result = runner.invoke(cli.main, ["train"])
+
+        assert result.exit_code == 0, result.output
+        assert captured["since"] is None
+
     def test_failure_exits_nonzero_and_reports_the_error(self, runner, monkeypatch):
         async def fake_train_and_register(model_name, regions, **kwargs):
             raise ValueError("no training data found in the warehouse")
@@ -268,6 +311,93 @@ class TestTrainCommand:
         monkeypatch.setattr(ml_train, "train_and_register", fake_train_and_register)
 
         result = runner.invoke(cli.main, ["train"])
+
+        assert result.exit_code == 1
+        assert "no training data found" in result.output
+
+
+class TestTrainTftCommand:
+    def test_success_reports_run_and_registration(self, runner, monkeypatch):
+        async def fake_train_and_register_tft(model_name, regions, **kwargs):
+            return ml_train.TrainAndRegisterResult(
+                run_id="run-tft-1",
+                model_version="1",
+                test_metrics={"test_mape": 6.5, "test_coverage_calibrated": 0.79},
+                final_val_mape=6.1,
+            )
+
+        monkeypatch.setattr(
+            ml_train_tft, "train_and_register_tft", fake_train_and_register_tft
+        )
+
+        result = runner.invoke(cli.main, ["train-tft"])
+
+        assert result.exit_code == 0, result.output
+        assert "run-tft-1" in result.output
+        assert "registered as" in result.output
+        assert "v1" in result.output
+        assert "test_mape=6.50" in result.output
+
+    def test_defaults_model_name_to_lstm_demand_tft_not_lstm_demand(
+        self, runner, monkeypatch
+    ):
+        captured = {}
+
+        async def fake_train_and_register_tft(model_name, regions, **kwargs):
+            captured["model_name"] = model_name
+            return ml_train.TrainAndRegisterResult(
+                run_id="run-1", model_version=None, test_metrics={}, final_val_mape=None
+            )
+
+        monkeypatch.setattr(
+            ml_train_tft, "train_and_register_tft", fake_train_and_register_tft
+        )
+
+        result = runner.invoke(cli.main, ["train-tft"])
+
+        assert result.exit_code == 0, result.output
+        assert captured["model_name"] == "lstm_demand_tft"
+
+    def test_region_and_model_name_options_are_forwarded(self, runner, monkeypatch):
+        captured = {}
+
+        async def fake_train_and_register_tft(model_name, regions, **kwargs):
+            captured["model_name"] = model_name
+            captured["regions"] = list(regions)
+            return ml_train.TrainAndRegisterResult(
+                run_id="run-1", model_version=None, test_metrics={}, final_val_mape=None
+            )
+
+        monkeypatch.setattr(
+            ml_train_tft, "train_and_register_tft", fake_train_and_register_tft
+        )
+
+        result = runner.invoke(
+            cli.main,
+            [
+                "train-tft",
+                "--region",
+                "QLD1",
+                "--region",
+                "SA1",
+                "--model-name",
+                "lstm_demand_tft_v2",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert captured["regions"] == ["QLD1", "SA1"]
+        assert captured["model_name"] == "lstm_demand_tft_v2"
+
+    def test_failure_exits_nonzero_and_reports_the_error(self, runner, monkeypatch):
+        async def fake_train_and_register_tft(model_name, regions, **kwargs):
+            raise ValueError("no training data found in the warehouse")
+
+        monkeypatch.setattr(
+            ml_train_tft, "train_and_register_tft", fake_train_and_register_tft
+        )
+
+        result = runner.invoke(cli.main, ["train-tft"])
 
         assert result.exit_code == 1
         assert "no training data found" in result.output
@@ -309,6 +439,424 @@ class TestTuneCommand:
 
         assert result.exit_code == 1
         assert "no training data found" in result.output
+
+
+class TestTuneOptunaCommand:
+    def _fake_search_result(self, **overrides):
+        defaults = dict(
+            best_config=ml_train.TrainConfig(
+                hidden_size=128, num_layers=2, dropout=0.3, lr=5e-4, batch_size=64
+            ),
+            best_val_mape=4.2,
+            best_run_id="search-run-best",
+            best_test_metrics={"test_mape": 4.0},
+            trials=[
+                ml_tune.OptunaTrialResult(
+                    number=0,
+                    params={"hidden_size": 128},
+                    val_mape=4.2,
+                    run_id="search-run-best",
+                    pruned=False,
+                ),
+                ml_tune.OptunaTrialResult(
+                    number=1,
+                    params={"hidden_size": 64},
+                    val_mape=9.9,
+                    run_id=None,
+                    pruned=True,
+                ),
+            ],
+            n_raw_rows=1000,
+            data_source="fct_energy_demand",
+            imputed_fraction=None,
+        )
+        defaults.update(overrides)
+        return ml_tune.OptunaTuneResult(**defaults)
+
+    def test_success_runs_search_then_final_retrain_and_registers(
+        self, runner, monkeypatch
+    ):
+        async def fake_tune_optuna(regions, **kwargs):
+            return self._fake_search_result()
+
+        captured = {}
+
+        async def fake_train_and_register(model_name, regions, **kwargs):
+            captured["model_name"] = model_name
+            captured["regions"] = regions
+            captured["config"] = kwargs["config"]
+            captured["data_source"] = kwargs["data_source"]
+            captured["extra_tags"] = kwargs["extra_tags"]
+            return ml_train.TrainAndRegisterResult(
+                run_id="final-run-1",
+                model_version="7",
+                test_metrics={"test_mape": 3.8, "test_coverage_calibrated": 0.81},
+                final_val_mape=3.9,
+            )
+
+        monkeypatch.setattr(ml_tune, "tune_optuna", fake_tune_optuna)
+        monkeypatch.setattr(ml_train, "train_and_register", fake_train_and_register)
+
+        result = runner.invoke(cli.main, ["tune-optuna", "--n-trials", "2"])
+
+        assert result.exit_code == 0, result.output
+        assert "2 trials (1 pruned)" in result.output
+        assert "search-run-best" in result.output
+        assert "final-run-1" in result.output
+        assert "registered as lstm_demand v7" in result.output
+        assert "test_mape=3.80" in result.output
+        # The winning search config's hyperparameters really carry over
+        # into the final full-budget retrain's config.
+        assert captured["config"].hidden_size == 128
+        assert captured["config"].num_layers == 2
+        assert captured["data_source"] == "fct_energy_demand"
+        assert captured["extra_tags"]["optuna_search_run_id"] == "search-run-best"
+
+    def test_no_register_flag_is_threaded_through(self, runner, monkeypatch):
+        async def fake_tune_optuna(regions, **kwargs):
+            return self._fake_search_result()
+
+        captured = {}
+
+        async def fake_train_and_register(model_name, regions, **kwargs):
+            captured["register"] = kwargs["register"]
+            return ml_train.TrainAndRegisterResult(
+                run_id="final-run-1",
+                model_version=None,
+                test_metrics={},
+                final_val_mape=None,
+            )
+
+        monkeypatch.setattr(ml_tune, "tune_optuna", fake_tune_optuna)
+        monkeypatch.setattr(ml_train, "train_and_register", fake_train_and_register)
+
+        result = runner.invoke(cli.main, ["tune-optuna", "--no-register"])
+
+        assert result.exit_code == 0, result.output
+        assert captured["register"] is False
+        assert "not registered (--no-register)" in result.output
+
+    def test_data_source_flag_is_threaded_through_to_both_steps(
+        self, runner, monkeypatch
+    ):
+        search_kwargs = {}
+        register_kwargs = {}
+
+        async def fake_tune_optuna(regions, **kwargs):
+            search_kwargs.update(kwargs)
+            return self._fake_search_result(
+                data_source="ml_features_v1", imputed_fraction=0.66
+            )
+
+        async def fake_train_and_register(model_name, regions, **kwargs):
+            register_kwargs.update(kwargs)
+            return ml_train.TrainAndRegisterResult(
+                run_id="final-run-1",
+                model_version="7",
+                test_metrics={},
+                final_val_mape=None,
+            )
+
+        monkeypatch.setattr(ml_tune, "tune_optuna", fake_tune_optuna)
+        monkeypatch.setattr(ml_train, "train_and_register", fake_train_and_register)
+
+        result = runner.invoke(
+            cli.main,
+            [
+                "tune-optuna",
+                "--data-source",
+                "ml_features_v1",
+                "--train-frac",
+                "0.6",
+                "--val-frac",
+                "0.2",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "imputed_fraction=0.660" in result.output
+        assert search_kwargs["data_source"] == "ml_features_v1"
+        assert search_kwargs["train_frac"] == 0.6
+        assert search_kwargs["val_frac"] == 0.2
+        assert register_kwargs["data_source"] == "ml_features_v1"
+
+    def test_search_failure_exits_nonzero_and_does_not_retrain(
+        self, runner, monkeypatch
+    ):
+        async def fake_tune_optuna(regions, **kwargs):
+            raise ValueError("no training data found in 'fct_energy_demand'")
+
+        register_called = False
+
+        async def fake_train_and_register(model_name, regions, **kwargs):
+            nonlocal register_called
+            register_called = True
+            raise AssertionError("should not be called when the search fails")
+
+        monkeypatch.setattr(ml_tune, "tune_optuna", fake_tune_optuna)
+        monkeypatch.setattr(ml_train, "train_and_register", fake_train_and_register)
+
+        result = runner.invoke(cli.main, ["tune-optuna"])
+
+        assert result.exit_code == 1
+        assert "tune-optuna: failed" in result.output
+        assert "no training data found" in result.output
+        assert register_called is False
+
+    def test_final_retrain_failure_exits_nonzero(self, runner, monkeypatch):
+        async def fake_tune_optuna(regions, **kwargs):
+            return self._fake_search_result()
+
+        async def fake_train_and_register(model_name, regions, **kwargs):
+            raise ValueError("mlflow registry unreachable")
+
+        monkeypatch.setattr(ml_tune, "tune_optuna", fake_tune_optuna)
+        monkeypatch.setattr(ml_train, "train_and_register", fake_train_and_register)
+
+        result = runner.invoke(cli.main, ["tune-optuna"])
+
+        assert result.exit_code == 1
+        assert "tune-optuna: failed" in result.output
+        assert "mlflow registry unreachable" in result.output
+
+
+class TestEvaluateCommand:
+    def test_success_reports_run_and_per_region_reports(self, runner, monkeypatch):
+        async def fake_evaluate_and_log(model_name, version, regions, **kwargs):
+            return ml_evaluate.EvaluationRunResult(
+                run_id="eval-run-1",
+                reports=[
+                    ml_evaluate.EvaluationReport(
+                        model_name="lstm_demand_v1",
+                        region="NSW1",
+                        horizon=6,
+                        n_origins=10,
+                        mape=8.5,
+                        rmse=120.0,
+                        pinball_loss_10=10.0,
+                        pinball_loss_50=20.0,
+                        pinball_loss_90=10.0,
+                        empirical_coverage=0.82,
+                    ),
+                    ml_evaluate.EvaluationReport(
+                        model_name="seasonal_naive",
+                        region="NSW1",
+                        horizon=6,
+                        n_origins=10,
+                        mape=6.5,
+                        rmse=100.0,
+                        pinball_loss_10=8.0,
+                        pinball_loss_50=15.0,
+                        pinball_loss_90=8.0,
+                        empirical_coverage=0.79,
+                    ),
+                ],
+            )
+
+        monkeypatch.setattr(ml_evaluate, "evaluate_and_log", fake_evaluate_and_log)
+
+        result = runner.invoke(cli.main, ["evaluate", "--version", "1"])
+
+        assert result.exit_code == 0, result.output
+        assert "eval-run-1" in result.output
+        assert "lstm_demand_v1" in result.output
+        assert "seasonal_naive" in result.output
+        assert "mape=8.50" in result.output
+
+    def test_version_is_required(self, runner):
+        result = runner.invoke(cli.main, ["evaluate"])
+
+        assert result.exit_code != 0
+        assert "--version" in result.output
+
+    def test_model_name_and_region_options_are_forwarded(self, runner, monkeypatch):
+        captured = {}
+
+        async def fake_evaluate_and_log(model_name, version, regions, **kwargs):
+            captured["model_name"] = model_name
+            captured["version"] = version
+            captured["regions"] = list(regions)
+            return ml_evaluate.EvaluationRunResult(run_id="run-1", reports=[])
+
+        monkeypatch.setattr(ml_evaluate, "evaluate_and_log", fake_evaluate_and_log)
+
+        result = runner.invoke(
+            cli.main,
+            [
+                "evaluate",
+                "--version",
+                "3",
+                "--model-name",
+                "lstm_demand_tft",
+                "--region",
+                "QLD1",
+                "--region",
+                "SA1",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert captured["model_name"] == "lstm_demand_tft"
+        assert captured["version"] == "3"
+        assert captured["regions"] == ["QLD1", "SA1"]
+
+    def test_failure_exits_nonzero_and_reports_the_error(self, runner, monkeypatch):
+        async def fake_evaluate_and_log(model_name, version, regions, **kwargs):
+            raise ValueError("no data found in the warehouse")
+
+        monkeypatch.setattr(ml_evaluate, "evaluate_and_log", fake_evaluate_and_log)
+
+        result = runner.invoke(cli.main, ["evaluate", "--version", "1"])
+
+        assert result.exit_code == 1
+        assert "no data found" in result.output
+
+
+class TestEvaluateTftCommand:
+    def test_success_reports_run_and_per_region_reports(self, runner, monkeypatch):
+        async def fake_evaluate_tft_and_log(model_name, version, regions, **kwargs):
+            return ml_evaluate.EvaluationRunResult(
+                run_id="eval-tft-1",
+                reports=[
+                    ml_evaluate.EvaluationReport(
+                        model_name="lstm_demand_tft_v1",
+                        region="NSW1",
+                        horizon=6,
+                        n_origins=10,
+                        mape=7.2,
+                        rmse=115.0,
+                        pinball_loss_10=10.0,
+                        pinball_loss_50=20.0,
+                        pinball_loss_90=10.0,
+                        empirical_coverage=0.8,
+                    ),
+                ],
+            )
+
+        monkeypatch.setattr(
+            ml_evaluate, "evaluate_tft_and_log", fake_evaluate_tft_and_log
+        )
+
+        result = runner.invoke(cli.main, ["evaluate-tft", "--version", "1"])
+
+        assert result.exit_code == 0, result.output
+        assert "eval-tft-1" in result.output
+        assert "lstm_demand_tft_v1" in result.output
+        assert "mape=7.20" in result.output
+
+    def test_defaults_model_name_to_lstm_demand_tft(self, runner, monkeypatch):
+        captured = {}
+
+        async def fake_evaluate_tft_and_log(model_name, version, regions, **kwargs):
+            captured["model_name"] = model_name
+            return ml_evaluate.EvaluationRunResult(run_id="run-1", reports=[])
+
+        monkeypatch.setattr(
+            ml_evaluate, "evaluate_tft_and_log", fake_evaluate_tft_and_log
+        )
+
+        result = runner.invoke(cli.main, ["evaluate-tft", "--version", "1"])
+
+        assert result.exit_code == 0, result.output
+        assert captured["model_name"] == "lstm_demand_tft"
+
+    def test_version_is_required(self, runner):
+        result = runner.invoke(cli.main, ["evaluate-tft"])
+
+        assert result.exit_code != 0
+        assert "--version" in result.output
+
+    def test_failure_exits_nonzero_and_reports_the_error(self, runner, monkeypatch):
+        async def fake_evaluate_tft_and_log(model_name, version, regions, **kwargs):
+            raise ValueError("no data found in the warehouse")
+
+        monkeypatch.setattr(
+            ml_evaluate, "evaluate_tft_and_log", fake_evaluate_tft_and_log
+        )
+
+        result = runner.invoke(cli.main, ["evaluate-tft", "--version", "1"])
+
+        assert result.exit_code == 1
+        assert "no data found" in result.output
+
+
+class TestEvaluateTimesfmCommand:
+    def test_success_reports_run_and_per_region_reports(self, runner, monkeypatch):
+        async def fake_evaluate_timesfm_and_log(regions, **kwargs):
+            return ml_evaluate.EvaluationRunResult(
+                run_id="eval-timesfm-1",
+                reports=[
+                    ml_evaluate.EvaluationReport(
+                        model_name="timesfm",
+                        region="WEM",
+                        horizon=6,
+                        n_origins=8,
+                        mape=9.5,
+                        rmse=110.0,
+                        pinball_loss_10=9.0,
+                        pinball_loss_50=18.0,
+                        pinball_loss_90=9.0,
+                        empirical_coverage=0.8,
+                    ),
+                ],
+            )
+
+        monkeypatch.setattr(
+            ml_evaluate, "evaluate_timesfm_and_log", fake_evaluate_timesfm_and_log
+        )
+
+        result = runner.invoke(cli.main, ["evaluate-timesfm"])
+
+        assert result.exit_code == 0, result.output
+        assert "eval-timesfm-1" in result.output
+        assert "timesfm" in result.output
+        assert "mape=9.50" in result.output
+
+    def test_options_are_forwarded(self, runner, monkeypatch):
+        captured = {}
+
+        async def fake_evaluate_timesfm_and_log(regions, **kwargs):
+            captured["regions"] = list(regions)
+            captured.update(kwargs)
+            return ml_evaluate.EvaluationRunResult(run_id="run-1", reports=[])
+
+        monkeypatch.setattr(
+            ml_evaluate, "evaluate_timesfm_and_log", fake_evaluate_timesfm_and_log
+        )
+
+        result = runner.invoke(
+            cli.main,
+            [
+                "evaluate-timesfm",
+                "--region",
+                "WEM",
+                "--horizon",
+                "12",
+                "--n-origins",
+                "5",
+                "--max-context",
+                "256",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert captured["regions"] == ["WEM"]
+        assert captured["horizon"] == 12
+        assert captured["n_origins"] == 5
+        assert captured["max_context"] == 256
+
+    def test_failure_exits_nonzero_and_reports_the_error(self, runner, monkeypatch):
+        async def fake_evaluate_timesfm_and_log(regions, **kwargs):
+            raise ValueError("no data found in the warehouse")
+
+        monkeypatch.setattr(
+            ml_evaluate, "evaluate_timesfm_and_log", fake_evaluate_timesfm_and_log
+        )
+
+        result = runner.invoke(cli.main, ["evaluate-timesfm"])
+
+        assert result.exit_code == 1
+        assert "no data found" in result.output
 
 
 class TestAuthCreateUserCommand:

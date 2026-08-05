@@ -222,7 +222,14 @@ class TestTrainAndRegisterTask:
 
 class TestDailyDemandFlow:
     async def test_trains_when_due_and_touches_every_source(self, monkeypatch):
-        calls = {"ingest": [], "wait": [], "dbt": 0, "train": 0, "publish": []}
+        calls = {
+            "ingest": [],
+            "wait": [],
+            "dbt": 0,
+            "train": 0,
+            "train_tft": 0,
+            "publish": [],
+        }
 
         async def fake_ingest_source(key):
             calls["ingest"].append(key)
@@ -236,8 +243,8 @@ class TestDailyDemandFlow:
             calls["dbt"] += 1
             return 0
 
-        async def fake_publish_training_trigger(regions, window_hours):
-            calls["publish"].append((regions, window_hours))
+        async def fake_publish_training_trigger(regions, window_hours, *, architecture):
+            calls["publish"].append((regions, window_hours, architecture))
 
         def fake_training_due(model_name):
             return True
@@ -245,6 +252,10 @@ class TestDailyDemandFlow:
         async def fake_train_and_register_task(model_name, regions):
             calls["train"] += 1
             return "run-trained"
+
+        async def fake_train_and_register_tft_task(model_name, regions):
+            calls["train_tft"] += 1
+            return "run-trained-tft"
 
         monkeypatch.setattr(flows, "ingest_source", fake_ingest_source)
         monkeypatch.setattr(flows, "wait_for_sync", fake_wait_for_sync)
@@ -256,6 +267,9 @@ class TestDailyDemandFlow:
         monkeypatch.setattr(
             flows, "train_and_register_task", fake_train_and_register_task
         )
+        monkeypatch.setattr(
+            flows, "train_and_register_tft_task", fake_train_and_register_tft_task
+        )
 
         await flows.daily_demand.fn(regions=["NSW1"], target="dev")
 
@@ -263,12 +277,14 @@ class TestDailyDemandFlow:
         assert calls["wait"] == [f"run-{k}" for k in flows.DEMAND_TRAINING_SOURCES]
         assert calls["dbt"] == 1
         assert calls["train"] == 1
+        assert calls["train_tft"] == 1
         assert calls["publish"] == [
-            (["NSW1"], get_settings().incremental_train_window_hours)
+            (["NSW1"], get_settings().incremental_train_window_hours, "lstm"),
+            (["NSW1"], get_settings().incremental_train_window_hours, "tft"),
         ]
 
     async def test_skips_training_when_not_due(self, monkeypatch):
-        calls = {"train": 0}
+        calls = {"train": 0, "train_tft": 0}
 
         async def fake_ingest_source(key):
             return f"run-{key}"
@@ -279,7 +295,7 @@ class TestDailyDemandFlow:
         def fake_dbt_build_task(target):
             return 0
 
-        async def fake_publish_training_trigger(regions, window_hours):
+        async def fake_publish_training_trigger(regions, window_hours, *, architecture):
             pass
 
         def fake_training_due(model_name):
@@ -288,6 +304,10 @@ class TestDailyDemandFlow:
         async def fake_train_and_register_task(model_name, regions):
             calls["train"] += 1
             return "run-trained"
+
+        async def fake_train_and_register_tft_task(model_name, regions):
+            calls["train_tft"] += 1
+            return "run-trained-tft"
 
         monkeypatch.setattr(flows, "ingest_source", fake_ingest_source)
         monkeypatch.setattr(flows, "wait_for_sync", fake_wait_for_sync)
@@ -299,10 +319,14 @@ class TestDailyDemandFlow:
         monkeypatch.setattr(
             flows, "train_and_register_task", fake_train_and_register_task
         )
+        monkeypatch.setattr(
+            flows, "train_and_register_tft_task", fake_train_and_register_tft_task
+        )
 
         await flows.daily_demand.fn(regions=["NSW1"], target="dev")
 
         assert calls["train"] == 0
+        assert calls["train_tft"] == 0
 
     async def test_skips_publishing_the_training_trigger_when_dbt_build_fails(
         self, monkeypatch
@@ -318,7 +342,7 @@ class TestDailyDemandFlow:
         def fake_dbt_build_task(target):
             return 1  # dbt failed
 
-        async def fake_publish_training_trigger(regions, window_hours):
+        async def fake_publish_training_trigger(regions, window_hours, *, architecture):
             calls["publish"] += 1
 
         def fake_training_due(model_name):
@@ -326,6 +350,9 @@ class TestDailyDemandFlow:
 
         async def fake_train_and_register_task(model_name, regions):
             return "run-trained"
+
+        async def fake_train_and_register_tft_task(model_name, regions):
+            return "run-trained-tft"
 
         monkeypatch.setattr(flows, "ingest_source", fake_ingest_source)
         monkeypatch.setattr(flows, "wait_for_sync", fake_wait_for_sync)
@@ -337,7 +364,76 @@ class TestDailyDemandFlow:
         monkeypatch.setattr(
             flows, "train_and_register_task", fake_train_and_register_task
         )
+        monkeypatch.setattr(
+            flows, "train_and_register_tft_task", fake_train_and_register_tft_task
+        )
 
         await flows.daily_demand.fn(regions=["NSW1"], target="dev")
 
         assert calls["publish"] == 0
+
+
+class TestIncrementalRetrainTriggerFlow:
+    async def test_publishes_for_every_architecture_after_a_successful_build(
+        self, monkeypatch
+    ):
+        calls = {"dbt": 0, "publish": []}
+
+        def fake_dbt_build_task(target):
+            calls["dbt"] += 1
+            return 0
+
+        async def fake_publish_training_trigger(regions, window_hours, *, architecture):
+            calls["publish"].append((regions, window_hours, architecture))
+
+        monkeypatch.setattr(flows, "dbt_build_task", fake_dbt_build_task)
+        monkeypatch.setattr(
+            flows, "publish_training_trigger", fake_publish_training_trigger
+        )
+
+        await flows.incremental_retrain_trigger.fn(regions=["WEM"], target="dev")
+
+        assert calls["dbt"] == 1
+        assert calls["publish"] == [
+            (["WEM"], get_settings().incremental_train_window_hours, "lstm"),
+            (["WEM"], get_settings().incremental_train_window_hours, "tft"),
+        ]
+
+    async def test_skips_publishing_when_dbt_build_fails(self, monkeypatch):
+        calls = {"publish": 0}
+
+        def fake_dbt_build_task(target):
+            return 1
+
+        async def fake_publish_training_trigger(regions, window_hours, *, architecture):
+            calls["publish"] += 1
+
+        monkeypatch.setattr(flows, "dbt_build_task", fake_dbt_build_task)
+        monkeypatch.setattr(
+            flows, "publish_training_trigger", fake_publish_training_trigger
+        )
+
+        await flows.incremental_retrain_trigger.fn(regions=["WEM"], target="dev")
+
+        assert calls["publish"] == 0
+
+    async def test_defaults_regions_and_target_from_settings(self, monkeypatch):
+        captured = {}
+
+        def fake_dbt_build_task(target):
+            captured["target"] = target
+            return 0
+
+        async def fake_publish_training_trigger(regions, window_hours, *, architecture):
+            captured.setdefault("regions", regions)
+
+        monkeypatch.setattr(flows, "dbt_build_task", fake_dbt_build_task)
+        monkeypatch.setattr(
+            flows, "publish_training_trigger", fake_publish_training_trigger
+        )
+
+        await flows.incremental_retrain_trigger.fn()
+
+        settings = get_settings()
+        assert captured["target"] == settings.dbt_target
+        assert captured["regions"] == settings.model_default_regions

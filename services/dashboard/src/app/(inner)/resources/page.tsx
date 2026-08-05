@@ -15,6 +15,8 @@
  */
 "use client";
 
+import Link from "next/link";
+
 import {
   CATEGORIES,
   FEATURED_RESOURCES,
@@ -51,7 +53,7 @@ export default function ResourcesPage() {
           {/* LEFT */}
           <StaggerContainer className="flex flex-col">
             <MotionItem variant="fadeIn" className="flex items-center gap-1 text-sm text-white/60">
-              <a href="/" className="hover:text-white">Home</a>
+              <Link href="/" className="hover:text-white">Home</Link>
               <ChevronIcon /> <span className="text-white">Resources</span>
             </MotionItem>
             <MotionItem variant="fadeIn" className="mt-6">

@@ -30,7 +30,7 @@ import { useState } from "react";
 import { AnimatePresence, m } from "framer-motion";
 import {
   Activity, BarChart3, Beaker, Cpu, Database,
-  Gauge, Leaf, Menu, Server, Shield,
+  Gauge, Leaf, LineChart, Menu, Server, Shield,
   TrendingUp, Webhook, Workflow, X, Zap,
 } from "lucide-react";
 import Link from "next/link";
@@ -78,6 +78,7 @@ const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
     items: [
       { label: "Model Registry",             href: "/dashboard/models",   icon: Cpu },
       { label: "Training & Experiments",      href: "/dashboard/training", icon: Beaker },
+      { label: "Performance",                 href: "/dashboard/performance", icon: LineChart },
     ],
   },
   {

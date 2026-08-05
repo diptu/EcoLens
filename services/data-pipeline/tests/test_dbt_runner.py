@@ -108,3 +108,51 @@ def test_various_subcommands_are_passed_through(monkeypatch, subcommand):
     runner.run_dbt(subcommand, "/proj")
 
     assert captured["args"][1] == subcommand
+
+
+def test_derived_postgres_env_vars_are_passed_to_the_subprocess(monkeypatch):
+    """Regression: `dbt/ecolens/profiles.yml` reads POSTGRES_* as raw OS
+    env vars, entirely separate from `Settings.database_url` -- without
+    this, a DATABASE_URL-only deployment (the normal case everywhere
+    else in this app) left dbt silently falling back to its own
+    `localhost` defaults instead of the real database."""
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["env"] = kwargs.get("env")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@h:1/d")
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+
+    runner.run_dbt("build", "/proj")
+
+    assert captured["env"]["POSTGRES_HOST"] == "h"
+    assert captured["env"]["POSTGRES_PORT"] == "1"
+    assert captured["env"]["POSTGRES_USER"] == "u"
+    assert captured["env"]["POSTGRES_PASSWORD"] == "p"
+    assert captured["env"]["POSTGRES_DB"] == "d"
+    get_settings.cache_clear()
+
+
+def test_an_explicitly_set_postgres_env_var_is_not_overridden(monkeypatch):
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["env"] = kwargs.get("env")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@h:1/d")
+    monkeypatch.setenv("POSTGRES_HOST", "operator-chosen-host")
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+
+    runner.run_dbt("build", "/proj")
+
+    assert captured["env"]["POSTGRES_HOST"] == "operator-chosen-host"
+    get_settings.cache_clear()

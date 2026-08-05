@@ -53,6 +53,16 @@ class Settings(BaseSettings):
     # stream, 5-min updates").
     stream_interval_seconds: float = 300.0
 
+    # `todo-model-training.md` Phase 7: how stale
+    # `fct_carbon_intensity.live_provider_intensity_kgco2e_per_mwh` (an
+    # hourly rollup) can be before `service/ml/data.py`'s fallback logic
+    # stops trusting it and falls back to the derived
+    # `live_mix_weighted` figure instead. 90 minutes -- one full hourly
+    # bucket plus real ingestion/dbt-build lag, not just "the current
+    # hour" (which would spuriously call last hour's genuinely-current
+    # data "stale" for the first few minutes of every new hour).
+    emissions_provider_freshness_minutes: float = 90.0
+
     @property
     def database_url(self) -> str:
         if self.database_url_env:

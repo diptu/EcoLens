@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 
 from app import __version__
@@ -19,6 +20,7 @@ from app.api.v1.router import api_router
 from app.core.config import get_settings
 from app.core.errors import ApiError, cors_allow_origin, api_error_handler
 from app.core.logging import configure_logging, get_logger
+from app.core.middleware import CacheControlMiddleware
 from app.db.session import dispose, get_engine
 from app.service.ml.registry import ModelRegistry
 
@@ -71,6 +73,16 @@ def create_app() -> FastAPI:
     settings = get_settings()
 
     app = FastAPI(title="ecoLens forecast-api", version=__version__, lifespan=lifespan)
+
+    # Compresses response bodies over the default 500-byte threshold —
+    # `GET /v1/forecast`/`/v1/emissions/timeseries` etc. return per-point
+    # time-series arrays that are exactly the "large JSON payload" case
+    # this helps (TODO.md's Payload Compression item). Added before
+    # `CORSMiddleware` so CORS stays outermost (see data-pipeline's
+    # `main.py` for why that ordering matters for error responses).
+    app.add_middleware(GZipMiddleware, minimum_size=500)
+    # Same before-CORS ordering as GZipMiddleware above -- see its comment.
+    app.add_middleware(CacheControlMiddleware)
 
     app.add_middleware(
         CORSMiddleware,

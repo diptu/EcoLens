@@ -117,7 +117,11 @@ export function derivePipelineHealth(p: LivePipeline): PipelineHealth {
  * catalog (6 real pipelines: 5 ingestion sources + the dbt-warehouse
  * build). `source_id` is `null` for the warehouse build — it's a dbt
  * run, not an ingestion fetch, so it has no matching `/data-sources/*`
- * entry and can't be triggered via `triggerIngestionRun`. */
+ * entry and can't be triggered via `triggerIngestionRun`; its own
+ * `triggerable: true` below routes through `triggerDbtBuild()` instead
+ * (TODO.md's backfill section — this is the manual escape hatch for a
+ * dashboard-triggered backfill never refreshing `raw_marts.*` on its
+ * own). */
 export type PipelineCatalogEntry = {
   id: string;
   sourceId: string | null;
@@ -126,20 +130,28 @@ export type PipelineCatalogEntry = {
   /** Whether `POST /v1/data-sources/{id}/backfill` actually fetches real
    * data for the requested historical range, not just a rolling "last
    * 24h from now" window repeated once per day in the range (see
-   * `pipeline/backfill.py`'s `backfill_day` — only aemo_nem/aemo_wem
-   * have a real date-anchored fetch; the other 3 sources' backfill
-   * would silently re-fetch today's data N times instead of the actual
-   * requested days, so the UI doesn't offer it for them). */
+   * `pipeline/backfill.py`'s `backfill_day`/`_DATE_RANGE_SOURCES` —
+   * `aemo_nem`/`aemo_wem`/`bom`/`oe` have a real date-anchored fetch;
+   * `holidays`'s backfill would silently re-fetch today's data N times
+   * instead of the actual requested days, so the UI doesn't offer it for
+   * that one). `bom` joined this list 2026-08-05 — BoM's own API has no
+   * date-range query at all (only a rolling ~72h window), so
+   * `ingest_bom.py` now sources real historical weather from
+   * Open-Meteo's ERA5 archive instead for exactly this path. `oe` joined
+   * the same day — `ingest_openelectricity.py`'s `_fetch_historical_range`
+   * now targets a real day via OE's own `network_region`/`date_start`/
+   * `date_end` params instead of always meaning "last N minutes from
+   * now" (the OE region-join blocker fix, `todo-model-training.md`). */
   backfillable: boolean;
 };
 
 export const PIPELINE_CATALOG: PipelineCatalogEntry[] = [
   { id: "pipe-aemo-nem", sourceId: "ds-aemo-nem", label: "AEMO NEM Ingest", triggerable: true, backfillable: true },
   { id: "pipe-aemo-wem", sourceId: "ds-aemo-wem", label: "AEMO WEM Ingest", triggerable: true, backfillable: true },
-  { id: "pipe-bom", sourceId: "ds-bom", label: "Bureau of Meteorology Ingest", triggerable: true, backfillable: false },
-  { id: "pipe-oe", sourceId: "ds-oe", label: "OpenElectricity Ingest", triggerable: true, backfillable: false },
+  { id: "pipe-bom", sourceId: "ds-bom", label: "Bureau of Meteorology Ingest", triggerable: true, backfillable: true },
+  { id: "pipe-oe", sourceId: "ds-oe", label: "OpenElectricity Ingest", triggerable: true, backfillable: true },
   { id: "pipe-holidays", sourceId: "ds-holidays", label: "AEMO Public Holidays Ingest", triggerable: true, backfillable: false },
-  { id: "pipe-dbt-warehouse", sourceId: null, label: "dbt Warehouse Build", triggerable: false, backfillable: false },
+  { id: "pipe-dbt-warehouse", sourceId: null, label: "dbt Warehouse Build", triggerable: true, backfillable: false },
 ];
 
 const PIPELINE_LABELS: Record<string, string> = Object.fromEntries(
@@ -304,6 +316,46 @@ export function monthToRange(yearMonth: string): { start: string; end: string } 
   return { start: start.toISOString(), end: end.toISOString() };
 }
 
+/** `start === end`, both `date`'s own 00:00Z (an `<input type="date">`
+ * value, `"YYYY-MM-DD"`) — matches `pipeline.backfill.daterange`'s
+ * inclusive-both-ends semantics exactly like `monthToRange` does for a
+ * month: `daterange(day, day)` yields exactly that one day, no more, no
+ * less. Separate function rather than reusing `monthToRange` with a
+ * same-month/same-day pair — the input shape (`"YYYY-MM-DD"`, not
+ * `"YYYY-MM"`) is genuinely different, not just a narrower range. */
+export function dayToRange(date: string): { start: string; end: string } {
+  const [year, month, day] = date.split("-").map(Number);
+  const start = new Date(Date.UTC(year, month - 1, day));
+  return { start: start.toISOString(), end: start.toISOString() };
+}
+
+/** Shape of data-pipeline's `BackfillStatusResponse` — the live state
+ * behind the same `backfill:lock:{id}` Redis key the trigger endpoint's
+ * 409 check reads. `trigger` mirrors what the original `triggerBackfill`
+ * call would have returned, so a caller that missed it (this same tab
+ * after a refresh) can resume progress polling with the real
+ * `queued_at`/`total_chunks` instead of guessing. */
+export type BackfillStatus = {
+  source_id: string;
+  running: boolean;
+  trigger: BackfillTrigger | null;
+};
+
+/** Live call to `GET /v1/data-sources/{sourceId}/backfill/status` — the
+ * fix for backfill state only ever living in this page's in-memory React
+ * state (`operational-tasks/page.tsx`'s `backfillStatus`): call this on
+ * mount to find out whether a backfill genuinely already in flight
+ * server-side should resume showing as "running" instead of resetting to
+ * "Idle" on every page load. No auth required, same reasoning as
+ * `triggerBackfill`. */
+export async function fetchBackfillStatus(sourceId: string): Promise<BackfillStatus> {
+  const res = await fetch(`${DATA_PIPELINE_API_URL}/data-sources/${sourceId}/backfill/status`);
+  if (!res.ok) {
+    throw new Error(`GET /v1/data-sources/${sourceId}/backfill/status failed: ${res.status}`);
+  }
+  return res.json();
+}
+
 /** Live call to `POST /v1/data-sources/{sourceId}/backfill` — real
  * historical fetch for `[start, end]` inclusive (build the pair with
  * `monthToRange` for a whole-month backfill). No auth required, same
@@ -327,6 +379,49 @@ export async function triggerBackfill(
     const body = await res.json().catch(() => null);
     const message: string =
       body?.error?.message ?? `POST /v1/data-sources/${sourceId}/backfill failed: ${res.status}`;
+    throw new TriggerIngestionError(message, res.status, body?.error?.code ?? null);
+  }
+  return res.json();
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Manually rebuilding the warehouse — POST /v1/ingestion/dbt-warehouse/build
+// ────────────────────────────────────────────────────────────────────
+
+/** Shape of data-pipeline's `DbtRunResponse`. Unlike `RunTrigger`/
+ * `BackfillTrigger`, this isn't a 202-queued shape — `dbt build` runs
+ * synchronously within the request (offloaded via `asyncio.to_thread` so
+ * it doesn't block the server's event loop, but the HTTP call itself
+ * waits for the real exit code), since a build here typically finishes
+ * in well under a minute. Give the trigger button its own busy state for
+ * that duration, not `BackfillProgress`'s polling shape. */
+export type DbtBuildTrigger = {
+  subcommand: string;
+  target: string;
+  exit_code: number;
+};
+
+/** Live call to `POST /v1/ingestion/dbt-warehouse/build` — the manual
+ * escape hatch for TODO.md's backfill-section gap (a dashboard-triggered
+ * backfill lands raw rows but never refreshes `raw_marts.*` on its own).
+ * No auth required — deliberately open, same reasoning as
+ * `triggerIngestionRun`/`triggerBackfill` (see this endpoint's own
+ * comment in `pipelines/routes.py`). Distinct from the general-purpose,
+ * admin-gated `/v1/dbt/{subcommand}` — this is a fixed, no-args `build`
+ * only.
+ *
+ * A 409 means another build (from a concurrent manual trigger or a
+ * backfill's auto-rebuild) is already running — surfaced via
+ * `TriggerIngestionError.code === "dbt_build_in_progress"`, not silently
+ * retried; the caller decides whether to tell the operator to wait. */
+export async function triggerDbtBuild(): Promise<DbtBuildTrigger> {
+  const res = await fetch(`${DATA_PIPELINE_API_URL}/ingestion/dbt-warehouse/build`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    const message: string =
+      body?.error?.message ?? `POST /v1/ingestion/dbt-warehouse/build failed: ${res.status}`;
     throw new TriggerIngestionError(message, res.status, body?.error?.code ?? null);
   }
   return res.json();

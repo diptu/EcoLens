@@ -21,13 +21,16 @@
  * null`) still can't be triggered this way — that's a
  * `POST /v1/dbt/{subcommand}` call, a different, not-yet-bridged route.
  *
- * AEMO NEM/WEM additionally get a "Backfill" action
+ * AEMO NEM/WEM and BoM additionally get a "Backfill" action
  * (`triggerBackfill()`, `POST /v1/data-sources/{id}/backfill`) with a
  * month/year picker — real historical data for the whole selected
- * month, not the 30-min-lookback "Run now" gets. Only these two:
- * `PIPELINE_CATALOG[].backfillable` is `false` for the other 3 sources
- * because their backfill path isn't actually date-anchored yet (see
- * that flag's own docstring in `lib/ingestion.ts`).
+ * month, not the 30-min-lookback "Run now" gets. Only these three:
+ * `PIPELINE_CATALOG[].backfillable` is `false` for OpenElectricity/
+ * Holidays/dbt-warehouse because their backfill path isn't actually
+ * date-anchored yet (see that flag's own docstring in `lib/ingestion.ts`).
+ * BoM joined the real-backfill set 2026-08-05, sourced from Open-Meteo's
+ * ERA5 archive rather than BoM's own API (which has no date-range query
+ * at all) — see `ingest_bom.py`'s module docstring for why.
  *
  * The other 7 sections (KPI row, Model Operations, Active Tasks, Model
  * Training & Tuning, Recent Training Runs, Scheduled Operations, System
@@ -37,6 +40,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import {
   Activity,
   AlertTriangle,
@@ -84,7 +88,10 @@ import {
   pollLatestRun,
   triggerBackfill,
   pollBackfillSummary,
+  fetchBackfillStatus,
+  triggerDbtBuild,
   monthToRange,
+  dayToRange,
   formatRelativeTime,
   TriggerIngestionError,
   type RunStatus,
@@ -296,6 +303,74 @@ export default function OperationalTasksPage() {
     };
   }, []);
 
+  // Rehydrates pipeline/backfill status from the backend on mount --
+  // without this, `pipelineRows`/`backfillStatus` only ever get set as a
+  // side effect of clicking "Run now"/"Start Backfill" in *this* browser
+  // session, so a page refresh always resets every row to "Idle" even
+  // when a run or backfill is genuinely still in progress server-side
+  // (the `backfill:lock:{id}` Redis key / `meta._ingest_log` rows don't
+  // go anywhere on refresh -- only this component's React state does).
+  useEffect(() => {
+    let cancelled = false;
+
+    PIPELINE_CATALOG.forEach((p) => {
+      if (!p.sourceId) return;
+      const sourceId = p.sourceId;
+
+      cancelFns.current[sourceId] = pollLatestRun(sourceId, (latest) => {
+        if (!latest) return;
+        setPipelineRows((prev) => ({
+          ...prev,
+          [sourceId]: {
+            status: latest.status,
+            records: latest.records_inserted ?? latest.records_fetched,
+          },
+        }));
+      });
+
+      if (!p.backfillable) return;
+      fetchBackfillStatus(sourceId)
+        .then((status) => {
+          if (cancelled || !status.running || !status.trigger) return;
+          const trigger = status.trigger;
+
+          // Don't re-grant the full estimated-duration timeout budget --
+          // only what's left of it, so a stale lock (e.g. a crashed
+          // background task that never cleared it) doesn't poll forever.
+          const totalTimeoutMs = Math.max(30_000, trigger.estimated_duration_seconds * 1000 + 30_000);
+          const elapsedMs = Date.now() - new Date(trigger.queued_at).getTime();
+          const remainingMs = Math.max(30_000, totalTimeoutMs - elapsedMs);
+
+          cancelFns.current[sourceId]?.(); // supersede the plain run-poll above
+          cancelFns.current[sourceId] = pollBackfillSummary(
+            sourceId,
+            trigger.queued_at,
+            trigger.total_chunks,
+            (progress) => {
+              const isDone = progress.total > 0 && progress.done >= progress.total;
+              setBackfillStatus((prev) => ({
+                ...prev,
+                [sourceId]: { state: isDone ? "done" : "running", trigger, progress },
+              }));
+              setPipelineRows((prev) => ({
+                ...prev,
+                [sourceId]: {
+                  status: isDone ? (progress.failed > 0 ? "partial" : "success") : "running",
+                },
+              }));
+            },
+            3000,
+            remainingMs,
+          );
+        })
+        .catch(() => {});
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     fetchModelInfo()
@@ -374,8 +449,31 @@ export default function OperationalTasksPage() {
       });
   }
 
-  function submitBackfill(sourceId: string, yearMonth: string) {
-    const { start, end } = monthToRange(yearMonth);
+  // `pipe-dbt-warehouse` has no `sourceId` (it's a dbt build, not an
+  // ingestion fetch) -- keyed by the pipeline id instead, same
+  // `pipelineRows` map `triggerPipeline` above uses. Unlike that one,
+  // `triggerDbtBuild()` resolves only once the real build finishes
+  // (TODO.md's backfill section) -- no poll loop needed, just set the
+  // final status directly.
+  function triggerDbtWarehouseBuildRow() {
+    const key = "pipe-dbt-warehouse";
+    cancelFns.current[key]?.();
+    setPipelineRows((prev) => ({ ...prev, [key]: { status: "queued" } }));
+
+    triggerDbtBuild()
+      .then((result) => {
+        setPipelineRows((prev) => ({
+          ...prev,
+          [key]: { status: result.exit_code === 0 ? "success" : "failed" },
+        }));
+      })
+      .catch((err) => {
+        const message = err instanceof TriggerIngestionError ? err.message : "dbt build trigger failed";
+        setPipelineRows((prev) => ({ ...prev, [key]: { status: "failed", error: message } }));
+      });
+  }
+
+  function submitBackfill(sourceId: string, start: string, end: string) {
     cancelFns.current[sourceId]?.();
     setBackfillStatus((prev) => ({ ...prev, [sourceId]: { state: "submitting" } }));
     setPipelineRows((prev) => ({ ...prev, [sourceId]: { status: "queued" } }));
@@ -472,6 +570,7 @@ export default function OperationalTasksPage() {
           <PipelineTable
             rows={pipelineRows}
             onTrigger={triggerPipeline}
+            onTriggerDbtBuild={triggerDbtWarehouseBuildRow}
             backfillStatus={backfillStatus}
             onOpenBackfill={(sourceId, label) => setBackfillModal({ sourceId, label })}
           />
@@ -663,11 +762,13 @@ export default function OperationalTasksPage() {
 function PipelineTable({
   rows,
   onTrigger,
+  onTriggerDbtBuild,
   backfillStatus,
   onOpenBackfill,
 }: {
   rows: Record<string, RowState>;
   onTrigger: (sourceId: string) => void;
+  onTriggerDbtBuild: () => void;
   backfillStatus: Record<string, BackfillState>;
   onOpenBackfill: (sourceId: string, label: string) => void;
 }) {
@@ -681,13 +782,17 @@ function PipelineTable({
         </tr>
       </thead>
       <tbody className="divide-y divide-white/5">
-        {PIPELINE_CATALOG.filter((p) => p.triggerable && p.sourceId).map((p) => {
-          const sourceId = p.sourceId as string;
-          const row = rows[sourceId] ?? { status: "idle" as RowStatus };
+        {PIPELINE_CATALOG.filter((p) => p.triggerable).map((p) => {
+          // `pipe-dbt-warehouse` has `sourceId: null` (a dbt build, not an
+          // ingestion fetch) -- keyed by its pipeline id instead so it
+          // still gets its own row state, just via `onTriggerDbtBuild`
+          // rather than `onTrigger(sourceId)`.
+          const rowKey = p.sourceId ?? p.id;
+          const row = rows[rowKey] ?? { status: "idle" as RowStatus };
           const busy = row.status === "queued" || row.status === "running" || row.status === "staged";
           const runDisabled = busy;
           const runTitle = "Run now";
-          const backfill = backfillStatus[sourceId];
+          const backfill = backfillStatus[rowKey];
           return (
             <tr key={p.id} className="text-white/85">
               <td className="py-2 pr-2">{p.label}</td>
@@ -721,8 +826,8 @@ function PipelineTable({
                 <div className="inline-flex items-center gap-2">
                   <button
                     disabled={runDisabled}
-                    onClick={() => onTrigger(sourceId)}
-                    title={runTitle}
+                    onClick={() => (p.sourceId ? onTrigger(p.sourceId) : onTriggerDbtBuild())}
+                    title={p.sourceId ? runTitle : "Rebuild the warehouse marts now"}
                     className={cn(
                       "rounded p-1",
                       runDisabled
@@ -741,7 +846,7 @@ function PipelineTable({
                     return (
                       <button
                         disabled={backfillBusy}
-                        onClick={() => onOpenBackfill(sourceId, p.label)}
+                        onClick={() => onOpenBackfill(rowKey, p.label)}
                         title={backfillBusy ? "A backfill is already running for this source" : "Backfill a specific month"}
                         className={cn(
                           "rounded p-1",
@@ -780,6 +885,17 @@ function defaultBackfillMonth(): string {
   return `${prev.getUTCFullYear()}-${String(prev.getUTCMonth() + 1).padStart(2, "0")}`;
 }
 
+/** `<input type="date">`'s default -- yesterday (UTC), the same
+ * "don't default to a range that's still in progress and look like a
+ * bug" reasoning as `defaultBackfillMonth`, just at day granularity. */
+function defaultBackfillDay(): string {
+  const now = new Date();
+  const yesterday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 1));
+  return yesterday.toISOString().slice(0, 10);
+}
+
+type BackfillRangeMode = "month" | "day";
+
 function BackfillModal({
   sourceId,
   label,
@@ -791,10 +907,18 @@ function BackfillModal({
   label: string;
   status?: BackfillState;
   onClose: () => void;
-  onSubmit: (sourceId: string, yearMonth: string) => void;
+  onSubmit: (sourceId: string, start: string, end: string) => void;
 }) {
+  const [mode, setMode] = useState<BackfillRangeMode>("month");
   const [yearMonth, setYearMonth] = useState(defaultBackfillMonth);
+  const [day, setDay] = useState(defaultBackfillDay);
   const submitting = status?.state === "submitting";
+  const canSubmit = mode === "month" ? !!yearMonth : !!day;
+
+  function submit() {
+    const { start, end } = mode === "month" ? monthToRange(yearMonth) : dayToRange(day);
+    onSubmit(sourceId, start, end);
+  }
 
   return (
     <div
@@ -815,26 +939,72 @@ function BackfillModal({
           </button>
         </div>
         <p className="mb-3 text-xs text-white/60">
-          Fetches real historical data for every day in the selected month from the
-          source's own archive — not a repeated "last 30 min" run.
+          Fetches real historical data for the selected range from the source's
+          own archive — not a repeated "last 30 min" run.
         </p>
-        <Field label="Month">
-          <input
-            type="month"
-            value={yearMonth}
-            onChange={(e) => setYearMonth(e.target.value)}
-            className="w-full rounded-md border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-white focus:border-emerald-200/60 focus:outline-none"
-          />
-        </Field>
+        <div className="mb-3 flex gap-1" role="tablist" aria-label="Backfill range mode">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === "month"}
+            onClick={() => setMode("month")}
+            data-testid="backfill-mode-month"
+            className={cn(
+              "flex-1 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors",
+              mode === "month"
+                ? "bg-emerald-200 text-black"
+                : "border border-white/10 bg-white/[0.04] text-white/70 hover:bg-white/10 hover:text-white",
+            )}
+          >
+            Month
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === "day"}
+            onClick={() => setMode("day")}
+            data-testid="backfill-mode-day"
+            className={cn(
+              "flex-1 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors",
+              mode === "day"
+                ? "bg-emerald-200 text-black"
+                : "border border-white/10 bg-white/[0.04] text-white/70 hover:bg-white/10 hover:text-white",
+            )}
+          >
+            Single day
+          </button>
+        </div>
+        {mode === "month" ? (
+          <Field label="Month">
+            <input
+              type="month"
+              value={yearMonth}
+              onChange={(e) => setYearMonth(e.target.value)}
+              data-testid="backfill-month-input"
+              className="w-full rounded-md border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-white focus:border-emerald-200/60 focus:outline-none"
+            />
+          </Field>
+        ) : (
+          <Field label="Day">
+            <input
+              type="date"
+              value={day}
+              onChange={(e) => setDay(e.target.value)}
+              data-testid="backfill-day-input"
+              className="w-full rounded-md border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-white focus:border-emerald-200/60 focus:outline-none"
+            />
+          </Field>
+        )}
         {status?.state === "error" && (
           <p className="mt-2 text-xs text-rose-300">{status.message}</p>
         )}
         <button
-          disabled={submitting || !yearMonth}
-          onClick={() => onSubmit(sourceId, yearMonth)}
+          disabled={submitting || !canSubmit}
+          onClick={submit}
+          data-testid="backfill-submit"
           className={cn(
             "mt-4 inline-flex w-full items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-semibold",
-            submitting || !yearMonth
+            submitting || !canSubmit
               ? "cursor-not-allowed bg-white/10 text-white/40"
               : "bg-emerald-200 text-black hover:bg-emerald-100",
           )}
@@ -1039,7 +1209,7 @@ function TrainingRunsList({ versions, loaded }: { versions: ModelVersion[] | nul
         </li>
       ))}
       <li className="pt-1 text-center">
-        <a href="/dashboard/models/" className="text-xs text-emerald-100 hover:underline">View all versions</a>
+        <Link href="/dashboard/models/" className="text-xs text-emerald-100 hover:underline">View all versions</Link>
       </li>
     </ul>
   );

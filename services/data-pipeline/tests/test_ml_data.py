@@ -226,17 +226,28 @@ class _FakeResult:
     def all(self):
         return self._rows
 
+    def first(self):
+        return self._rows[0] if self._rows else None
+
 
 class _FakeSession:
-    def __init__(self, demand_rows=(), holiday_rows=()):
+    def __init__(
+        self, demand_rows=(), holiday_rows=(), ml_features_v1_rows=(), imputed_frac=None
+    ):
         self.demand_rows = list(demand_rows)
         self.holiday_rows = list(holiday_rows)
+        self.ml_features_v1_rows = list(ml_features_v1_rows)
+        self.imputed_frac = imputed_frac
         self.queries: list[tuple[str, dict]] = []
 
     async def execute(self, query, params=None):
         sql = str(query)
         params = params or {}
         self.queries.append((sql, params))
+        if "ml_features_demand_v1" in sql and "frac" in sql:
+            return _FakeResult([{"frac": self.imputed_frac}])
+        if "ml_features_demand_v1" in sql:
+            return _FakeResult(self.ml_features_v1_rows)
         if "fct_energy_demand" in sql:
             return _FakeResult(self.demand_rows)
         if "aemo_holidays" in sql:
@@ -305,4 +316,83 @@ class TestLoadTrainingData:
         df = await ml_data.load_holidays(session)
 
         assert list(df.columns) == ["date", "region"]
+
+
+# ── load_ml_features_v1_training_data / _imputed_fraction ──────────────
+
+
+class TestLoadMlFeaturesV1TrainingData:
+    pytestmark = [pytest.mark.anyio]
+
+    @pytest.fixture
+    def anyio_backend(self):
+        return "asyncio"
+
+    async def test_queries_the_ml_schema_and_renames_renewable_column(self):
+        session = _FakeSession(
+            ml_features_v1_rows=[
+                {
+                    "ts": pd.Timestamp("2026-01-01", tz="UTC"),
+                    "region": "NSW1",
+                    "demand_mw": 8000.0,
+                    "price_mwh": 65.0,
+                    "total_generation_mw": 9000.0,
+                    "total_renewable_mw": 3000.0,
+                    "temp_c": 22.0,
+                    "apparent_temp_c": 23.0,
+                    "humidity_pct": 50.0,
+                    "wind_speed_kmh": 12.0,
+                }
+            ]
+        )
+
+        df = await ml_data.load_ml_features_v1_training_data(session, ["NSW1"])
+
+        # Same output shape as `load_training_data` -- required for
+        # `build_features` to accept either source interchangeably.
+        assert list(df.columns) == list(ml_data._TRAINING_COLUMNS)
         assert len(df) == 1
+        sql, params = session.queries[0]
+        assert "ml.ml_features_demand_v1" in sql
+        assert "renewable_generation_mw AS total_renewable_mw" in sql
+        assert params["regions"] == ["NSW1"]
+
+    async def test_since_filter_is_applied_when_given(self):
+        session = _FakeSession()
+        since = pd.Timestamp("2026-01-01", tz="UTC")
+
+        await ml_data.load_ml_features_v1_training_data(session, ["NSW1"], since=since)
+
+        sql, params = session.queries[0]
+        assert "ts >= :since" in sql
+        assert params["since"] == since
+
+    async def test_empty_result_still_has_expected_columns(self):
+        session = _FakeSession(ml_features_v1_rows=[])
+
+        df = await ml_data.load_ml_features_v1_training_data(session, ["NSW1"])
+
+        assert list(df.columns) == list(ml_data._TRAINING_COLUMNS)
+        assert df.empty
+
+
+class TestLoadMlFeaturesV1ImputedFraction:
+    pytestmark = [pytest.mark.anyio]
+
+    @pytest.fixture
+    def anyio_backend(self):
+        return "asyncio"
+
+    async def test_returns_the_real_fraction(self):
+        session = _FakeSession(imputed_frac=0.66)
+
+        frac = await ml_data.load_ml_features_v1_imputed_fraction(session, ["NSW1"])
+
+        assert frac == 0.66
+
+    async def test_returns_zero_not_none_when_there_are_no_rows(self):
+        session = _FakeSession(imputed_frac=None)
+
+        frac = await ml_data.load_ml_features_v1_imputed_fraction(session, ["NSW1"])
+
+        assert frac == 0.0

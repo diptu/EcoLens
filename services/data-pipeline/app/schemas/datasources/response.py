@@ -75,6 +75,25 @@ class BackfillTriggerResponse(AppBaseModel):
     progress_url: str
 
 
+class BackfillStatusResponse(AppBaseModel):
+    """`GET /v1/data-sources/{id}/backfill/status` — surfaces the same
+    `backfill:lock:{id}` Redis key `trigger_backfill`'s 409 check reads
+    (`actions._backfill_in_progress`), so the dashboard can rehydrate
+    "a backfill is running" after a page refresh instead of only ever
+    learning about it from the in-memory state set by the button click
+    that started it (that state lives in React state and is lost on
+    reload even though the backfill itself is still running server-side).
+    `trigger` echoes the original `BackfillTriggerResponse` so a client
+    that missed it (e.g. a different tab, or this same tab post-refresh)
+    can resume progress polling with the same `queued_at`/`total_chunks`
+    it would have gotten from the original trigger call.
+    """
+
+    source_id: str
+    running: bool
+    trigger: BackfillTriggerResponse | None = None
+
+
 # ── §1.5 GET /v1/data-sources/{id}/health ────────────────────────────────
 
 

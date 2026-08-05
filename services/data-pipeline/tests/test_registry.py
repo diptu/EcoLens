@@ -122,10 +122,22 @@ async def test_run_source_wraps_holidays_with_a_different_kwarg_name():
     assert rows > 0
 
 
-async def test_run_source_oe_is_not_double_wrapped():
+async def test_run_source_oe_is_not_double_wrapped(monkeypatch):
     # ingest_openelectricity.run is already @standard_run-decorated;
     # run_source must call it directly, not wrap it a second time
     # (double-wrapping would double-log to meta._ingest_log per call).
+    #
+    # Forces the "no OE API key" path explicitly (rather than relying on
+    # the ambient environment genuinely having none, which broke the
+    # moment a real key was added to .env 2026-08-05 to unblock
+    # training) -- this test is about the double-wrapping question, not
+    # about OE's actual live behavior.
+    from app.service import emissions as oe_module
+
+    real_settings = oe_module.get_settings()
+    no_key_settings = real_settings.model_copy(update={"oe_api_key": None})
+    monkeypatch.setattr(oe_module, "get_settings", lambda: no_key_settings)
+
     rows = await registry.run_source("oe", lookback_minutes=30)
 
     assert rows == 0  # no OE API key configured -> every region fails gracefully

@@ -48,11 +48,11 @@ async def sync_landed_event(payload: dict[str, Any]) -> None:
     duckdb_path = payload["duckdb_path"]
 
     try:
-        df = read_staged(duckdb_path)
+        df = read_staged(duckdb_path, table, str(run_id))
         async with get_session() as session:
             rows_loaded = await load_to_postgres(session, df, table, schema=schema)
         await log_run_synced(run_id, rows_loaded)
-        delete_staged(duckdb_path)
+        delete_staged(duckdb_path, table, str(run_id))
         log.info(
             "warehouse.sync_succeeded",
             source=source,

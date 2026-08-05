@@ -35,9 +35,10 @@ check-env: ## Verify .env file exists.
 .PHONY: bootstrap
 bootstrap: ## Full environment sync + pre-commit.
 	$(UV) sync --all-extras --all-groups
-	# forecast-api is its own independent uv project (own venv/lockfile,
-	# not a workspace member) -- synced separately.
+	# forecast-api/ingestion are their own independent uv projects (own
+	# venv/lockfile, not workspace members) -- synced separately.
 	$(UV) sync --directory services/forecast-api
+	$(UV) sync --directory services/ingestion
 	$(UV) run pre-commit install
 	@$(MAKE) check-env
 
@@ -48,6 +49,9 @@ clean: ## Hard reset of local environment.
 	rm -rf services/forecast-api/.venv services/forecast-api/dist services/forecast-api/build \
 		services/forecast-api/.pytest_cache services/forecast-api/.mypy_cache \
 		services/forecast-api/.ruff_cache services/forecast-api/.coverage services/forecast-api/htmlcov
+	rm -rf services/ingestion/.venv services/ingestion/dist services/ingestion/build \
+		services/ingestion/.pytest_cache services/ingestion/.mypy_cache \
+		services/ingestion/.ruff_cache services/ingestion/.coverage services/ingestion/htmlcov
 	find . -type d -name __pycache__ -exec rm -rf {} +
 
 # ── Infrastructure ──────────────────────────────────────────────────────────
@@ -62,19 +66,22 @@ down: ## Stop all services.
 # ── Quality Assurance ───────────────────────────────────────────────────────
 .PHONY: lint
 lint: ## Run comprehensive suite (ruff + mypy + security).
-	# Lint everything for style. forecast-api is its own independent uv
-	# project now (own venv/lockfile, not a workspace member -- its
-	# restructured package is named `app`, same as data-pipeline's, so
-	# sharing one workspace venv would collide the two), so it's linted
-	# via its own venv rather than the root `$(UV) run`.
+	# Lint everything for style. forecast-api/ingestion are their own
+	# independent uv projects now (own venv/lockfile, not workspace
+	# members -- both packages are named `app`, same as data-pipeline's,
+	# so sharing one workspace venv would collide them), so each is
+	# linted via its own venv rather than the root `$(UV) run`.
 	$(UV) run ruff check .
 	$(UV) run ruff format --check .
 	$(UV) run --directory services/forecast-api ruff check .
+	$(UV) run --directory services/ingestion ruff check .
+	$(UV) run --directory services/ingestion ruff format --check .
 	# Run type-checking per service
 	$(UV) run mypy services/data-pipeline/app
 	$(UV) run --directory services/forecast-api mypy app
+	$(UV) run --directory services/ingestion mypy app
 	# Run security checks
-	$(UV) run bandit -r services/data-pipeline/app services/forecast-api/app
+	$(UV) run bandit -r services/data-pipeline/app services/forecast-api/app services/ingestion/app
 
 .PHONY: lint-fix
 lint-fix: ## Run fix (ruff).
@@ -96,9 +103,13 @@ test: check-env ## Run test suite with security checks.
 	$(UV) run pytest services/data-pipeline -m "not e2e" \
 		--cov=services/data-pipeline/app \
 		--cov-fail-under=90
-	# forecast-api is its own independent uv project (own venv/lockfile),
-	# so it's tested via its own venv rather than the root `$(UV) run`.
+	# forecast-api/ingestion are their own independent uv projects (own
+	# venv/lockfile), so each is tested via its own venv rather than the
+	# root `$(UV) run`.
 	$(UV) run --directory services/forecast-api pytest -m "not e2e" \
+		--cov=app \
+		--cov-fail-under=90
+	$(UV) run --directory services/ingestion pytest -m "not e2e" \
 		--cov=app \
 		--cov-fail-under=90
 	# PYSEC-2026-3552 (cryptography <50) is ignored deliberately, not
@@ -111,6 +122,11 @@ test: check-env ## Run test suite with security checks.
 	# `cryptography` ceiling moves.
 	$(UV) run pip-audit --ignore-vuln PYSEC-2026-3552
 	$(UV) run --directory services/forecast-api pip-audit --ignore-vuln PYSEC-2026-3552
+	# ingestion has no mlflow/cryptography dependency chain at all (a
+	# deliberately much smaller dependency set, `services/ingestion/
+	# TODO.md`'s Phase 0 scoping) -- no ignore needed unless/until a real
+	# vulnerability shows up here.
+	$(UV) run --directory services/ingestion pip-audit
 
 # ── Services ────────────────────────────────────────────────────────────────
 .PHONY: api

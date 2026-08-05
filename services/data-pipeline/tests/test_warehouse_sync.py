@@ -26,7 +26,9 @@ async def test_sync_landed_event_happy_path(monkeypatch):
     calls = {}
 
     monkeypatch.setattr(
-        warehouse_sync, "read_staged", lambda path: pd.DataFrame({"a": [1, 2]})
+        warehouse_sync,
+        "read_staged",
+        lambda path, table, run_id: pd.DataFrame({"a": [1, 2]}),
     )
 
     async def fake_load_to_postgres(session, df, table, schema="raw"):
@@ -43,7 +45,9 @@ async def test_sync_landed_event_happy_path(monkeypatch):
 
     deleted = {}
     monkeypatch.setattr(
-        warehouse_sync, "delete_staged", lambda path: deleted.setdefault("path", path)
+        warehouse_sync,
+        "delete_staged",
+        lambda path, table, run_id: deleted.setdefault("call", (path, table, run_id)),
     )
 
     payload = {
@@ -59,11 +63,15 @@ async def test_sync_landed_event_happy_path(monkeypatch):
 
     assert calls["load"] == ("bom_observations", "raw", 2)
     assert calls["synced"] == ("11111111-1111-1111-1111-111111111111", 2)
-    assert deleted["path"] == "/fake/staging/bom_observations-run.duckdb"
+    assert deleted["call"] == (
+        "/fake/staging/bom_observations-run.duckdb",
+        "bom_observations",
+        "11111111-1111-1111-1111-111111111111",
+    )
 
 
 async def test_sync_landed_event_failure_logs_sync_failed_and_reraises(monkeypatch):
-    def boom(path):
+    def boom(path, table, run_id):
         raise RuntimeError("duckdb file corrupted")
 
     monkeypatch.setattr(warehouse_sync, "read_staged", boom)
@@ -79,7 +87,7 @@ async def test_sync_landed_event_failure_logs_sync_failed_and_reraises(monkeypat
     monkeypatch.setattr(
         warehouse_sync,
         "delete_staged",
-        lambda path: deleted.__setitem__("called", True),
+        lambda path, table, run_id: deleted.__setitem__("called", True),
     )
 
     payload = {

@@ -57,7 +57,12 @@ ignore_missing_imports = true
 # forecast-api deliberately isn't a member anymore -- it now uses its own
 # independent venv/lockfile (like IAM), since both it and data-pipeline's
 # restructured packages are named `app`, which would collide if both were
-# installed into one shared workspace venv.
+# installed into one shared workspace venv. `services/ingestion` is the
+# same story (`services/ingestion/TODO.md` Phase 0's own scaffolding
+# decision -- it's meant to be independently deployable, and its package
+# is also named `app`) -- removed here after `uv init` auto-added it on
+# creation; it has its own `pyproject.toml`/`uv.lock` under `services/
+# ingestion/` instead, synced via `uv sync --directory services/ingestion`.
 members = [
     "services/data-pipeline",
 ]

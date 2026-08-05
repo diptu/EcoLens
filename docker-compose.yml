@@ -188,6 +188,85 @@ services:
       timeout: 3s
       retries: 5
 
+  # ── Ingestion (services/ingestion/TODO.md) ───────────────────────────────
+  # Standalone extraction of data-pipeline's ingestion half -- own uv
+  # project/image, not a `data-pipeline` command variant. Runs alongside
+  # `data-pipeline` (unmodified) until every source is verified and cut
+  # over (Phase 4/5), not a replacement for it yet. Mounts the same
+  # `duckdb_staging` volume as `data-pipeline`/`warehouse-sync` as an
+  # explicit, temporary bridge (Phase 2's own decision note) -- real
+  # independent deployment needs the R2 handoff Phase 2 describes, not
+  # this shared volume.
+  ingestion:
+    build:
+      context: .
+      dockerfile: infra/docker/ingestion.Dockerfile
+    <<: *common-env
+    ports:
+      - "8003:8003"
+    volumes:
+      - duckdb_staging:/app/services/ingestion/data/staging
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      # Phase 2's "Integrate Cloudflare R2 Staging" -- `upload_staged_
+      # file` falls back to local MinIO when no real R2 credentials are
+      # set, so the bucket (`minio-setup`) needs to exist before this
+      # service's first ingest run, same as `data-pipeline`'s own
+      # dependency on it.
+      minio-setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8003/v1/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Celery worker -- executes ingestion tasks `ingestion-beat` enqueues
+  # on each source's real schedule (`app/celery_app.py`'s `beat_
+  # schedule`). Same image/entrypoint as `ingestion` itself, just a
+  # different subcommand -- the ingest logic (`registry.run_source`) is
+  # identical either way, this is only the scheduled-dispatch mechanism.
+  ingestion-worker:
+    build:
+      context: .
+      dockerfile: infra/docker/ingestion.Dockerfile
+    <<: *common-env
+    command: worker --loglevel=info
+    volumes:
+      - duckdb_staging:/app/services/ingestion/data/staging
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-setup:
+        condition: service_completed_successfully
+
+  # Celery Beat -- fires each `beat_schedule` entry on its real cadence
+  # (`oe` every 5 min, `aemo-nem`/`aemo-wem` every 15, `bom` every 30,
+  # `holidays` annually); `ingestion-worker` is what actually executes
+  # what this enqueues. Exactly one `beat` process must ever run at a
+  # time (it's the sole scheduler) -- `replicas` isn't set here for
+  # exactly that reason, don't scale this service.
+  ingestion-beat:
+    build:
+      context: .
+      dockerfile: infra/docker/ingestion.Dockerfile
+    <<: *common-env
+    command: beat --loglevel=info
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
   # ── Warehouse-sync consumer (overview.md §2) ─────────────────────────────
   # The other half of the raw-landing pipeline: `data-pipeline`'s ingest
   # tasks stage into DuckDB and publish here via RabbitMQ; this is the

@@ -162,6 +162,53 @@ async def test_run_source_oe_is_not_double_wrapped(monkeypatch):
     assert rows == 0  # no OE API key configured -> every region fails gracefully
 
 
+async def test_run_source_forwards_start_end_as_window_start_end(monkeypatch):
+    """Regression: `start`/`end` (from `pipeline.backfill`'s date-range
+    sources) used to reach `entry.run` only -- `standard_run`'s own
+    `window_start`/`window_end` params stayed `None` always, leaving
+    `meta._ingest_log.window_start`/`_end` permanently `NULL` for every
+    run ever, including backfill. That silently broke `pipeline.backfill.
+    already_succeeded`'s only way to detect a historical day was already
+    done (confirmed live 2026-08-06: a resumed 370-day `oe` backfill
+    re-fetched day 1 instead of picking up from day 92)."""
+    from datetime import UTC, datetime
+
+    captured = {}
+    real_log_run_start = _common._log_run_start
+
+    async def spy_log_run_start(source, triggered_by, window_start, window_end):
+        captured["window_start"] = window_start
+        captured["window_end"] = window_end
+        return await real_log_run_start(source, triggered_by, window_start, window_end)
+
+    monkeypatch.setattr(_common, "_log_run_start", spy_log_run_start)
+
+    day_start = datetime(2025, 8, 1, tzinfo=UTC)
+    await registry.run_source(
+        "aemo-nem", triggered_by="backfill", start=day_start, end=day_start
+    )
+
+    assert captured["window_start"] == day_start.isoformat()
+    assert captured["window_end"] == day_start.isoformat()
+
+
+async def test_run_source_without_start_end_leaves_window_none(monkeypatch):
+    captured = {}
+    real_log_run_start = _common._log_run_start
+
+    async def spy_log_run_start(source, triggered_by, window_start, window_end):
+        captured["window_start"] = window_start
+        captured["window_end"] = window_end
+        return await real_log_run_start(source, triggered_by, window_start, window_end)
+
+    monkeypatch.setattr(_common, "_log_run_start", spy_log_run_start)
+
+    await registry.run_source("bom", lookback_minutes=60)
+
+    assert captured["window_start"] is None
+    assert captured["window_end"] is None
+
+
 def test_run_source_unknown_key_raises_key_error():
     with pytest.raises(KeyError):
         import asyncio

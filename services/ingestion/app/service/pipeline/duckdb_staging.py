@@ -157,6 +157,56 @@ def stage_dataframe(df: pd.DataFrame, table: str, run_id: str) -> tuple[str, int
     return str(path), len(df)
 
 
+def merge_staging_file(source_file: Path, table: str) -> int:
+    """Merge another staging file's `table` into the canonical shared
+    staging file, preserving each row's original `_ingest_run_id` as-is
+    (no re-tagging — `source_file` already tagged them at write time).
+
+    For a parallel per-source backfill that pointed `DUCKDB_STAGING_DIR`
+    at its own scratch directory specifically to avoid DuckDB's
+    single-writer lock on the canonical file (multiple processes can't
+    hold a write connection to the same file at once) — this is the
+    local, no-network reconciliation step afterward. Cheap: a DuckDB-to-
+    DuckDB copy via pandas, no re-fetch from any external source.
+
+    A no-op (`0`) if `source_file` doesn't exist or has no rows for
+    `table` — safe to call speculatively.
+    """
+    if not source_file.exists():
+        return 0
+
+    src_con = duckdb.connect(str(source_file), read_only=True)
+    try:
+        if not _table_exists(src_con, table):
+            return 0
+        df = src_con.execute(f"SELECT * FROM {table}").df()  # nosec B608 -- `table` is always a `registry.SOURCES` value, never user input
+    finally:
+        src_con.close()
+
+    if df.empty:
+        return 0
+
+    path = _staging_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    con = duckdb.connect(str(path))
+    try:
+        con.register("df_view", df)
+        if _table_exists(con, table):
+            _add_missing_columns(con, table, df)
+            con.execute(
+                f"INSERT INTO {table} BY NAME SELECT * FROM df_view"  # nosec B608 -- `table` is always a `registry.SOURCES` value, never user input
+            )
+        else:
+            con.execute(
+                f"CREATE TABLE {table} AS SELECT * FROM df_view"  # nosec B608 -- `table` is always a `registry.SOURCES` value, never user input
+            )
+    finally:
+        con.close()
+
+    return len(df)
+
+
 def _staging_key(table: str, run_id: str) -> str:
     settings = get_settings()
     return f"{settings.object_storage_staging_prefix}/{table}-{run_id}.duckdb"

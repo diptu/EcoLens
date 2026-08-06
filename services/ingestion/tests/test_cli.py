@@ -19,6 +19,7 @@ def test_help_lists_all_subcommand_groups(runner):
     assert "ingest" in result.output
     assert "backfill" in result.output
     assert "prune-staging" in result.output
+    assert "merge-staging" in result.output
     assert "train-anomaly-model" in result.output
     assert "worker" in result.output
     assert "beat" in result.output
@@ -216,6 +217,49 @@ class TestPruneStagingCommand:
         runner.invoke(cli.main, ["prune-staging"])
 
         assert captured["days"] == retention.DEFAULT_RETENTION_DAYS
+
+
+class TestMergeStagingCommand:
+    def test_reports_rows_merged(self, runner, monkeypatch, tmp_path):
+        from app.service.pipeline import duckdb_staging
+
+        captured = {}
+        scratch_file = tmp_path / "scratch.duckdb"
+        scratch_file.write_bytes(b"")
+
+        def fake_merge(source_file, table):
+            captured["source_file"] = source_file
+            captured["table"] = table
+            return 42
+
+        monkeypatch.setattr(duckdb_staging, "merge_staging_file", fake_merge)
+
+        result = runner.invoke(
+            cli.main, ["merge-staging", "aemo-nem", "--from", str(scratch_file)]
+        )
+
+        assert result.exit_code == 0
+        assert "aemo-nem: 42 rows merged" in result.output
+        assert captured["table"] == registry.SOURCES["aemo-nem"].table
+
+    def test_rejects_an_unknown_source(self, runner, tmp_path):
+        scratch_file = tmp_path / "scratch.duckdb"
+        scratch_file.write_bytes(b"")
+
+        result = runner.invoke(
+            cli.main,
+            ["merge-staging", "not-a-real-source", "--from", str(scratch_file)],
+        )
+
+        assert result.exit_code != 0
+
+    def test_rejects_a_missing_from_path(self, runner, tmp_path):
+        result = runner.invoke(
+            cli.main,
+            ["merge-staging", "aemo-nem", "--from", str(tmp_path / "nope.duckdb")],
+        )
+
+        assert result.exit_code != 0
 
 
 class TestTrainAnomalyModelCommand:

@@ -1,8 +1,8 @@
 """`ecolens-ingestion` console-script entrypoint.
 
 Click group: `ingest {oe,aemo-nem,aemo-wem,bom,holidays}`, `backfill`,
-`prune-staging`, `train-anomaly-model`, `worker`, `beat`, `health`,
-`serve`. This is what cron/GitHub Actions/`docker exec` call — the same
+`prune-staging`, `merge-staging`, `train-anomaly-model`, `worker`, `beat`,
+`health`, `serve`. This is what cron/GitHub Actions/`docker exec` call — the same
 code path as the matching API endpoint (`POST /v1/data-sources/{id}/
 run`, `.../backfill`), via `app.service.pipeline.tasks.registry.
 run_source` / `app.service.pipeline.backfill.backfill`.
@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from datetime import date, datetime
+from pathlib import Path
 
 import click
 
@@ -174,7 +175,7 @@ def backfill(
     "--days",
     type=int,
     default=None,
-    help="Override retention.DEFAULT_RETENTION_DAYS (14).",
+    help="Override retention.DEFAULT_RETENTION_DAYS (30).",
 )
 def prune_staging(days: int | None) -> None:
     """Delete local DuckDB rows for runs already durably synced into
@@ -193,6 +194,30 @@ def prune_staging(days: int | None) -> None:
         return
     for source, rows in sorted(pruned.items()):
         click.echo(f"{source}: {rows} rows pruned")
+
+
+@main.command("merge-staging")
+@click.argument("source", type=click.Choice(list(SOURCES.keys())))
+@click.option(
+    "--from",
+    "from_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Path to a separate staging .duckdb file to merge in.",
+)
+def merge_staging(source: str, from_path: str) -> None:
+    """Merge SOURCE's rows from a separate staging file into the
+    canonical shared staging file. For a parallel per-source backfill
+    that ran with its own `DUCKDB_STAGING_DIR` to avoid DuckDB's
+    single-writer lock on the canonical file -- run this afterward, once
+    per source, to reconcile that scratch file back in so `prune-staging`/
+    `train-anomaly-model` (which both read the canonical file only) can
+    see the full history. Pure local copy, no re-fetch."""
+    from app.service.pipeline.duckdb_staging import merge_staging_file
+
+    entry = SOURCES[source]
+    rows = merge_staging_file(Path(from_path), entry.table)
+    click.echo(f"{source}: {rows} rows merged into the canonical staging file")
 
 
 # ── ml anomaly model training ───────────────────────────────────────────

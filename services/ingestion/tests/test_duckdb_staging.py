@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pandas as pd
@@ -8,6 +9,7 @@ from app.core.config import get_settings
 from app.service import object_storage
 from app.service.pipeline.duckdb_staging import (
     delete_staged,
+    merge_staging_file,
     read_staged,
     stage_dataframe,
     upload_staged_file,
@@ -213,3 +215,74 @@ async def test_upload_staged_file_skips_upload_when_key_already_exists(monkeypat
 
     assert key == "staging/bom_observations-run-8.duckdb"
     upload_file.assert_not_awaited()
+
+
+class TestMergeStagingFile:
+    """`merge_staging_file` -- reconciling a separate per-source scratch
+    file (e.g. from a parallel backfill run with its own
+    `DUCKDB_STAGING_DIR`, to sidestep the canonical file's single-writer
+    lock) back into the canonical shared staging file."""
+
+    def test_merges_rows_from_a_separate_staging_file(self, tmp_path, monkeypatch):
+        scratch_dir = tmp_path / "scratch"
+        monkeypatch.setenv("DUCKDB_STAGING_DIR", str(scratch_dir))
+        get_settings.cache_clear()
+        scratch_path, rows = stage_dataframe(
+            pd.DataFrame({"a": [1, 2, 3]}), "bom_observations", "run-scratch"
+        )
+        assert rows == 3
+
+        # Back to the canonical (fixture) dir before merging.
+        monkeypatch.setenv("DUCKDB_STAGING_DIR", str(tmp_path))
+        get_settings.cache_clear()
+
+        merged = merge_staging_file(Path(scratch_path), "bom_observations")
+
+        assert merged == 3
+        canonical_path = str(tmp_path / "landed.duckdb")
+        result = read_staged(canonical_path, "bom_observations", "run-scratch")
+        assert result["a"].tolist() == [1, 2, 3]
+
+    def test_appends_into_an_existing_canonical_table(self, tmp_path, monkeypatch):
+        stage_dataframe(pd.DataFrame({"a": [1]}), "bom_observations", "run-existing")
+
+        scratch_dir = tmp_path / "scratch"
+        monkeypatch.setenv("DUCKDB_STAGING_DIR", str(scratch_dir))
+        get_settings.cache_clear()
+        scratch_path, _ = stage_dataframe(
+            pd.DataFrame({"a": [2]}), "bom_observations", "run-scratch"
+        )
+
+        monkeypatch.setenv("DUCKDB_STAGING_DIR", str(tmp_path))
+        get_settings.cache_clear()
+
+        merged = merge_staging_file(Path(scratch_path), "bom_observations")
+
+        assert merged == 1
+        canonical_path = str(tmp_path / "landed.duckdb")
+        existing = read_staged(canonical_path, "bom_observations", "run-existing")
+        scratch_rows = read_staged(canonical_path, "bom_observations", "run-scratch")
+        assert existing["a"].tolist() == [1]
+        assert scratch_rows["a"].tolist() == [2]
+
+    def test_missing_source_file_is_a_noop(self, tmp_path):
+        merged = merge_staging_file(
+            tmp_path / "does-not-exist.duckdb", "bom_observations"
+        )
+
+        assert merged == 0
+
+    def test_source_file_without_the_table_is_a_noop(self, tmp_path, monkeypatch):
+        scratch_dir = tmp_path / "scratch"
+        monkeypatch.setenv("DUCKDB_STAGING_DIR", str(scratch_dir))
+        get_settings.cache_clear()
+        scratch_path, _ = stage_dataframe(
+            pd.DataFrame({"demand_mw": [1]}), "aemo_nem_dispatch", "run-scratch"
+        )
+
+        monkeypatch.setenv("DUCKDB_STAGING_DIR", str(tmp_path))
+        get_settings.cache_clear()
+
+        merged = merge_staging_file(Path(scratch_path), "bom_observations")
+
+        assert merged == 0

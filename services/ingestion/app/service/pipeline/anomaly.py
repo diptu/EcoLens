@@ -32,6 +32,16 @@ without blocking or failing the run. The structured fields exist
 specifically for `GET /v1/data-quality/outliers`
 (`API_SPECEFICATIONS.md` §3.3) to query directly instead of parsing
 `anomaly_reason`'s free-text string back apart.
+
+A row can clear more than one signal at once (e.g. an out-of-range value
+that's also flagged by the ML model) — `anomaly_score`/`metric`/`value`/
+`z_score`/... above only ever record the single *worst* signal, same as
+`anomaly_reason`'s design always has. `rule_based_score`/
+`statistical_score`/`ml_score` (migration
+`0025_anomalies_signal_scores.sql`) record each signal's own score
+independently — NULL meaning that signal didn't fire — so "which
+signal(s) triggered" is a queryable structured field instead of only
+recoverable by parsing `anomaly_reason`'s free-text string.
 """
 
 from __future__ import annotations
@@ -98,6 +108,9 @@ _RESULT_COLUMNS = (
     "anomaly_z_score",
     "anomaly_expected_low",
     "anomaly_expected_high",
+    "anomaly_rule_based_score",
+    "anomaly_statistical_score",
+    "anomaly_ml_score",
 )
 
 
@@ -160,15 +173,26 @@ def detect_anomalies(df: pd.DataFrame, source: str) -> pd.DataFrame:
 
     ml_scores = ml_anomaly.score(df, source)
 
-    flagged: list[tuple[object, list[str], _Winner]] = []
+    flagged: list[
+        tuple[object, list[str], _Winner, float | None, float | None, float | None]
+    ] = []
     for pos, idx in enumerate(df.index):
         winner = _Winner()
         reasons: list[str] = []
+        # Independent of `winner` -- a row can clear more than one signal
+        # category at once (e.g. out_of_range *and* ml_outlier); each
+        # category's own best score is tracked here regardless of which
+        # one ends up "winning" `winner`/`anomaly_score`.
+        rule_based_score: float | None = None
+        statistical_score: float | None = None
+        ml_score_value: float | None = None
+
         for col in columns:
             value = numeric[col].iloc[pos]
             if pd.isna(value):
                 reasons.append(f"missing_value:{col}")
                 winner.consider(_MISSING_VALUE_SCORE, metric=col, value=None)
+                rule_based_score = max(rule_based_score or 0.0, _MISSING_VALUE_SCORE)
                 continue
 
             bounds = _BOUNDS.get(col)
@@ -181,6 +205,7 @@ def detect_anomalies(df: pd.DataFrame, source: str) -> pd.DataFrame:
                     expected_low=float(bounds[0]),
                     expected_high=float(bounds[1]),
                 )
+                rule_based_score = max(rule_based_score or 0.0, _OUT_OF_RANGE_SCORE)
 
             if col in stats:
                 mean, std = stats[col]
@@ -188,13 +213,17 @@ def detect_anomalies(df: pd.DataFrame, source: str) -> pd.DataFrame:
                     z = abs((value - mean) / std)
                     if z > _Z_SCORE_THRESHOLD:
                         reasons.append(f"statistical_outlier:{col}(z={z:.1f})")
+                        z_signal_score = min(1.0, z / (_Z_SCORE_THRESHOLD * 2))
                         winner.consider(
-                            min(1.0, z / (_Z_SCORE_THRESHOLD * 2)),
+                            z_signal_score,
                             metric=col,
                             value=float(value),
                             z_score=round(float(z), 2),
                             expected_low=round(mean - _Z_SCORE_THRESHOLD * std, 2),
                             expected_high=round(mean + _Z_SCORE_THRESHOLD * std, 2),
+                        )
+                        statistical_score = max(
+                            statistical_score or 0.0, z_signal_score
                         )
 
         if ml_scores is not None:
@@ -204,9 +233,19 @@ def detect_anomalies(df: pd.DataFrame, source: str) -> pd.DataFrame:
                 winner.consider(
                     float(ml_score), metric="ml_isolation_forest", value=None
                 )
+                ml_score_value = float(ml_score)
 
         if reasons:
-            flagged.append((idx, reasons, winner))
+            flagged.append(
+                (
+                    idx,
+                    reasons,
+                    winner,
+                    rule_based_score,
+                    statistical_score,
+                    ml_score_value,
+                )
+            )
 
     if not flagged:
         return _empty_result(df)
@@ -220,6 +259,9 @@ def detect_anomalies(df: pd.DataFrame, source: str) -> pd.DataFrame:
     result["anomaly_z_score"] = [f[2].z_score for f in flagged]
     result["anomaly_expected_low"] = [f[2].expected_low for f in flagged]
     result["anomaly_expected_high"] = [f[2].expected_high for f in flagged]
+    result["anomaly_rule_based_score"] = [f[3] for f in flagged]
+    result["anomaly_statistical_score"] = [f[4] for f in flagged]
+    result["anomaly_ml_score"] = [f[5] for f in flagged]
     return result
 
 
@@ -265,6 +307,9 @@ async def record_anomalies(
                 "z_score": row["anomaly_z_score"],
                 "expected_low": row["anomaly_expected_low"],
                 "expected_high": row["anomaly_expected_high"],
+                "rule_based_score": row["anomaly_rule_based_score"],
+                "statistical_score": row["anomaly_statistical_score"],
+                "ml_score": row["anomaly_ml_score"],
             }
         )
 
@@ -281,9 +326,11 @@ async def record_anomalies(
             text(
                 "INSERT INTO meta.anomalies "
                 "(run_id, source, table_name, anomaly_score, anomaly_reason, row_snapshot, "
-                "metric, value, z_score, expected_low, expected_high) "
+                "metric, value, z_score, expected_low, expected_high, "
+                "rule_based_score, statistical_score, ml_score) "
                 "VALUES (:run_id, :source, :table_name, :anomaly_score, :anomaly_reason, "
-                "CAST(:row_snapshot AS jsonb), :metric, :value, :z_score, :expected_low, :expected_high)"
+                "CAST(:row_snapshot AS jsonb), :metric, :value, :z_score, :expected_low, :expected_high, "
+                ":rule_based_score, :statistical_score, :ml_score)"
             ),
             rows,
         )

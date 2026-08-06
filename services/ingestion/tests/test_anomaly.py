@@ -48,6 +48,9 @@ def test_out_of_range_value_is_flagged():
     assert result.iloc[0]["anomaly_expected_low"] == 0.0
     assert result.iloc[0]["anomaly_expected_high"] == 20000.0
     assert result.iloc[0]["anomaly_z_score"] is None
+    assert result.iloc[0]["anomaly_rule_based_score"] == 1.0
+    assert result.iloc[0]["anomaly_statistical_score"] is None
+    assert result.iloc[0]["anomaly_ml_score"] is None
 
 
 def test_missing_value_is_flagged():
@@ -60,6 +63,7 @@ def test_missing_value_is_flagged():
     assert result.iloc[0]["anomaly_score"] == 0.5
     assert result.iloc[0]["anomaly_metric"] == "demand_mw"
     assert result.iloc[0]["anomaly_value"] is None
+    assert result.iloc[0]["anomaly_rule_based_score"] == 0.5
 
 
 def test_statistical_outlier_is_flagged():
@@ -119,6 +123,8 @@ def test_statistical_outlier_within_bounds_captures_z_score():
     assert row["anomaly_z_score"] > 3.0
     assert row["anomaly_expected_low"] is not None
     assert row["anomaly_expected_high"] is not None
+    assert row["anomaly_statistical_score"] > 0
+    assert row["anomaly_rule_based_score"] is None
 
 
 def test_plausible_values_are_not_flagged():
@@ -204,6 +210,9 @@ class TestMLSignal:
         assert result.iloc[0]["anomaly_metric"] == "ml_isolation_forest"
         assert result.iloc[0]["anomaly_score"] == pytest.approx(0.9)
         assert result.iloc[0]["anomaly_value"] is None
+        assert result.iloc[0]["anomaly_ml_score"] == pytest.approx(0.9)
+        assert result.iloc[0]["anomaly_rule_based_score"] is None
+        assert result.iloc[0]["anomaly_statistical_score"] is None
 
     def test_ml_score_below_threshold_does_not_flag(self, monkeypatch):
         df = pd.DataFrame({"demand_mw": [8000, 8100]})
@@ -235,6 +244,11 @@ class TestMLSignal:
         assert "out_of_range:demand_mw" in result.iloc[0]["anomaly_reason"]
         assert "ml_outlier" in result.iloc[0]["anomaly_reason"]
         assert result.iloc[0]["anomaly_score"] == 1.0
+        # Both signals fired on this row -- `anomaly_metric`/`anomaly_score`
+        # only record the winner (rule-based, 1.0 > ml's 0.9), but both
+        # per-signal scores are independently captured regardless.
+        assert result.iloc[0]["anomaly_rule_based_score"] == 1.0
+        assert result.iloc[0]["anomaly_ml_score"] == pytest.approx(0.9)
 
     def test_ml_wins_over_a_smaller_rule_based_score(self, monkeypatch):
         # missing_value always scores 0.5 -- a high-enough ML score
@@ -249,6 +263,10 @@ class TestMLSignal:
         assert len(result) == 1
         assert result.iloc[0]["anomaly_metric"] == "ml_isolation_forest"
         assert result.iloc[0]["anomaly_score"] == pytest.approx(0.95)
+        # Both signals fired -- missing_value (rule-based, 0.5) lost the
+        # winner slot to ML's higher 0.95, but both are still recorded.
+        assert result.iloc[0]["anomaly_rule_based_score"] == 0.5
+        assert result.iloc[0]["anomaly_ml_score"] == pytest.approx(0.95)
 
 
 class _FakeResult:
@@ -313,7 +331,11 @@ async def test_record_anomalies_inserts_one_row_per_flagged_record(monkeypatch):
     assert params[0]["expected_low"] == 0.0
     assert params[0]["expected_high"] == 20000.0
     assert params[0]["z_score"] is None
+    assert params[0]["rule_based_score"] == 1.0
+    assert params[0]["statistical_score"] is None
+    assert params[0]["ml_score"] is None
     assert "demand_mw" in params[0]["row_snapshot"]
+    assert "rule_based_score" not in params[0]["row_snapshot"]
 
 
 async def test_record_anomalies_produces_valid_json_for_a_nan_snapshot_value(

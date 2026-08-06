@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from app.service.pipeline.tasks import (
@@ -88,15 +89,37 @@ async def run_source(
 
     Raises `KeyError` for an unknown `key` — callers (CLI, API router)
     turn that into their own "invalid source" response.
+
+    `kwargs["start"]`/`["end"]` (present for `pipeline.backfill`'s
+    date-range sources) get forwarded to `standard_run` as `window_start`/
+    `window_end` too, not just on to `entry.run` -- these used to only
+    reach `entry.run`, leaving `meta._ingest_log.window_start`/`_end`
+    permanently `NULL` for every run ever, backfill included. Real,
+    observed consequence: `pipeline.backfill.already_succeeded` checks
+    `started_at::date = day` as its only fallback, which only ever
+    coincidentally matches when a historical `day` happens to equal the
+    real wall-clock date the backfill itself ran on -- for a true
+    historical day it never matches, so every backfill re-fetched and
+    re-staged its *entire* range from day 1 on every single run,
+    silently, "success"/"skipped" output notwithstanding. Confirmed live
+    2026-08-06: resuming a crashed 370-day `oe` backfill re-fetched day 1
+    instead of picking up from day 92.
     """
     entry = SOURCES[key]
     if entry.self_wrapped:
         return await entry.run(**kwargs)
+
+    start = kwargs.get("start")
+    end = kwargs.get("end")
+    window_start = start.isoformat() if isinstance(start, datetime) else None
+    window_end = end.isoformat() if isinstance(end, datetime) else None
 
     wrapped = _common.standard_run(
         entry.source,
         entry.table,
         triggered_by=triggered_by,
         bypass_breaker=bypass_breaker,
+        window_start=window_start,
+        window_end=window_end,
     )(entry.run)
     return await wrapped(**kwargs)

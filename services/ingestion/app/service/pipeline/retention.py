@@ -45,7 +45,7 @@ log = get_logger(__name__)
 # around longer than strictly necessary rather than pruning too
 # aggressively before this policy has seen real production use. Easy to
 # tighten once actual disk usage/growth rate is observed.
-DEFAULT_RETENTION_DAYS = 14
+DEFAULT_RETENTION_DAYS = 30
 
 # `meta._ingest_log.source` -> `duckdb_staging`'s table name -- the log
 # only ever has the former, the shared file is keyed by the latter

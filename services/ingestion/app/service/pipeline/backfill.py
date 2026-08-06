@@ -49,13 +49,23 @@ async def already_succeeded(source: str, day: date) -> bool:
     row for `source` on `day`. Treating `'staged'` as "don't re-fetch"
     avoids redundant work piling up while the consumer catches up;
     `load_to_postgres`'s `ON CONFLICT DO NOTHING` would make a genuine
-    double-fetch harmless anyway, this just skips the wasted work."""
+    double-fetch harmless anyway, this just skips the wasted work.
+
+    Checks `window_start` (the actual historical date a run *fetched*,
+    now populated by `registry.run_source` from `start`/`end` -- see its
+    own docstring) -- **not** `started_at` (when the run itself executed
+    in real wall-clock time), which this used to check instead. That was
+    a real bug: `started_at::date` only ever coincidentally equals a
+    historical `day`, so this returned `False` for every genuinely
+    historical day on every call, silently defeating backfill's own
+    idempotency/resumability for the entire range every single run.
+    """
     async with get_session() as session:
         result = await session.execute(
             text(
                 "SELECT 1 FROM meta._ingest_log "
                 "WHERE source = :source AND status IN ('success', 'staged') "
-                "AND started_at::date = :day LIMIT 1"
+                "AND window_start::date = :day LIMIT 1"
             ),
             {"source": source, "day": day},
         )
@@ -88,12 +98,19 @@ async def backfill_day(
 
     Returns `"skipped"`, `"success"`, or `"failed: <message>"` — never
     raises, so one bad day/source doesn't abort the rest of the range.
+    `already_succeeded`'s own DB check is inside this same `try` for that
+    reason -- it used to sit before it, so a transient Postgres
+    connection drop there (real, observed: `asyncpg.exceptions.
+    ConnectionDoesNotExistError` mid-way through a 370-day `oe` backfill,
+    ~3h/91 days in) went unhandled and killed the entire multi-hour
+    `backfill()` loop instead of just failing that one day -- silently
+    contradicting this docstring's own "never raises" promise.
     """
     entry = SOURCES[key]
-    if await already_succeeded(entry.source, day):
-        return "skipped"
-
     try:
+        if await already_succeeded(entry.source, day):
+            return "skipped"
+
         if key in _DATE_RANGE_SOURCES:
             # `ingest_aemo_{nem,wem}.py`'s `_fetch_historical_range` treats
             # `[start.date(), end.date()]` as an INCLUSIVE calendar-day

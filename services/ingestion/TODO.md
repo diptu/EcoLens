@@ -349,18 +349,27 @@ baseline wouldn't have needed).
     leaves behaviour unchanged, a high score flags a row the other two
     signals missed, the worse-of-three combine in both directions).
     `tests/test_cli.py`'s new `TestTrainAnomalyModelCommand`.
-[ ] **Not done this pass, deliberately deferred**: extending `meta.
-    anomalies`' row shape to record which signal(s) actually triggered
-    per row — `_Winner` still only keeps the single worst-scoring
-    signal's structured fields (`metric`/`value`/`z_score`/...), same
-    as it always has. The free-text `anomaly_reason` column *does*
-    already record every signal that fired (e.g. `"out_of_range:
-    demand_mw=-50; ml_outlier:isolation_forest(score=0.81)"`), just not
-    as separate queryable structured fields. This needs a real
-    migration against the shared Neon database — a bigger, more
-    consequential step than this pass's scope covered; still genuinely
-    "worth revisiting now that a third signal exists", as this section
-    originally said.
+[x] **Update 2026-08-06 — done.** `meta.anomalies` gains
+    `rule_based_score`/`statistical_score`/`ml_score` (all nullable
+    `numeric`, migration `0025_anomalies_signal_scores.sql`, applied
+    live against the real shared Neon database — confirmed via `\d
+    meta.anomalies`) — one column per signal category, independent of
+    `_Winner`/`anomaly_score`/`metric`, which still only ever record the
+    single *worst* signal (unchanged, still the right design for "the
+    headline flag"). NULL means that signal didn't fire for the row;
+    non-NULL is that signal's own score, even when it didn't win. A row
+    flagged by both rule-based and ML (e.g. `"out_of_range:demand_mw=
+    -50; ml_outlier:isolation_forest(score=0.81)"`) now has both
+    `rule_based_score=1.0` and `ml_score=0.81` queryable directly,
+    instead of only recoverable by parsing `anomaly_reason`'s free-text
+    string. `detect_anomalies` tracks each category's own max score
+    per row alongside the existing `_Winner`; `record_anomalies`
+    persists all three. `services/data-pipeline`'s own copy of the
+    detector (frozen legacy 2-signal version, predates the ML signal)
+    is untouched — the new columns are nullable, so its inserts are
+    unaffected. Tests: `tests/test_anomaly.py` extended (per-signal
+    score assertions on every existing case, plus explicit "both
+    signals fired, only one wins the headline slot" coverage).
 
 ### 3. Storage — close the loop on the event-driven warehousing side
 
@@ -404,9 +413,10 @@ mechanism itself.
     _ingest_log.status = 'success'` (durably synced to Postgres — R2
     already has its own durable copy earlier still, before a run ever
     reaches `'staged'`) *and* older than `retention.
-    DEFAULT_RETENTION_DAYS` (14, a plain, easily-changed module
-    constant — deliberately generous to start, not tuned against real
-    observed disk growth yet). `'staged'`/`'sync_failed'` runs are never
+    DEFAULT_RETENTION_DAYS` (a plain, easily-changed module constant —
+    deliberately generous to start, not tuned against real observed disk
+    growth yet; raised from 14 to **30** on 2026-08-06, per explicit
+    request). `'staged'`/`'sync_failed'` runs are never
     touched — still exactly the recovery-artifact contract `pipeline.
     duckdb_staging`'s own docstring documents. Manually/cron-triggered
     (`ecolens-ingestion prune-staging [--days N]`), not a Celery Beat
@@ -420,7 +430,7 @@ mechanism itself.
     lifecycle policy (expiry/tiering) for `staging/*` objects, which
     still accumulate one snapshot per run indefinitely with no pruning.
     Recommended concrete policy, not yet applied: expire objects under
-    `staging/` after `retention.DEFAULT_RETENTION_DAYS` (currently 14,
+    `staging/` after `retention.DEFAULT_RETENTION_DAYS` (currently 30,
     kept in sync with the local pruning policy above) via a bucket
     lifecycle rule — R2 supports this natively (Cloudflare dashboard or
     the S3-compatible lifecycle API), no application code required. Not

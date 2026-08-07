@@ -162,4 +162,4 @@ cython_debug/
 #.idea/
 
 data/
-services/ingestion/data/training/master.duckdb
+*.duckdb.*

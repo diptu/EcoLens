@@ -1,7 +1,7 @@
 [project]
 name = "data-pipeline"
 version = "0.1.0"
-description = "Add your description here"
+description = "ecoLens data-pipeline — the remaining core of the original monolith after services/ingestion (fetch/stage) and services/waerehouse (raw.*/dbt) were extracted into their own standalone services. Owns model training/registry (MLflow), dbt-build orchestration, and the legacy warehouse-sync consumer (Settings.warehouse_sync_consumer_enabled) kept alongside services/waerehouse's own until an operator cuts over."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -46,7 +46,13 @@ dev = [
     "matplotlib>=3.11.1",
     "mypy>=2.3.0",
     "pytest>=9.1.1",
-    "ruff>=0.15.22",
+    # Pinned (not just >=) to match what forecast-api/ingestion/warehouse
+    # already pin -- an unpinned `>=0.15.22` resolved to 0.16.1 in this
+    # package's own standalone lock (TODO.md's "microservice independence"
+    # pass) the moment it stopped sharing the root workspace's lockfile,
+    # surfacing 313 new default-rule-set findings that are a ruff-version
+    # difference, not a real regression in this code.
+    "ruff==0.15.22",
 ]
 
 [build-system]
@@ -55,3 +61,35 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
+
+[tool.ruff.lint.isort]
+# See services/ingestion/services/waerehouse's own pyproject.toml for why
+# this matters: without it, ruff's first-party detection for `app` is
+# heuristic and depends on the path shape it's invoked with.
+known-first-party = ["app"]
+
+[tool.mypy]
+python_version = "3.12"
+namespace_packages = true
+explicit_package_bases = true
+mypy_path = "."
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+ignore_missing_imports = true
+
+# No type stubs published for these -- ported from the root pyproject.toml's
+# identical override list (this package's home before this "independently
+# deployable" extraction, TODO.md's "microservice independence" pass).
+[[tool.mypy.overrides]]
+module = [
+    "aioboto3.*",
+    "pandas.*",
+    "openelectricity.*",
+    "sklearn.*",
+    "croniter.*",
+    "joblib.*",
+    "timesfm.*",
+    "scipy.*",
+]
+ignore_missing_imports = true

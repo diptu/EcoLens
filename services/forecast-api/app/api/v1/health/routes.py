@@ -1,4 +1,8 @@
-"""`GET /v1/healthz` · `GET /v1/readyz` (`README.md` § API reference)."""
+"""`GET /v1/healthz` · `GET /v1/readyz` · `GET /metrics` (`README.md` §
+API reference). `/metrics` follows data-pipeline/ingestion/warehouse's
+existing convention (no `/v1` prefix -- Prometheus scrape configs across
+all four services already assume a bare `/metrics` path, see
+`services/observility/prometheus/prometheus.yml`)."""
 
 from __future__ import annotations
 
@@ -8,6 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_db, get_model_registry, get_redis_client
+from app.core.metrics import metrics_as_text
 from app.schemas.health import (
     HealthResponse,
     ReadyComponent,
@@ -16,6 +21,7 @@ from app.schemas.health import (
 from app.service.ml.registry import ModelRegistry
 
 router = APIRouter(prefix="/v1", tags=["health"])
+metrics_router = APIRouter(tags=["health"])
 
 
 @router.get("/healthz", response_model=HealthResponse)
@@ -54,3 +60,8 @@ async def readyz(
     return ReadyResponse(
         ready=ready, database=database, redis=redis_component, model=model_component
     )
+
+
+@metrics_router.get("/metrics")
+async def metrics() -> Response:
+    return Response(content=metrics_as_text(), media_type="text/plain; version=0.0.4")

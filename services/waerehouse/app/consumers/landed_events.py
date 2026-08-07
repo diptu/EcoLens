@@ -2,7 +2,11 @@
 rabbitmq_landing_queue` — this service's own version of `data-pipeline`'s
 `pipeline.warehouse_sync.sync_landed_event`, adapted for `services/
 ingestion`'s newer shared-DuckDB-file staging shape (`app.db.
-duckdb_client.read_run`, not the legacy one-file-per-run layout).
+duckdb_client.read_run_with_fallback`, not the legacy one-file-per-run
+layout — falls back to `services/ingestion`'s object-storage snapshot
+when the shared `duckdb_staging` volume isn't actually shared, i.e.
+`services/ingestion` is running on a different machine than this
+consumer).
 
 On success: reads this run's rows out of the shared DuckDB file, bulk-
 loads them into Postgres `raw.*` (`loaders.postgres_loader.
@@ -21,7 +25,7 @@ from typing import Any
 
 from app.core.logging import get_logger, set_run_id
 from app.core.metrics import consume_duration_seconds, rows_loaded_total
-from app.db.duckdb_client import read_run
+from app.db.duckdb_client import read_run_with_fallback
 from app.db.session import get_session
 from app.loaders.ingest_log import mark_sync_failed, mark_synced
 from app.loaders.postgres_loader import load_to_postgres
@@ -35,10 +39,14 @@ async def sync_landed_event(payload: dict[str, Any]) -> None:
     source = payload["source"]
     table = payload["table"]
     schema = payload.get("schema", "raw")
+    object_storage_key = payload.get("object_storage_key")
+    object_storage_bucket = payload.get("object_storage_bucket")
 
     started = time.monotonic()
     try:
-        df = read_run(table, str(run_id))
+        df = await read_run_with_fallback(
+            table, str(run_id), object_storage_key, object_storage_bucket
+        )
         async with get_session() as session:
             rows_loaded = await load_to_postgres(session, df, table, schema=schema)
             await mark_synced(session, run_id, rows_loaded)

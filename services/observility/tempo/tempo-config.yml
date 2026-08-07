@@ -1,0 +1,40 @@
+# Single-binary Tempo, local block storage. Receives from
+# otel-collector's `otlp/tempo` exporter (otel/otel-collector-config.yml),
+# not directly from business services.
+#
+# `${TEMPO_RETENTION}` is expanded by Tempo itself at startup
+# (`-config.expand-env=true`, set on the `tempo` service's `command` in
+# docker-compose.yml).
+server:
+  http_listen_port: 3200
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+ingester:
+  max_block_duration: 5m
+
+compactor:
+  compaction:
+    block_retention: ${TEMPO_RETENTION}
+
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tempo/blocks
+    wal:
+      path: /var/tempo/wal
+
+# No `metrics_generator` (service-graph/span-metrics -> Prometheus
+# remote-write) -- that needs `--web.enable-remote-write-receiver` on
+# Prometheus and is only worth the extra moving part once real trace
+# volume exists. Nothing sends traces yet (see otel-collector-config.yml's
+# Known Gap comment), so this would just be unused surface area. Revisit
+# once a service actually ships OTel instrumentation -- see TODO.md.

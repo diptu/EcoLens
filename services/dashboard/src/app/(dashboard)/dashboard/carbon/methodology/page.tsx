@@ -9,11 +9,9 @@
  *
  * The page is a mix of:
  *   - Static content (chain, sources, factors) - from `src/lib/methodology.ts`
- *   - Dynamic content (per-region trace) - placeholder showing the structure
- *     until the live `/v1/emissions/trace` endpoint is wired up.
- *
- * In production, the page would call `/v1/emissions/trace?region=...&limit=5`
- * to get the actual numbers from the warehouse.
+ *   - Dynamic content (per-region trace) - real, `GET /v1/emissions/trace`
+ *     (forecast-api). No mock fallback on fetch failure — same policy as
+ *     the Carbon Intelligence page once it was wired to real data.
  */
 "use client";
 
@@ -41,8 +39,10 @@ import { Card } from "@/components/dashboard/card";
 import { cn } from "@/lib/utils";
 import {
   ALL_EMISSION_REGIONS,
+  fetchEmissionsTrace,
   formatIntensity,
   type EmissionRegion,
+  type EmissionsTrace,
 } from "@/lib/emissions";
 import {
   CALCULATION_CHAIN,
@@ -75,12 +75,39 @@ const SOURCE_TYPE_COLORS: Record<DataSource["type"], string> = {
   reference:  "bg-amber-500/10 text-amber-200 border-amber-400/20",
 };
 
+/** `fct_carbon_intensity` is hourly-grained -- these map directly onto
+ * `GET /v1/emissions/trace`'s `limit` (a count of hours), not an
+ * arbitrary time window. */
+const TRACE_WINDOWS: Array<{ value: string; label: string; limit: number }> = [
+  { value: "last_1h", label: "Last 1 hour (1 interval)", limit: 1 },
+  { value: "last_24h", label: "Last 24 hours (24 intervals)", limit: 24 },
+  { value: "last_7d", label: "Last 7 days (168 intervals)", limit: 168 },
+];
+
 export default function EmissionsMethodologyPage() {
   const [activeExample, setActiveExample] = useState<string>(WORKED_EXAMPLES[0].id);
   const [traceRegion, setTraceRegion] = useState<EmissionRegion>("NSW1");
-  const [showTrace, setShowTrace] = useState(false);
+  const [traceWindow, setTraceWindow] = useState(TRACE_WINDOWS[0].value);
+  const [trace, setTrace] = useState<EmissionsTrace | null>(null);
+  const [traceLoading, setTraceLoading] = useState(false);
+  const [traceError, setTraceError] = useState<string | null>(null);
 
   const example = WORKED_EXAMPLES.find((e) => e.id === activeExample) ?? WORKED_EXAMPLES[0];
+
+  async function runTrace() {
+    const limit = TRACE_WINDOWS.find((w) => w.value === traceWindow)?.limit ?? 5;
+    setTraceLoading(true);
+    setTraceError(null);
+    try {
+      const result = await fetchEmissionsTrace(traceRegion, limit);
+      setTrace(result);
+    } catch (err) {
+      setTraceError(err instanceof Error ? err.message : "failed to load trace");
+      setTrace(null);
+    } finally {
+      setTraceLoading(false);
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -158,29 +185,36 @@ export default function EmissionsMethodologyPage() {
                 Time window
               </label>
               <select
-                defaultValue="last_1h"
+                value={traceWindow}
+                onChange={(e) => setTraceWindow(e.target.value)}
                 data-testid="trace-window"
                 className="rounded-md border border-white/10 bg-white/[0.04] px-3 py-1.5 text-sm text-white focus:border-emerald-200/60 focus:outline-none"
               >
-                <option value="last_1h">Last 1 hour (2 intervals)</option>
-                <option value="last_24h">Last 24 hours (48 intervals)</option>
-                <option value="last_7d">Last 7 days (336 intervals)</option>
+                {TRACE_WINDOWS.map((w) => (
+                  <option key={w.value} value={w.value}>{w.label}</option>
+                ))}
               </select>
             </div>
             <button
               type="button"
-              onClick={() => setShowTrace(true)}
+              onClick={runTrace}
+              disabled={traceLoading}
               data-testid="run-trace"
-              className="inline-flex items-center gap-1.5 rounded-md bg-lime-100 px-3 py-1.5 text-sm font-semibold text-black hover:bg-lime-100"
+              className="inline-flex items-center gap-1.5 rounded-md bg-lime-100 px-3 py-1.5 text-sm font-semibold text-black hover:bg-lime-100 disabled:opacity-50"
             >
-              Run trace <ArrowRight className="h-3 w-3" />
+              {traceLoading ? "Running…" : "Run trace"} <ArrowRight className="h-3 w-3" />
             </button>
           </div>
-          {showTrace ? <TraceMockup region={traceRegion} /> : (
+          {traceError ? (
+            <p className="text-xs text-rose-300">Couldn&apos;t load the trace ({traceError}).</p>
+          ) : trace ? (
+            <TraceResult trace={trace} />
+          ) : (
             <p className="text-xs text-white/45">
               The trace calls <code className="rounded bg-black/30 px-1 font-mono text-lime-100">GET /v1/emissions/trace?region={traceRegion}&amp;limit=5</code>{" "}
-              and returns the raw warehouse values, applied emission factors,
-              and per-interval math (e.g. <code className="font-mono">8000 MW × 640 kg/MWh × 0.5h = 2,560,000 kgCO₂e</code>).
+              and returns the real warehouse values (`fct_carbon_intensity` +
+              the per-fuel `fct_generation_mix` rows that sum into it) —
+              not a mock.
             </p>
           )}
         </div>
@@ -484,28 +518,52 @@ function WorkedExampleView({ example }: { example: WorkedExample }) {
  * Mock trace mockup (placeholder until live API is wired up).
  * Shows the structure of what a real trace response looks like.
  */
-function TraceMockup({ region }: { region: EmissionRegion }) {
+function TraceResult({ trace }: { trace: EmissionsTrace }) {
+  if (trace.intervals.length === 0) {
+    return (
+      <div className="rounded-lg border border-white/5 bg-white/[0.02] p-4 text-xs text-white/45" data-testid="trace-result">
+        No warehouse data available for {trace.region} in this window yet.
+      </div>
+    );
+  }
   return (
     <div className="rounded-lg border border-white/5 bg-white/[0.02] p-4" data-testid="trace-result">
       <div className="text-[10px] font-semibold uppercase tracking-wider text-white/40">
-        Sample trace for {region} (last 1h, first 2 intervals)
+        Real trace for {trace.region} — {trace.intervals.length} interval{trace.intervals.length === 1 ? "" : "s"},
+        generated {new Date(trace.generated_at).toLocaleString("en-AU")}
       </div>
       <div className="mt-2 space-y-2 text-xs font-mono text-white/70">
-        <div className="rounded border border-emerald-200/20 bg-emerald-300/5 p-2.5">
-          <div className="text-emerald-100">▸ Interval 1: 2026-07-22T13:00:00Z</div>
-          <div className="mt-1 text-white/65">  raw: demand_mw=7842, intensity=638, coal_black=3200, gas_ccgt=1200, wind=900</div>
-          <div className="text-white/65">  scope2: 7842 × 638 × 0.5 = <span className="text-lime-100">2,501,598 kgCO₂e</span></div>
-          <div className="text-white/65">  scope1: coal_black (1,312,000) + gas_ccgt (222,000) + wind (4,500) = <span className="text-lime-100">1,538,500 kgCO₂e</span></div>
-        </div>
-        <div className="rounded border border-emerald-200/20 bg-emerald-300/5 p-2.5">
-          <div className="text-emerald-100">▸ Interval 2: 2026-07-22T13:30:00Z</div>
-          <div className="mt-1 text-white/65">  raw: demand_mw=8127, intensity=642, coal_black=3400, gas_ccgt=1300, wind=850</div>
-          <div className="text-white/65">  scope2: 8127 × 642 × 0.5 = <span className="text-lime-100">2,609,167 kgCO₂e</span></div>
-          <div className="text-white/65">  scope1: coal_black (1,394,000) + gas_ccgt (240,500) + wind (4,250) = <span className="text-lime-100">1,638,750 kgCO₂e</span></div>
-        </div>
+        {trace.intervals.map((interval) => (
+          <div key={interval.hour} className="rounded border border-emerald-200/20 bg-emerald-300/5 p-2.5">
+            <div className="text-emerald-100">▸ {interval.hour}</div>
+            {interval.by_fuel.length > 0 && (
+              <div className="mt-1 text-white/65">
+                {"  "}by fuel: {interval.by_fuel.map((f) => (
+                  `${f.fuel_type}=${f.generation_mwh.toFixed(1)} MWh @ ${f.effective_factor_kgco2e_per_mwh?.toFixed(1) ?? "—"} kg/MWh`
+                )).join(", ")}
+              </div>
+            )}
+            <div className="text-white/65">
+              {"  "}total: {interval.total_generation_mwh?.toFixed(1) ?? "—"} MWh × {" "}
+              {interval.intensity_kgco2e_per_mwh?.toFixed(1) ?? "—"} kg/MWh = {" "}
+              <span className="text-lime-100">
+                {interval.total_emissions_kgco2e?.toLocaleString(undefined, { maximumFractionDigits: 0 }) ?? "—"} kgCO₂e
+              </span>
+            </div>
+            {interval.factors_version && (
+              <div className="text-white/40">{"  "}factors: {interval.factors_version}</div>
+            )}
+          </div>
+        ))}
       </div>
       <div className="mt-3 rounded-md border border-white/5 bg-white/5 p-2.5 text-[11px] text-white/55">
-        <div>When the <code className="rounded bg-black/30 px-1 font-mono text-lime-100">/v1/emissions/trace</code> endpoint is wired up, this section will show the real warehouse values from <code className="rounded bg-black/30 px-1 font-mono text-lime-100">fact_demand_30min</code> for the selected region and time window.</div>
+        <div>
+          Every number above is read straight from{" "}
+          <code className="rounded bg-black/30 px-1 font-mono text-lime-100">raw_marts.fct_carbon_intensity</code>
+          {" "}and{" "}
+          <code className="rounded bg-black/30 px-1 font-mono text-lime-100">fct_generation_mix</code> —
+          the aggregate total already equals the sum of the per-fuel breakdown shown, same source, no re-derivation.
+        </div>
       </div>
     </div>
   );

@@ -1,0 +1,96 @@
+# Warehouse alerts -- `services/waerehouse` (job=warehouse, container
+# `warehouse`, port 8004). Metric names from
+# services/waerehouse/app/core/metrics.py -- confirmed real, not
+# aspirational.
+#
+# `warehouse-consumer` (the RabbitMQ-consume-only container,
+# `command: consume` in docker-compose.yml) shares the same Prometheus
+# registry code but has no HTTP server in that mode, so it is NOT a
+# separate scrape target -- its activity shows up under the one
+# `warehouse` job's `ecolens_warehouse_consume_*` series regardless of
+# which container instance actually processed a given message.
+
+groups:
+  - name: ecolens_warehouse_alerts
+    rules:
+      # "Warehouse job failures" (README's Warehouse alert list) --
+      # dbt build/run/test failures.
+      - alert: WarehouseDbtRunFailures
+        expr: increase(ecolens_warehouse_dbt_runs_total{outcome="failed"}[1h]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "warehouse dbt {{ $labels.subcommand }} failed"
+          description: >
+            {{ $value }} failed `dbt {{ $labels.subcommand }}` run(s) in
+            the last hour -- check `GET /v1/dbt/runs` for the error
+            detail.
+
+      # "Warehouse job failures" -- the consume-side (landed-event ->
+      # raw.* load) half, not just dbt.
+      - alert: WarehouseConsumeFailures
+        expr: increase(ecolens_warehouse_consume_failures_total[15m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "warehouse failed to load {{ $labels.source }} messages"
+          description: >
+            {{ $value }} consume failure(s) for {{ $labels.source }} in
+            the last 15m -- a message stayed on the queue instead of
+            landing in `raw.*`.
+
+      # "Pipeline processing delay" (README's Warehouse alert list) --
+      # p95 age of messages by the time this service consumes them.
+      # Buckets are 1,5,15,30,60,120,300,600,1800,3600s
+      # (app/core/metrics.py) -- 600s (10m) as the alert threshold sits
+      # inside that bucket set rather than between buckets.
+      - alert: WarehousePipelineProcessingDelay
+        expr: >
+          histogram_quantile(0.95, sum(rate(ecolens_warehouse_queue_message_age_seconds_bucket[15m])) by (le))
+          > 600
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "warehouse's p95 queue message age is above 10 minutes"
+          description: >
+            Messages are sitting on the queue {{ $value | humanizeDuration }}
+            (p95) before this service consumes them -- check whether
+            `warehouse`/`warehouse-consumer` fell behind or RabbitMQ
+            itself is backed up.
+
+      # "Data quality failures" (README's Warehouse alert list) -- dbt
+      # test failures specifically, distinct from a dbt *run* erroring
+      # outright above.
+      - alert: WarehouseDataQualityTestFailures
+        expr: increase(ecolens_warehouse_dbt_test_failures_total[1h]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} dbt test failure(s) for {{ $labels.test_name }} in the last hour"
+          description: >
+            A dbt data-quality test failed against the warehouse --
+            check `dbt test` output / `GET /v1/dbt/runs` before trusting
+            downstream marts.
+
+      # "Database connection errors" (README's Warehouse alert list) --
+      # no direct connection-error counter exists (app/core/metrics.py
+      # has no such metric), so `up` on this job is the closest honest
+      # proxy: `/v1/readyz` (which the scrape target's liveness doesn't
+      # cover) does check Postgres+RabbitMQ, but a scrape-level `up==0`
+      # already means the process itself is unreachable, a stronger
+      # signal than a single failed DB call would be.
+      - alert: WarehouseTargetDown
+        expr: up{job="warehouse"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "warehouse's /metrics endpoint is unreachable"
+          description: >
+            Prometheus hasn't been able to scrape `warehouse:8004/metrics`
+            for 2+ minutes -- check `docker compose ps warehouse` and
+            `GET /v1/readyz` (Postgres/RabbitMQ reachability) directly.

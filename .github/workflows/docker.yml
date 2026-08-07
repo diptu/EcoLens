@@ -1,14 +1,16 @@
-name: Docker (data-pipeline + forecast-api)
+name: Docker (data-pipeline + forecast-api + warehouse)
 
-# Builds both real Dockerfiles (`infra/docker/{data-pipeline,forecast-
-# api}.Dockerfile`) on every push/PR so a broken image is caught before
-# merge; pushes to GHCR only on `main`/version tags. Uses the repo's
-# built-in `GITHUB_TOKEN` — no externally-provisioned registry
+# Builds the real Dockerfiles (`infra/docker/{data-pipeline,forecast-api,
+# warehouse}.Dockerfile`) on every push/PR so a broken image is caught
+# before merge; pushes to GHCR only on `main`/version tags. Uses the
+# repo's built-in `GITHUB_TOKEN` — no externally-provisioned registry
 # credentials needed, same "works out of the box on any fork" property
 # the ingest-*.yml workflows' `workflow_dispatch` inputs have. `web` has
 # no Dockerfile yet (see `docker-compose.yml`'s `web` service and
-# `TODO.md`'s Frontend section, 0% built) — this workflow builds the two
-# images that actually exist.
+# `TODO.md`'s Frontend section, 0% built); `ingestion` isn't in this
+# matrix yet either (services/waerehouse/TODO.md's "prod grade" pass only
+# asked for warehouse) — this workflow builds the images that actually
+# exist and were in scope.
 
 on:
   push:
@@ -19,8 +21,10 @@ on:
     paths:
       - "infra/docker/data-pipeline.Dockerfile"
       - "infra/docker/forecast-api.Dockerfile"
+      - "infra/docker/warehouse.Dockerfile"
       - "services/data-pipeline/**"
       - "services/forecast-api/**"
+      - "services/waerehouse/**"
       - "pyproject.toml"
       - "uv.lock"
       - ".github/workflows/docker.yml"
@@ -46,6 +50,8 @@ jobs:
             dockerfile: infra/docker/data-pipeline.Dockerfile
           - image: forecast-api
             dockerfile: infra/docker/forecast-api.Dockerfile
+          - image: warehouse
+            dockerfile: infra/docker/warehouse.Dockerfile
     steps:
       - uses: actions/checkout@v4
 

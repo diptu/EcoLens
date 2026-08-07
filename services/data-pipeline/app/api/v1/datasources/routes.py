@@ -92,6 +92,46 @@ async def list_data_sources_endpoint(
     return await list_data_sources(db, redis, settings, query)
 
 
+@router.get("/public", response_model=DataSourcesListResponse)
+async def list_data_sources_public_endpoint(
+    category: Category | None = None,
+    enabled: bool | None = None,
+    health: HealthStatus | None = None,
+    search: str | None = Query(default=None, max_length=64),
+    sort: SortField = "name",
+    order: Order = "asc",
+    limit: int = Query(default=50, ge=1, le=200),
+    cursor: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis_client),
+    settings: Settings = Depends(get_app_settings),
+) -> DataSourcesListResponse:
+    """No `require_roles` gate, unlike `list_data_sources_endpoint` above --
+    deliberately, same reasoning as `pipelines`'s `GET /public/pipelines`
+    (`api/v1/pipelines/routes.py`) and `data_quality`'s
+    `GET /summary/public`: the dashboard has no way to hold a bearer
+    token for this service's own separate auth domain
+    (`core/security.py`). `DataSourceOut` carries nothing sensitive --
+    `auth.type` is a bare enum (`"none"`/`"api_key"`/`"oauth2"`), never a
+    credential value -- so this is a real public projection, same
+    response shape and same cache as the authenticated route, not a
+    stripped-down summary (unlike data-quality's public endpoint, there's
+    nothing here worth narrowing). Declared *before* `/{id}` below so
+    FastAPI's path matching doesn't treat "public" as an `{id}` value.
+    """
+    query = ListDataSourcesQuery(
+        category=category,
+        enabled=enabled,
+        health=health,
+        search=search,
+        sort=sort,
+        order=order,
+        limit=limit,
+        cursor=cursor,
+    )
+    return await list_data_sources(db, redis, settings, query)
+
+
 @router.get("/{id}", response_model=DataSourceOut)
 async def get_data_source_endpoint(
     id: str,

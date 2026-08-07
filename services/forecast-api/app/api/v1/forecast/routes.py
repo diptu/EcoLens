@@ -39,6 +39,7 @@ from app.api.v1.deps import (
     get_redis_client,
 )
 from app.core.errors import ApiError
+from app.core.metrics import forecast_predictions_total, forecast_prediction_latency_seconds
 from app.schemas.forecast import ForecastPoint, ForecastResponse
 from app.core.config import Settings
 from app.service.ml.data import load_holidays, load_latest_window
@@ -268,17 +269,25 @@ async def get_forecast(
             503, "model_not_loaded", "No Production model version is loaded yet"
         )
 
-    cache_key = f"forecast:v1:{region}:{bundle.version}"
-    cached = await redis.get(cache_key)
-    if cached is not None:
-        return ForecastResponse.model_validate_json(cached)
+    # Times the whole handler (cache hit or miss alike) rather than just
+    # the inference branch below -- a cache hit's near-zero latency is
+    # itself a meaningful data point (proves the cache is doing its job),
+    # not noise to exclude. `cache` label on forecast_predictions_total
+    # is how a Grafana panel tells hits from misses apart if it needs to.
+    with forecast_prediction_latency_seconds.labels(region=region).time():
+        cache_key = f"forecast:v1:{region}:{bundle.version}"
+        cached = await redis.get(cache_key)
+        if cached is not None:
+            forecast_predictions_total.labels(region=region, cache="hit").inc()
+            return ForecastResponse.model_validate_json(cached)
 
-    if region == "NEM":
-        response = await _run_nem_aggregate_forecast(db, bundle, settings)
-    else:
-        response = await _run_single_region_forecast(db, bundle, settings, region)
+        if region == "NEM":
+            response = await _run_nem_aggregate_forecast(db, bundle, settings)
+        else:
+            response = await _run_single_region_forecast(db, bundle, settings, region)
 
-    await redis.set(
-        cache_key, response.model_dump_json(), ex=settings.forecast_cache_ttl_seconds
-    )
-    return response
+        await redis.set(
+            cache_key, response.model_dump_json(), ex=settings.forecast_cache_ttl_seconds
+        )
+        forecast_predictions_total.labels(region=region, cache="miss").inc()
+        return response

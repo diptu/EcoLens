@@ -10,6 +10,11 @@ from app.schemas.emissions.timeseries import (
     EmissionsTimeseriesPoint,
     EmissionsTimeseriesResponse,
 )
+from app.schemas.emissions.trace import (
+    EmissionsTraceFuelBreakdown,
+    EmissionsTraceInterval,
+    EmissionsTraceResponse,
+)
 from app.schemas.emissions.ytd import EmissionsYtdResponse
 
 __all__ = [
@@ -19,5 +24,8 @@ __all__ = [
     "EmissionsResponse",
     "EmissionsTimeseriesPoint",
     "EmissionsTimeseriesResponse",
+    "EmissionsTraceFuelBreakdown",
+    "EmissionsTraceInterval",
+    "EmissionsTraceResponse",
     "EmissionsYtdResponse",
 ]

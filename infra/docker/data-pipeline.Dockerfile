@@ -4,12 +4,22 @@
 # (or a one-off `docker compose exec data-pipeline ecolens-pipeline ...`):
 #   - `serve`  — the FastAPI app (`/v1/ingest`, `/v1/dbt`, `/v1/data-sources`,
 #                 ECO-D49; TODO.md's Ingestion section)
-#   - `worker` — the RabbitMQ warehouse-sync consumer (`overview.md` §2)
-#   - anything else — `ingest {source}` / `dbt {subcommand}` / `health`
+#   - `worker` — the RabbitMQ warehouse-sync consumer (`overview.md` §2) --
+#                a no-op once `Settings.warehouse_sync_consumer_enabled` is
+#                flipped off (services/waerehouse/TODO.md Phase 4's cutover
+#                switch)
+#   - anything else — `ingest {source}` / `dbt {subcommand}` / `train-worker`
+#     / `health`
 #
-# Build context is the repo root (docker-compose.yml's `context: .`) — this
-# is a `uv` workspace (root pyproject.toml + services/data-pipeline's own),
-# so the lockfile lives at the root and has to be copied from there.
+# Build context is the repo root (docker-compose.yml's `context: .`), but
+# this is now its own independent `uv` project -- not a member of the root
+# workspace (TODO.md's "microservice independence" pass: this was the last
+# service still coupled to the root workspace's lockfile; forecast-api/
+# ingestion/waerehouse already made this same move earlier for the same
+# reason -- each restructured package is named `app`, which would collide
+# if more than one shared a workspace venv). Its lockfile now lives in
+# `services/data-pipeline/` and is synced from there, same shape every
+# sibling service's Dockerfile already uses.
 
 FROM python:3.12-slim AS base
 
@@ -19,21 +29,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=ghcr.io/astral-sh/uv:0.9.6 /uv /uvx /usr/local/bin/
 
-WORKDIR /app
+WORKDIR /app/services/data-pipeline
 
 # Dependency layer first (cheap to cache — only invalidated by lockfile/
 # pyproject changes, not by every source edit).
-COPY pyproject.toml uv.lock ./
-COPY services/data-pipeline/pyproject.toml services/data-pipeline/pyproject.toml
-RUN uv sync --package data-pipeline --no-dev --frozen --no-install-project
+COPY services/data-pipeline/pyproject.toml services/data-pipeline/uv.lock ./
+RUN uv sync --no-dev --frozen --no-install-project
 
 # Now the actual source, and the real sync (installs the data-pipeline
 # package itself — the `ecolens-pipeline` console script this image runs).
-COPY services/data-pipeline services/data-pipeline
-RUN uv sync --package data-pipeline --no-dev --frozen
+COPY services/data-pipeline .
+RUN uv sync --no-dev --frozen
 
-ENV PATH="/app/.venv/bin:$PATH"
-WORKDIR /app/services/data-pipeline
+ENV PATH="/app/services/data-pipeline/.venv/bin:$PATH"
 
 # `Settings.duckdb_staging_dir` (default `./data/staging`) resolves here —
 # `docker-compose.yml` mounts the shared `duckdb_staging` volume at this

@@ -618,3 +618,128 @@ export function pollBackfillSummary(
     cancelled = true;
   };
 }
+
+// ────────────────────────────────────────────────────────────────────
+// Failed jobs — GET /v1/ingestion/public/failed
+// ────────────────────────────────────────────────────────────────────
+
+/** Shape of data-pipeline's `FailedRunOut`. `error.message` is redacted
+ * server-side on the public route (`_redact_public_error_message` —
+ * strips anything that looks like a secret/credential out of the raw
+ * exception text), not something this client does. */
+export type FailedRun = {
+  run_id: string;
+  pipeline_id: string;
+  source_id: string;
+  status: RunStatus;
+  started_at: string;
+  finished_at: string | null;
+  duration_ms: number | null;
+  error: { code: string | null; message: string; http_status: number | null; retryable: boolean };
+  retry_count: number;
+  next_retry_at: string | null;
+  in_dlq: boolean;
+  can_retry_now: boolean;
+};
+
+export type FailedRunsList = {
+  meta: { total_failed_24h: number; total_failed_7d: number; as_of: string };
+  data: FailedRun[];
+  next_cursor: string | null;
+  has_more: boolean;
+};
+
+export async function fetchPublicFailedRuns(limit = 50): Promise<FailedRunsList> {
+  const res = await fetch(`${DATA_PIPELINE_API_URL}/ingestion/public/failed?limit=${limit}`);
+  if (!res.ok) {
+    throw new Error(`GET /v1/ingestion/public/failed failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Retry queue — GET /v1/ingestion/public/retry-queue
+// ────────────────────────────────────────────────────────────────────
+
+/** Shape of data-pipeline's `RetryQueueItem`. Backed by `status='sync_failed'`
+ * rows (fetched fine, but the warehouse-sync consumer failed to load
+ * them into Postgres) -- `backoff_strategy` is always `"manual"`, there
+ * is no automated retry scheduler anywhere in this codebase
+ * (`RetryQueueItem`'s own docstring, data-pipeline). */
+export type RetryQueueItem = {
+  queue_id: string;
+  run_id: string;
+  pipeline_id: string;
+  source_id: string;
+  queued_at: string;
+  next_retry_at: string | null;
+  retry_count: number;
+  max_retries: number | null;
+  last_error: { code: string | null; message: string; http_status: number | null; retryable: boolean };
+  backoff_strategy: "manual";
+  backoff_base_seconds: number | null;
+};
+
+export type RetryQueueList = {
+  meta: { queue_size: number; oldest_queued_at: string | null; as_of: string };
+  data: RetryQueueItem[];
+};
+
+export async function fetchPublicRetryQueue(limit = 50): Promise<RetryQueueList> {
+  const res = await fetch(`${DATA_PIPELINE_API_URL}/ingestion/public/retry-queue?limit=${limit}`);
+  if (!res.ok) {
+    throw new Error(`GET /v1/ingestion/public/retry-queue failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Scheduler status — GET /v1/ingestion/public/scheduler
+// ────────────────────────────────────────────────────────────────────
+
+/** Shape of data-pipeline's `SchedulerResponse`. `active_workers`/
+ * `total_workers` are always `1`/`1` -- runs execute in-process
+ * (FastAPI `BackgroundTasks` for API-triggered runs, the calling
+ * GitHub Actions runner itself for cron-triggered ones), there's no
+ * separate worker pool. `prefect_version`/`prefect_api_url` are always
+ * `null` -- the `prefect` container in the root `docker-compose.yml` is
+ * for the (unbuilt) Forecasting pipeline, not ingestion.
+ * (`SchedulerStatus`'s own docstring, data-pipeline.) */
+export type SchedulerStatusInfo = {
+  status: "healthy";
+  as_of: string;
+  active_workers: number;
+  total_workers: number;
+  queue_depth: number;
+  prefect_version: string | null;
+  prefect_api_url: string | null;
+};
+
+export type UpcomingRun = {
+  pipeline_id: string;
+  source_id: string | null;
+  scheduled_at: string;
+  trigger: "schedule";
+};
+
+export type RecentRunSummary = {
+  run_id: string;
+  pipeline_id: string;
+  status: RunStatus;
+  finished_at: string | null;
+  duration_ms: number | null;
+};
+
+export type SchedulerInfo = {
+  scheduler: SchedulerStatusInfo;
+  upcoming_runs: UpcomingRun[];
+  recent_runs: RecentRunSummary[];
+};
+
+export async function fetchPublicScheduler(): Promise<SchedulerInfo> {
+  const res = await fetch(`${DATA_PIPELINE_API_URL}/ingestion/public/scheduler`);
+  if (!res.ok) {
+    throw new Error(`GET /v1/ingestion/public/scheduler failed: ${res.status}`);
+  }
+  return res.json();
+}

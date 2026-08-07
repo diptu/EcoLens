@@ -12,6 +12,7 @@ external process (CLI, container `command:`) actually runs.
 from __future__ import annotations
 
 from app.db.rabbitmq import close_rabbitmq, consume_landed_events
+from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
 from app.service.pipeline.warehouse_sync import sync_landed_event
 
@@ -21,8 +22,19 @@ log = get_logger(__name__)
 async def run() -> None:
     """Run forever, syncing DuckDB-staged runs into Postgres `raw.*` as
     their RabbitMQ events arrive. Exits (and closes the connection) on
-    cancellation/interrupt."""
+    cancellation/interrupt.
+
+    A no-op (logs and returns immediately, opens no RabbitMQ connection)
+    once `Settings.warehouse_sync_consumer_enabled` is flipped off —
+    `services/waerehouse/TODO.md` Phase 4's cutover switch, letting an
+    operator retire this consumer via config once `services/waerehouse`'s
+    own is trusted, without deleting this module or the `warehouse-sync`
+    compose service outright.
+    """
     configure_logging()
+    if not get_settings().warehouse_sync_consumer_enabled:
+        log.info("warehouse_sync.consumer_disabled")
+        return
     log.info("warehouse_sync.consumer_starting")
     try:
         await consume_landed_events(sync_landed_event)

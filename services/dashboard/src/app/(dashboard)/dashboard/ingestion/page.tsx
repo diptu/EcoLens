@@ -13,11 +13,18 @@ import {
   triggerIngestionRun,
   pollLatestRun,
   fetchPublicRuns,
+  fetchPublicFailedRuns,
+  fetchPublicRetryQueue,
+  fetchPublicScheduler,
   formatPipeline,
   formatRelativeTime,
+  formatTimeUntil,
   TriggerIngestionError,
   type RunStatus,
   type PublicRun,
+  type FailedRun,
+  type RetryQueueItem,
+  type SchedulerInfo,
 } from "@/lib/ingestion";
 import { cn } from "@/lib/utils";
 
@@ -107,9 +114,81 @@ function useRecentRuns() {
   return { runs, error };
 }
 
+/** `GET /v1/ingestion/public/failed` — real, replaces the old "not
+ * wired up yet" stub. */
+function useFailedRuns() {
+  const [failed, setFailed] = useState<{ data: FailedRun[]; total_failed_24h: number } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchPublicFailedRuns(50)
+      .then((res) => {
+        if (!cancelled) setFailed({ data: res.data, total_failed_24h: res.meta.total_failed_24h });
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : "failed to load");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return { failed, error };
+}
+
+/** `GET /v1/ingestion/public/retry-queue` — real, replaces the old
+ * static prose-only tab. */
+function useRetryQueue() {
+  const [queue, setQueue] = useState<RetryQueueItem[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchPublicRetryQueue(50)
+      .then((res) => {
+        if (!cancelled) setQueue(res.data);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : "failed to load");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return { queue, error };
+}
+
+/** `GET /v1/ingestion/public/scheduler` — real, replaces the old
+ * static cron-file mockup. */
+function useScheduler() {
+  const [scheduler, setScheduler] = useState<SchedulerInfo | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchPublicScheduler()
+      .then((res) => {
+        if (!cancelled) setScheduler(res);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : "failed to load");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return { scheduler, error };
+}
+
 export default function DataIngestionPage() {
   const { rows, run, runAll } = usePipelineRuns();
   const { runs, error: runsError } = useRecentRuns();
+  const { failed, error: failedError } = useFailedRuns();
+  const { queue, error: queueError } = useRetryQueue();
+  const { scheduler, error: schedulerError } = useScheduler();
 
   return (
     <SectionPage
@@ -127,11 +206,8 @@ export default function DataIngestionPage() {
       defaultTab="pipelines"
       kpis={[
         { label: "Pipelines",    value: String(PIPELINE_CATALOG.length) },
-        { label: "Running",      value: "1"  },
-        { label: "Failed (24h)", value: "3"  },
-        { label: "Records (24h)", value: "12.3M" },
-        { label: "Avg duration", value: "5.2s" },
-        { label: "Success rate", value: "97.8%" },
+        { label: "Failed (24h)", value: failed ? String(failed.total_failed_24h) : "…" },
+        { label: "Retry Queue",  value: queue ? String(queue.length) : "…" },
       ]}
       panels={{
         pipelines: (
@@ -263,32 +339,153 @@ export default function DataIngestionPage() {
         failed: (
           <Card>
             <h2 className="mb-3 text-base font-semibold text-white">Failed Jobs</h2>
-            <p className="text-sm text-white/50">
-              Use the Pipelines tab to trigger a run and see its outcome, or the Runs tab for
-              recent history — a dedicated failed-jobs view isn&apos;t wired up on this page yet.
-            </p>
+            {failedError ? (
+              <p className="py-6 text-center text-sm text-white/40">Couldn&apos;t load failed jobs ({failedError}).</p>
+            ) : failed === null ? (
+              <p className="py-6 text-center text-sm text-white/40">Loading…</p>
+            ) : failed.data.length === 0 ? (
+              <p className="text-sm text-white/55">No failed runs in the queried window.</p>
+            ) : (
+              <table className="w-full text-left text-sm">
+                <thead className="border-b border-white/5 text-[11px] uppercase tracking-wide text-white/40">
+                  <tr>
+                    <th className="py-2">Run ID</th>
+                    <th className="py-2">Pipeline</th>
+                    <th className="py-2">Started</th>
+                    <th className="py-2">Error</th>
+                    <th className="py-2">Retries</th>
+                    <th className="py-2">In DLQ</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {failed.data.map((r) => (
+                    <tr key={r.run_id} className="text-white/85">
+                      <td className="py-2 font-mono text-[11px] text-white/60">{r.run_id.slice(0, 8)}</td>
+                      <td className="py-2">{formatPipeline(r.pipeline_id)}</td>
+                      <td className="py-2 text-white/60">{formatRelativeTime(r.started_at)}</td>
+                      <td className="py-2 text-white/60 text-[11px]" title={r.error.message}>
+                        {r.error.code ?? r.error.message.slice(0, 40)}
+                      </td>
+                      <td className="py-2 text-white/60 tabular-nums">{r.retry_count}</td>
+                      <td className="py-2">
+                        {r.in_dlq ? (
+                          <span className="rounded-md border border-rose-300/40 bg-rose-300/10 px-2 py-0.5 text-[11px] font-medium text-rose-200">yes</span>
+                        ) : (
+                          <span className="text-white/40">no</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
           </Card>
         ),
         retry: (
           <Card>
             <h2 className="mb-3 text-base font-semibold text-white">Retry Queue</h2>
-            <p className="text-sm text-white/70">Exponential backoff (1m, 5m, 15m, 1h, 6h). After 5 attempts the job moves to Manual Triage.</p>
+            <p className="mb-3 text-xs text-white/50">
+              Backed by <code className="rounded bg-black/30 px-1 py-0.5 font-mono text-emerald-100">status=&apos;sync_failed&apos;</code> runs
+              — fetched fine, but the warehouse-sync consumer failed to load them into Postgres. There is no
+              automated backoff/retry scheduler; a run sits here until an operator intervenes.
+            </p>
+            {queueError ? (
+              <p className="py-6 text-center text-sm text-white/40">Couldn&apos;t load the retry queue ({queueError}).</p>
+            ) : queue === null ? (
+              <p className="py-6 text-center text-sm text-white/40">Loading…</p>
+            ) : queue.length === 0 ? (
+              <p className="text-sm text-white/55">Retry queue is empty.</p>
+            ) : (
+              <table className="w-full text-left text-sm">
+                <thead className="border-b border-white/5 text-[11px] uppercase tracking-wide text-white/40">
+                  <tr>
+                    <th className="py-2">Run ID</th>
+                    <th className="py-2">Pipeline</th>
+                    <th className="py-2">Queued</th>
+                    <th className="py-2">Last Error</th>
+                    <th className="py-2">Retries</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {queue.map((q) => (
+                    <tr key={q.queue_id} className="text-white/85">
+                      <td className="py-2 font-mono text-[11px] text-white/60">{q.run_id.slice(0, 8)}</td>
+                      <td className="py-2">{formatPipeline(q.pipeline_id)}</td>
+                      <td className="py-2 text-white/60">{formatRelativeTime(q.queued_at)}</td>
+                      <td className="py-2 text-white/60 text-[11px]" title={q.last_error.message}>
+                        {q.last_error.code ?? q.last_error.message.slice(0, 40)}
+                      </td>
+                      <td className="py-2 text-white/60 tabular-nums">{q.retry_count}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
           </Card>
         ),
         scheduler: (
           <Card>
-            <h2 className="mb-3 text-base font-semibold text-white">Cron Scheduler</h2>
-            <p className="text-sm text-white/70">Schedules use the system crontab (no Airflow / Prefect dependency). All times are in <code className="rounded bg-black/30 px-1 py-0.5 font-mono text-emerald-100">Australia/Sydney</code> timezone.</p>
-            <pre className="mt-3 rounded-md border border-white/5 bg-black/30 p-3 text-[11px] text-emerald-100 font-mono overflow-x-auto">
-{`# /etc/cron.d/ecolens
-*/5 * * * *  ecolens  /opt/ecolens/run-pipeline.sh aemo_nem
-*/15 * * * * ecolens  /opt/ecolens/run-pipeline.sh bom
-0 */1 * * *  ecolens  /opt/ecolens/run-pipeline.sh carbon_intensity
-0 2 * * *    ecolens  /opt/ecolens/dbt-run.sh --select tag:nightly`}
-            </pre>
+            <h2 className="mb-3 text-base font-semibold text-white">Scheduler Status</h2>
+            {schedulerError ? (
+              <p className="py-6 text-center text-sm text-white/40">Couldn&apos;t load scheduler status ({schedulerError}).</p>
+            ) : scheduler === null ? (
+              <p className="py-6 text-center text-sm text-white/40">Loading…</p>
+            ) : (
+              <div className="space-y-4">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                  <Field label="Status" value={scheduler.scheduler.status} />
+                  <Field label="Workers" value={`${scheduler.scheduler.active_workers}/${scheduler.scheduler.total_workers}`} />
+                  <Field label="Queue Depth" value={String(scheduler.scheduler.queue_depth)} />
+                </div>
+                <p className="text-[11px] text-white/40">
+                  Runs execute in-process (FastAPI background tasks for API-triggered runs, the calling
+                  GitHub Actions runner for cron-triggered ones) — no separate worker pool or Airflow/Prefect
+                  dependency behind this.
+                </p>
+                <div>
+                  <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-white/60">Upcoming Runs</h3>
+                  {scheduler.upcoming_runs.length === 0 ? (
+                    <p className="text-sm text-white/55">Nothing scheduled.</p>
+                  ) : (
+                    <ul className="space-y-1.5 text-sm">
+                      {scheduler.upcoming_runs.map((u, i) => (
+                        <li key={`${u.pipeline_id}-${i}`} className="flex items-center justify-between rounded-md border border-white/5 bg-white/[0.02] p-2.5">
+                          <span className="text-white/85">{formatPipeline(u.pipeline_id)}</span>
+                          <span className="text-[11px] text-white/50">{formatTimeUntil(u.scheduled_at)}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+                <div>
+                  <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-white/60">Recent Runs</h3>
+                  {scheduler.recent_runs.length === 0 ? (
+                    <p className="text-sm text-white/55">No recent runs.</p>
+                  ) : (
+                    <ul className="space-y-1.5 text-sm">
+                      {scheduler.recent_runs.map((r) => (
+                        <li key={r.run_id} className="flex items-center justify-between rounded-md border border-white/5 bg-white/[0.02] p-2.5">
+                          <span className="text-white/85">{formatPipeline(r.pipeline_id)}</span>
+                          <span className={cn("rounded-md border px-2 py-0.5 text-[11px] font-medium", STATE_TONE[r.status])}>{r.status}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </div>
+            )}
           </Card>
         ),
       }}
     />
+  );
+}
+
+function Field({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded border border-white/5 bg-white/[0.02] px-2.5 py-1.5">
+      <div className="text-[9px] font-semibold uppercase tracking-wider text-white/40">{label}</div>
+      <div className="mt-0.5 font-mono text-white/85">{value}</div>
+    </div>
   );
 }

@@ -59,3 +59,12 @@ def test_latest_ingest_ts_records_a_timestamp():
         "ecolens_latest_ingest_timestamp_seconds", {"source": "bom"}
     )
     assert value == 1_700_000_000
+
+
+def test_build_info_identifies_this_service():
+    from app import __version__
+
+    value = metrics.REGISTRY.get_sample_value(
+        "ecolens_build_info", {"service": "data-pipeline", "version": __version__}
+    )
+    assert value == 1

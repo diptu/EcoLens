@@ -1,14 +1,17 @@
 """`ecolens-warehouse` console-script entrypoint.
 
 Click group: `consume`, `prune`, `export-and-prune`, `vacuum`,
-`check-size`, `health`, `serve`. `consume` is the long-running RabbitMQ
-consumer (`docker-compose.yml`'s `warehouse-consumer` service /
-`docker exec`); `prune`/`export-and-prune`/`vacuum`/`check-size` are
-one-shot, manually/cron-triggered retention operations (README Phase
-3's own "pg_cron or Celery Task" framing — this service doesn't
-schedule itself, an operator/cron calls in), same conservative default
-`services/ingestion`'s own `prune-staging`/`train-anomaly-model`
-commands use.
+`check-size`, `check-mart-history`, `dbt`, `health`, `serve`. `consume` is
+the long-running RabbitMQ consumer (`docker-compose.yml`'s
+`warehouse-consumer` service / `docker exec`); `prune`/`export-and-prune`/
+`vacuum`/`check-size`/`check-mart-history` are one-shot, manually/
+cron-triggered retention operations (README Phase 3's own "pg_cron or
+Celery Task" framing — this service doesn't schedule itself, an
+operator/cron calls in), same conservative default `services/ingestion`'s
+own `prune-staging`/`train-anomaly-model` commands use. `check-size`/
+`check-mart-history` are wired into `.github/workflows/warehouse-
+monitor.yml`'s scheduled run — both read-only; `prune`/`export-and-prune`
+deliberately aren't (see that workflow's own header comment).
 """
 
 from __future__ import annotations
@@ -41,15 +44,17 @@ def consume() -> None:
     `raw.*` (`consumers.landed_events.sync_landed_event`). Equivalent
     role to `data-pipeline`'s `ecolens-pipeline worker`, for this
     service's own narrower scope (sync only, no ML/dbt-trigger
-    consumption)."""
+    consumption). Exits cleanly on SIGTERM as well as Ctrl+C -- see
+    `db.rabbitmq.run_consumer_forever`'s own docstring."""
     from app.consumers.landed_events import sync_landed_event
-    from app.db.rabbitmq import consume_landed_events
+    from app.db.rabbitmq import run_consumer_forever
 
     click.echo("warehouse consumer starting -- Ctrl+C to stop")
     try:
-        asyncio.run(consume_landed_events(sync_landed_event))
+        asyncio.run(run_consumer_forever(sync_landed_event))
     except KeyboardInterrupt:
-        click.echo("warehouse consumer stopped")
+        pass
+    click.echo("warehouse consumer stopped")
 
 
 # ── retention ────────────────────────────────────────────────────────────
@@ -116,6 +121,27 @@ def check_size() -> None:
         f"({report.pct_used * 100:.1f}%) -- {report.severity}"
     )
     if report.severity != "ok":
+        raise SystemExit(1)
+
+
+@main.command("check-mart-history")
+def check_mart_history() -> None:
+    """Report each time-series mart's earliest row (`min(ts)`/`min(hour)`)
+    against `meta.mart_floor_checks`' last-recorded value for it -- exits
+    nonzero (same shape `check-size` uses) if any mart's floor moved
+    forward since the last check, meaning it silently lost history
+    (`TODO.md` Phase 1's deferred follow-up; `retention.mart_floor_
+    monitor`'s own docstring explains why this compares against Postgres
+    rather than Prometheus)."""
+    from app.retention.mart_floor_monitor import check_mart_floors
+
+    floors = asyncio.run(check_mart_floors())
+    any_regressed = False
+    for floor in floors:
+        marker = " -- REGRESSED (lost history)" if floor.regressed else ""
+        click.echo(f"{floor.mart}: {floor.min_ts or '(empty)'}{marker}")
+        any_regressed = any_regressed or floor.regressed
+    if any_regressed:
         raise SystemExit(1)
 
 

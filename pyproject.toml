@@ -8,7 +8,6 @@ authors = [
     { name = "Nazmul Alam", email = "diptunazmulalam@gmail.com" }
 ]
 dependencies = [
-    "data-pipeline",
     "fastapi[standard]>=0.139.2",
     "gunicorn>=26.0.0",
     "pre-commit>=4.6.0",
@@ -16,9 +15,6 @@ dependencies = [
     "pytest-cov>=7.1.0",
     "uvicorn>=0.51.0",
 ]
-
-[tool.uv.sources]
-data-pipeline = { workspace = true }
 
 
 [dependency-groups]
@@ -31,38 +27,26 @@ dev = [
 ]
 
 [tool.mypy]
-# Set the base for each service
+# Root-level dev tooling only now -- every business service (data-pipeline
+# included, TODO.md's "microservice independence" pass) has its own venv
+# + local [tool.mypy] config and is linted/type-checked via `uv run
+# --directory services/<name> mypy app`, not from here (no `mypy_path`
+# pointing into `services/` anymore -- there used to be one, for
+# data-pipeline, back when it was this workspace's only member).
 python_version = "3.12"
 namespace_packages = true
 explicit_package_bases = true
-# Mypy will now look for packages relative to these directories.
-# forecast-api has its own venv + local [tool.mypy] config now (like
-# IAM), so it's deliberately not listed here.
-mypy_path = [
-    "services/data-pipeline"
-]
-
-# Tell Mypy to ignore the top-level directory and focus on src/
-[[tool.mypy.overrides]]
-module = "tests.*"
-ignore_missing_imports = true
-
-# No type stubs published for these — safe to ignore rather than pull in
-# pandas-stubs / aioboto3-stubs for a service still in early scaffolding.
-[[tool.mypy.overrides]]
-module = ["aioboto3.*", "pandas.*", "openelectricity.*", "sklearn.*", "croniter.*", "joblib.*", "timesfm.*", "scipy.*"]
-ignore_missing_imports = true
 
 [tool.uv.workspace]
-# forecast-api deliberately isn't a member anymore -- it now uses its own
-# independent venv/lockfile (like IAM), since both it and data-pipeline's
-# restructured packages are named `app`, which would collide if both were
-# installed into one shared workspace venv. `services/ingestion` is the
-# same story (`services/ingestion/TODO.md` Phase 0's own scaffolding
-# decision -- it's meant to be independently deployable, and its package
-# is also named `app`) -- removed here after `uv init` auto-added it on
-# creation; it has its own `pyproject.toml`/`uv.lock` under `services/
-# ingestion/` instead, synced via `uv sync --directory services/ingestion`.
-members = [
-    "services/data-pipeline",
-]
+# Empty on purpose: every business service (data-pipeline, forecast-api,
+# ingestion, waerehouse) is now its own independent `uv` project (own
+# venv/lockfile, own `pyproject.toml`), not a member of this root
+# workspace -- `TODO.md`'s "microservice independence" pass, completing
+# what forecast-api/ingestion/waerehouse already established for
+# themselves. Each restructured service's package is named `app`, which
+# is exactly why they can't share one workspace venv -- `uv sync
+# --directory services/<name>` (or that service's own Dockerfile) syncs
+# each one independently. This section is kept (rather than deleted) so
+# a future root-level dev-tooling package has an obvious place to
+# register, not because anything currently belongs here.
+members = []

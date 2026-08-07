@@ -231,6 +231,27 @@ class TestIssuesEndpoint:
         assert response.json()["meta"]["filtered"] == 0
 
 
+class TestIssuesPublicEndpoint:
+    def test_does_not_require_auth(self, client, wired):
+        response = client.get("/v1/data-quality/public/issues")
+
+        assert response.status_code == 200
+
+    def test_agrees_with_authenticated_endpoint(self, client, wired):
+        session, _ = wired
+        session.run_rows = [_run_row(status="failed")]
+
+        authed = client.get("/v1/data-quality/issues", headers=_auth()).json()
+        public = client.get("/v1/data-quality/public/issues").json()
+
+        assert public == authed
+
+    def test_unknown_source_id_is_404(self, client, wired):
+        response = client.get("/v1/data-quality/public/issues?source_id=ds-nonexistent")
+
+        assert response.status_code == 404
+
+
 class TestOutliersEndpoint:
     def test_unknown_source_id_is_404(self, client, wired):
         response = client.get(
@@ -264,6 +285,45 @@ class TestOutliersEndpoint:
         assert body["data"][0]["source_id"] == "ds-bom"
 
 
+class TestOutliersPublicEndpoint:
+    def test_does_not_require_auth(self, client, wired):
+        response = client.get("/v1/data-quality/public/outliers")
+
+        assert response.status_code == 200
+
+    def test_agrees_with_authenticated_endpoint(self, client, wired):
+        session, _ = wired
+        session.outlier_rows = [
+            {
+                "id": "a1",
+                "run_id": "r1",
+                "source": "bom",
+                "metric": "temp_c",
+                "value": 90.0,
+                "z_score": 4.2,
+                "expected_low": -10.0,
+                "expected_high": 55.0,
+                "detected_at": NOW,
+                "row_snapshot": {"region": "NSW1"},
+            }
+        ]
+
+        authed = client.get("/v1/data-quality/outliers", headers=_auth()).json()
+        public = client.get("/v1/data-quality/public/outliers").json()
+
+        # `meta.as_of` is computed fresh per-call (not cached, unlike
+        # issues/schema) -- two independent requests get genuinely
+        # different timestamps, so only `data` is meaningfully
+        # comparable for equality here.
+        assert public["data"] == authed["data"]
+        assert public["meta"]["total"] == authed["meta"]["total"]
+
+    def test_unknown_source_id_is_404(self, client, wired):
+        response = client.get("/v1/data-quality/public/outliers?source_id=ds-nonexistent")
+
+        assert response.status_code == 404
+
+
 class TestSchemaEndpoint:
     def test_returns_schema_report_shape(self, client, wired):
         response = client.get("/v1/data-quality/schema", headers=_auth("analyst"))
@@ -272,6 +332,19 @@ class TestSchemaEndpoint:
         body = response.json()
         assert "drifts" in body
         assert "summary" in body
+
+
+class TestSchemaPublicEndpoint:
+    def test_does_not_require_auth(self, client, wired):
+        response = client.get("/v1/data-quality/public/schema")
+
+        assert response.status_code == 200
+
+    def test_agrees_with_authenticated_endpoint(self, client, wired):
+        authed = client.get("/v1/data-quality/schema", headers=_auth("analyst")).json()
+        public = client.get("/v1/data-quality/public/schema").json()
+
+        assert public == authed
 
 
 class TestRecheckEndpoint:

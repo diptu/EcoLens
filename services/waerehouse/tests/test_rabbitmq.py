@@ -1,4 +1,8 @@
+import asyncio
 import json
+import os
+import signal
+import sys
 
 import pytest
 
@@ -212,3 +216,101 @@ async def test_close_rabbitmq_closes_and_clears_the_cached_connection():
 
 async def test_close_rabbitmq_is_a_noop_when_nothing_is_connected():
     await rabbitmq_client.close_rabbitmq()  # should not raise
+
+
+# ── run_consumer_forever (graceful SIGTERM shutdown) ────────────────────
+
+
+async def test_run_consumer_forever_closes_the_connection_on_normal_completion(
+    monkeypatch,
+):
+    """No signal involved -- the queue just runs out of messages (as the
+    fakes above always do) and `consume_landed_events` returns on its
+    own. `run_consumer_forever` must still close the connection, same as
+    the SIGTERM path below."""
+    connection = _wire(monkeypatch, [_FakeMessage(json.dumps({"source": "bom"}).encode())])
+    # `close_rabbitmq()` (called by `run_consumer_forever`'s own `finally`)
+    # closes the module-level cached `_connection`, not just whatever
+    # `get_rabbitmq_connection` happens to return -- `_wire`'s fake
+    # doesn't populate that cache (existing `consume_landed_events`-only
+    # tests never call `close_rabbitmq`, so never needed to); set it
+    # explicitly here, same as `test_close_rabbitmq_closes_and_clears_
+    # the_cached_connection` already does.
+    rabbitmq_client._connection = connection
+
+    async def handler(payload):
+        pass
+
+    await rabbitmq_client.run_consumer_forever(handler)
+
+    assert connection.is_closed is True
+
+
+class _FakeHangingQueueIterator:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+    def __aiter__(self):
+        return self._gen()
+
+    async def _gen(self):
+        await asyncio.Event().wait()
+        yield  # pragma: no cover -- unreachable; makes this a real async generator
+
+
+class _FakeHangingQueue:
+    def iterator(self):
+        return _FakeHangingQueueIterator()
+
+    async def bind(self, exchange):
+        pass
+
+
+class _FakeHangingChannel(_FakeChannel):
+    """Like `_FakeChannel`, except the main landing queue never yields a
+    message and never finishes -- `consume_landed_events`'s `async for`
+    blocks forever on it, same as the real thing does between messages,
+    so cancelling it is the only way it ever returns."""
+
+    async def declare_queue(self, name, durable=True):
+        self.declared_queues.append(name)
+        if name == rabbitmq_client.get_settings().rabbitmq_landing_queue:
+            return _FakeHangingQueue()
+        return _FakeQueue(name, [])
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="loop.add_signal_handler isn't implemented on Windows' asyncio "
+    "event loop -- run_consumer_forever falls back to a no-op there by "
+    "design (see its own docstring); every real deployment is Linux.",
+)
+async def test_run_consumer_forever_exits_cleanly_on_sigterm(monkeypatch):
+    """The real integration case: a genuine SIGTERM sent to this process
+    (what `docker stop` sends) while the consumer is blocked waiting on
+    the queue must cancel the consume loop and close the connection,
+    instead of hanging until something more forceful (SIGKILL) ends it.
+    """
+    connection = _FakeConnection()
+    connection.channel_obj = _FakeHangingChannel()
+
+    async def fake_get_connection():
+        return connection
+
+    monkeypatch.setattr(rabbitmq_client, "get_rabbitmq_connection", fake_get_connection)
+    rabbitmq_client._connection = connection  # see the sibling test's own note on why
+
+    async def _send_sigterm_shortly():
+        await asyncio.sleep(0.05)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    sender = asyncio.ensure_future(_send_sigterm_shortly())
+    await asyncio.wait_for(
+        rabbitmq_client.run_consumer_forever(lambda payload: None), timeout=5
+    )
+    await sender
+
+    assert connection.is_closed is True

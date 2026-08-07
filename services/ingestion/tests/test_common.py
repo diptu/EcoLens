@@ -3,10 +3,20 @@ from contextlib import asynccontextmanager
 import pandas as pd
 import pytest
 
+from app.core.metrics import REGISTRY
 from app.service.pipeline.circuit_breaker import CircuitState
 from app.service.pipeline.tasks import _common
 
 pytestmark = pytest.mark.anyio
+
+
+def _ingest_runs_total(source: str, outcome: str) -> float:
+    return (
+        REGISTRY.get_sample_value(
+            "ecolens_ingest_runs_total", {"source": source, "outcome": outcome}
+        )
+        or 0.0
+    )
 
 
 @pytest.fixture
@@ -172,6 +182,58 @@ async def test_fetch_failure_logs_failed_and_reraises(monkeypatch, executed_log)
         await fetch()
 
     assert _statuses(executed_log) == ["failed"]
+
+
+async def test_non_empty_fetch_increments_ingest_runs_total_success(
+    monkeypatch, executed_log
+):
+    # Distinct source per test -- REGISTRY is process-wide/cumulative, so
+    # a real source label shared with other tests would make the exact
+    # count assertion below order-dependent (same reasoning as
+    # test_metrics.py's own histogram test).
+    monkeypatch.setattr(
+        _common, "stage_dataframe", lambda df, table, run_id: ("/fake/x.duckdb", 3)
+    )
+    monkeypatch.setattr(_common, "publish_landed_event", _async_noop)
+    before = _ingest_runs_total("ingest_runs_total_test_nonempty", "success")
+
+    @_common.standard_run("ingest_runs_total_test_nonempty", "bom_observations")
+    async def fetch(**kwargs):
+        return pd.DataFrame({"temp_c": [20, 21, 22]})
+
+    await fetch()
+
+    assert _ingest_runs_total("ingest_runs_total_test_nonempty", "success") == before + 1
+
+
+async def test_empty_fetch_increments_ingest_runs_total_success(
+    monkeypatch, executed_log
+):
+    monkeypatch.setattr(_common, "stage_dataframe", lambda df, table, run_id: ("", 0))
+    before = _ingest_runs_total("ingest_runs_total_test_empty", "success")
+
+    @_common.standard_run("ingest_runs_total_test_empty", "bom_observations")
+    async def fetch(**kwargs):
+        return pd.DataFrame()
+
+    await fetch()
+
+    assert _ingest_runs_total("ingest_runs_total_test_empty", "success") == before + 1
+
+
+async def test_fetch_failure_increments_ingest_runs_total_failure(
+    monkeypatch, executed_log
+):
+    before = _ingest_runs_total("ingest_runs_total_test_failure", "failure")
+
+    @_common.standard_run("ingest_runs_total_test_failure", "bom_observations")
+    async def fetch(**kwargs):
+        raise RuntimeError("upstream down")
+
+    with pytest.raises(RuntimeError):
+        await fetch()
+
+    assert _ingest_runs_total("ingest_runs_total_test_failure", "failure") == before + 1
 
 
 async def test_anomalies_are_recorded_when_detected(monkeypatch, executed_log):

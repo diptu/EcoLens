@@ -1,10 +1,15 @@
+from unittest.mock import AsyncMock
+
+import duckdb
 import pandas as pd
 import pytest
 
 from app.core.config import get_settings
+from app.service import object_storage
 from app.service.pipeline.duckdb_staging import (
     delete_staged,
     read_staged,
+    read_staged_with_fallback,
     stage_dataframe,
 )
 
@@ -140,3 +145,102 @@ class TestSharedFileShape:
         assert os.path.exists(path)
         remaining = read_staged(path, "bom_observations", "run-2")
         assert remaining["a"].tolist() == [2]
+
+
+class TestReadStagedWithFallback:
+    """The cross-machine case: `services/ingestion` ran on a different
+    host than this consumer, so the `duckdb_staging` Docker volume they'd
+    otherwise share isn't actually shared -- `path` doesn't exist
+    locally, but ingestion's producer always uploads the same run to
+    object storage too and publishes its key/bucket alongside
+    `duckdb_path`."""
+
+    def _patch_download(self, monkeypatch, body: bytes):
+        download = AsyncMock(return_value=body)
+        monkeypatch.setattr(object_storage, "download_bytes", download)
+        return download
+
+    def _snapshot_bytes(self, rows: list[dict]) -> bytes:
+        # Same shape `services/ingestion`'s `_export_run_snapshot`
+        # uploads: a fixed `landed` table, just this run's rows, no
+        # `_ingest_run_id` column.
+        import tempfile
+        from pathlib import Path
+
+        tmp = Path(tempfile.gettempdir()) / "test-snapshot-source.duckdb"
+        tmp.unlink(missing_ok=True)
+        con = duckdb.connect(str(tmp))
+        try:
+            df = pd.DataFrame(rows)
+            con.register("df_view", df)
+            con.execute("CREATE TABLE landed AS SELECT * FROM df_view")
+        finally:
+            con.close()
+        body = tmp.read_bytes()
+        tmp.unlink(missing_ok=True)
+        return body
+
+    async def test_reads_locally_without_touching_object_storage_when_the_file_exists(
+        self, monkeypatch
+    ):
+        df = pd.DataFrame({"a": [1, 2]})
+        path, _ = stage_dataframe(df, "bom_observations", "run-local")
+        download = self._patch_download(monkeypatch, b"")
+
+        result = await read_staged_with_fallback(
+            path, "bom_observations", "run-local", "some/key.duckdb", "some-bucket"
+        )
+
+        assert result["a"].tolist() == [1, 2]
+        download.assert_not_called()
+
+    async def test_downloads_and_reads_the_snapshot_when_the_local_file_is_missing(
+        self, monkeypatch
+    ):
+        body = self._snapshot_bytes([{"a": 10}, {"a": 20}])
+        download = self._patch_download(monkeypatch, body)
+
+        result = await read_staged_with_fallback(
+            "/nonexistent/path/does-not-exist.duckdb",
+            "bom_observations",
+            "run-remote",
+            "staging/bom_observations-run-remote.duckdb",
+            "ecolense",
+        )
+
+        assert result["a"].tolist() == [10, 20]
+        download.assert_awaited_once_with(
+            "staging/bom_observations-run-remote.duckdb", bucket="ecolense"
+        )
+
+    async def test_cleans_up_the_downloaded_temp_file_afterward(self, monkeypatch):
+        import tempfile
+        from pathlib import Path
+
+        body = self._snapshot_bytes([{"a": 1}])
+        self._patch_download(monkeypatch, body)
+
+        await read_staged_with_fallback(
+            "/nonexistent/does-not-exist.duckdb",
+            "bom_observations",
+            "run-cleanup",
+            "some/key.duckdb",
+            "bucket",
+        )
+
+        tmp_path = Path(tempfile.gettempdir()) / "remote-bom_observations-run-cleanup.duckdb"
+        assert not tmp_path.exists()
+
+    async def test_falls_through_to_read_staged_when_no_object_storage_key(self):
+        # This service's own legacy producer never populates
+        # object_storage_key/_bucket -- a missing local file with no
+        # fallback available should raise the same real error
+        # `read_staged` always would, not something invented here.
+        with pytest.raises(Exception):
+            await read_staged_with_fallback(
+                "/nonexistent/does-not-exist.duckdb",
+                "bom_observations",
+                "run-x",
+                None,
+                None,
+            )

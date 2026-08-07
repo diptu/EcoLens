@@ -19,7 +19,21 @@ from prometheus_client import (
     generate_latest,
 )
 
+from app import __version__
+
 REGISTRY = CollectorRegistry()
+
+# Standard Prometheus "info metric" pattern -- see data-pipeline's
+# identical `build_info` for the full reasoning (services/observility's
+# Observability Contract, why this beats a hardcoded scrape-config
+# label).
+build_info = Gauge(
+    "ecolens_build_info",
+    "Always 1 -- service identity via labels.",
+    ["service", "version"],
+    registry=REGISTRY,
+)
+build_info.labels(service="warehouse", version=__version__).set(1)
 
 consume_duration_seconds = Histogram(
     "ecolens_warehouse_consume_duration_seconds",
@@ -78,6 +92,20 @@ coldstorage_export_rows_total = Counter(
     "ecolens_warehouse_coldstorage_export_rows_total",
     "Rows exported to R2 cold storage before pruning, by table.",
     ["table"],
+    registry=REGISTRY,
+)
+mart_min_ts_seconds = Gauge(
+    "ecolens_warehouse_mart_min_ts_seconds",
+    "Earliest ts/hour (unix epoch seconds) currently in a time-series "
+    "mart, by mart name, as of the last time retention.mart_floor_"
+    "monitor.check_mart_floors ran *in this process*. Visibility only "
+    "(dashboards/manual `curl /metrics` after an operator runs the CLI) "
+    "-- the actual alert on a regressed floor is that function's own "
+    "`regressed` flag / the CLI's nonzero exit code, compared against "
+    "meta.mart_floor_checks in Postgres, not this gauge; see that "
+    "module's docstring for why a scheduled CI job can't rely on a "
+    "gauge it sets in its own short-lived process reaching Prometheus.",
+    ["mart"],
     registry=REGISTRY,
 )
 

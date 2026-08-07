@@ -51,6 +51,9 @@ from app.schemas.emissions import (
     EmissionsResponse,
     EmissionsTimeseriesPoint,
     EmissionsTimeseriesResponse,
+    EmissionsTraceFuelBreakdown,
+    EmissionsTraceInterval,
+    EmissionsTraceResponse,
     EmissionsYtdResponse,
 )
 from app.core.config import Settings
@@ -58,6 +61,7 @@ from app.service.ml.data import (
     IntensityMethod,
     load_current_intensity,
     load_emissions_timeseries,
+    load_emissions_trace,
     load_latest_intensity,
     load_ytd_intensity,
     resolve_intensity_method,
@@ -410,5 +414,85 @@ async def get_emissions_forecast(
     )
     await redis.set(
         cache_key, response.model_dump_json(), ex=settings.forecast_cache_ttl_seconds
+    )
+    return response
+
+
+@router.get("/emissions/trace", response_model=EmissionsTraceResponse)
+async def get_emissions_trace(
+    region: str,
+    limit: int = Query(default=5, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis_client),
+    settings: Settings = Depends(get_app_settings),
+) -> EmissionsTraceResponse:
+    """Real per-interval calculation trace for `region` -- the Carbon
+    Methodology page's "show me the real numbers" feature. Every value
+    returned is read straight from `raw_marts.fct_carbon_intensity`/
+    `fct_generation_mix`, not recomputed or approximated here -- see
+    `load_emissions_trace`'s own docstring for the two-query shape and
+    `EmissionsTraceResponse`'s docstring for why the aggregate and
+    per-fuel numbers are guaranteed to already agree (same warehouse
+    tables, no independent re-derivation)."""
+    cache_key = f"emissions:trace:v1:{region}:{limit}"
+    cached = await redis.get(cache_key)
+    if cached is not None:
+        return EmissionsTraceResponse.model_validate_json(cached)
+
+    intensity_rows, mix_rows_by_hour = await load_emissions_trace(db, region, limit)
+    if not intensity_rows:
+        raise ApiError(
+            404,
+            "not_found",
+            f"No carbon-intensity data available for region '{region}'",
+        )
+
+    intervals = []
+    for row in intensity_rows:
+        hour = row["hour"] if row["hour"].tzinfo else row["hour"].replace(tzinfo=UTC)
+        by_fuel = [
+            EmissionsTraceFuelBreakdown(
+                fuel_type=mix_row["fuel_type"],
+                generation_mwh=float(mix_row["total_generation_mwh"] or 0),
+                emissions_kgco2e=float(mix_row["total_emissions_kgco2e"] or 0),
+                effective_factor_kgco2e_per_mwh=(
+                    float(mix_row["total_emissions_kgco2e"])
+                    / float(mix_row["total_generation_mwh"])
+                    if mix_row["total_generation_mwh"]
+                    else None
+                ),
+            )
+            for mix_row in mix_rows_by_hour.get(row["hour"], [])
+        ]
+        intervals.append(
+            EmissionsTraceInterval(
+                hour=hour,
+                total_generation_mwh=(
+                    float(row["total_generation_mwh"])
+                    if row["total_generation_mwh"] is not None
+                    else None
+                ),
+                total_emissions_kgco2e=(
+                    float(row["total_emissions_kgco2e"])
+                    if row["total_emissions_kgco2e"] is not None
+                    else None
+                ),
+                intensity_kgco2e_per_mwh=(
+                    float(row["intensity_kgco2e_per_mwh"])
+                    if row["intensity_kgco2e_per_mwh"] is not None
+                    else None
+                ),
+                factors_version=row["factors_version"],
+                by_fuel=by_fuel,
+            )
+        )
+
+    response = EmissionsTraceResponse(
+        region=region,
+        generated_at=datetime.now(UTC),
+        intervals=intervals,
+    )
+    await redis.set(
+        cache_key, response.model_dump_json(), ex=settings.emissions_cache_ttl_seconds
     )
     return response

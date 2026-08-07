@@ -3,10 +3,7 @@
 The ingest domain only — the subset of data-pipeline's `core/metrics.py`
 that `pipeline.tasks._common.standard_run` actually populates (dbt/ML/
 forecast metrics don't apply, this service doesn't touch any of that).
-A `/metrics` endpoint exposing this registry is still Phase 3's job
-("Publish Prometheus Metrics") — these objects exist now because
-`standard_run` (Phase 1's "Port Resiliency & Anomaly Logic") writes to
-them, not because they're served anywhere yet.
+Served at `GET /metrics` (`api/v1/health/routes.py`).
 """
 
 from __future__ import annotations
@@ -19,8 +16,37 @@ from prometheus_client import (
     generate_latest,
 )
 
+from app import __version__
+
 REGISTRY = CollectorRegistry()
 
+# Standard Prometheus "info metric" pattern -- see data-pipeline's
+# identical `build_info` for the full reasoning (services/observility's
+# Observability Contract, why this beats a hardcoded scrape-config
+# label).
+build_info = Gauge(
+    "ecolens_build_info",
+    "Always 1 -- service identity via labels.",
+    ["service", "version"],
+    registry=REGISTRY,
+)
+build_info.labels(service="ingestion", version=__version__).set(1)
+
+# `outcome` is "success" (fetch+stage completed, including the
+# zero-rows no-op case) or "failure" (fetch/staging raised) -- mirrors
+# `meta._ingest_log`'s own terminal states at the point `standard_run`
+# itself resolves, before a later consumer (whichever service still
+# runs `pipeline.warehouse_sync`) closes a `"staged"` row out to
+# `"success"`/`"sync_failed"`. Backs `ecolens:ingest_success_rate_24h`
+# (services/observility/prometheus/rules/ingestion.yml) -- was defined
+# in data-pipeline's own `core/metrics.py` but never actually
+# incremented by either service's `_common.py` until now.
+ingest_runs_total = Counter(
+    "ecolens_ingest_runs_total",
+    "Ingestion runs, by source and outcome.",
+    ["source", "outcome"],
+    registry=REGISTRY,
+)
 ingest_duration_seconds = Histogram(
     "ecolens_ingest_duration_seconds",
     "Ingestion run duration in seconds, by source.",

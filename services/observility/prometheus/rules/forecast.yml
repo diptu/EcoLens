@@ -1,0 +1,95 @@
+# Forecast alerts.
+#
+# `services/forecast-api` (job=forecast-api, container `api`, port 8000
+# -- the service that actually serves `GET /v1/forecast`) now exports
+# `GET /metrics` (closed 2026-08-06, see TODO.md's Known Gaps section for
+# history) -- server-side `ecolens_forecast_predictions_total{region,cache}`
+# / `ecolens_forecast_prediction_latency_seconds{region}`
+# (`services/forecast-api/app/core/metrics.py`). These are distinct from
+# `services/data-pipeline`'s own `ecolens_forecast_requests_total{region}`
+# / `ecolens_forecast_latency_seconds` (job=data-pipeline,
+# app/core/metrics.py's forecast domain) -- that's data-pipeline's
+# *caller-side* view of calling the model, this is forecast-api's own
+# *server-side* view of handling the request. Both are kept, not merged
+# -- they measure different hops and can genuinely diverge (e.g. network
+# latency between the two services). Alerts below use forecast-api's own
+# server-side metrics as primary; data-pipeline's caller-side one backs
+# `ForecastNoRequestsReceived` since it's the one signal that actually
+# reflects "is anything asking for a forecast at all", not just "is
+# forecast-api's own handler slow/erroring".
+
+groups:
+  - name: ecolens_forecast_alerts
+    rules:
+      # "Prediction latency above threshold" (README's Forecast alert
+      # list). forecast-api's own server-side p95 -- includes cache hits
+      # (near-zero) and misses (a real model inference) alike, see
+      # forecast-api's metrics.py docstring for why they're not split
+      # here.
+      - alert: ForecastLatencyHigh
+        expr: >
+          histogram_quantile(0.95, sum(rate(ecolens_forecast_prediction_latency_seconds_bucket[10m])) by (le, region))
+          > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "forecast-api's p95 latency for {{ $labels.region }} is above 5s"
+          description: >
+            p95 forecast-api handler latency for {{ $labels.region }} is
+            {{ $value | humanizeDuration }} -- check `GET /v1/model` for
+            which version is currently loaded and whether inference
+            itself (not just caching) is the bottleneck.
+
+      # Same signal, data-pipeline's caller-side view -- catches network/
+      # queueing latency between the two services that forecast-api's
+      # own handler timer wouldn't see.
+      - alert: ForecastCallerSideLatencyHigh
+        expr: >
+          histogram_quantile(0.95, sum(rate(ecolens_forecast_latency_seconds_bucket[10m])) by (le))
+          > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "data-pipeline's p95 view of calling forecast-api is above 5s"
+          description: >
+            p95 latency as seen from data-pipeline's own call into
+            forecast-api is {{ $value | humanizeDuration }} -- if
+            `ForecastLatencyHigh` isn't also firing, the extra time is
+            being lost between the two services (network/queueing), not
+            inside forecast-api's own handler.
+
+      # "Missing forecast output" -- no requests recorded at all over a
+      # long window during business hours is itself a signal something
+      # upstream stopped calling the model (dashboard down, scheduler
+      # not firing, etc.) -- distinct from a request failing outright.
+      # Uses data-pipeline's caller-side counter deliberately: it's the
+      # one signal that reflects "is anything asking for a forecast at
+      # all" rather than forecast-api's own (which would also read zero
+      # if forecast-api itself were the thing that died -- covered
+      # separately by PlatformServiceUnavailable in platform.yml).
+      - alert: ForecastNoRequestsReceived
+        expr: sum(increase(ecolens_forecast_requests_total[1h])) == 0
+        for: 0m
+        labels:
+          severity: info
+        annotations:
+          summary: "No forecast requests observed in the last hour"
+          description: >
+            data-pipeline recorded zero `ecolens_forecast_requests_total`
+            increments in the last hour -- confirm this is expected
+            (e.g. off-hours) before treating it as an incident; `info`
+            severity deliberately, this metric alone can't distinguish
+            "nothing asked for a forecast" from "forecasting is broken".
+
+      # "Forecast job failures" / "Model inference errors" (README's
+      # Forecast alert list) -- forecast-api's own `GET /v1/readyz`
+      # already checks `registry.bundle is not None` (no Production
+      # model loaded), which is the closest real signal to "model
+      # inference errors" that exists today. Not yet expressible as a
+      # Prometheus alert -- `/v1/readyz`'s components (database/redis/
+      # model) aren't mirrored as gauges in `/metrics` (this pass only
+      # added the two forecast-domain metrics above, not a full readyz-
+      # to-gauge bridge), and nothing scrapes `/v1/readyz` via
+      # blackbox-exporter either. See TODO.md's Known Gaps section.

@@ -36,6 +36,27 @@ def test_healthz(client):
     assert response.json() == {"status": "ok"}
 
 
+def test_metrics_returns_prometheus_text(client):
+    # No `/v1` prefix -- matches data-pipeline/ingestion/warehouse's
+    # existing `/metrics` convention (see app/api/v1/health/routes.py's
+    # module docstring).
+    response = client.get("/metrics")
+
+    assert response.status_code == 200
+    assert "ecolens_" in response.text
+
+
+def test_metrics_identifies_this_service_via_build_info(client):
+    from app import __version__
+
+    response = client.get("/metrics")
+
+    assert (
+        f'ecolens_build_info{{service="forecast-api",version="{__version__}"}} 1.0'
+        in response.text
+    )
+
+
 class TestReadyz:
     def test_ready_when_everything_is_up(self, client):
         app.dependency_overrides[get_db] = lambda: _OkSession()

@@ -1,38 +1,59 @@
 /**
  * /dashboard/data-sources — Data Sources management
  *
- * Lets admins:
- *   - View all registered data sources (status, cadence, last run, rows)
- *   - Edit the cron schedule for each source (with validation)
- *   - Edit the cadence description (human-readable)
- *   - Toggle enabled/disabled
- *   - Trigger refresh / backfill
- *   - View a cron-expression cheat sheet
+ * Real data from data-pipeline's `GET /v1/data-sources/public`
+ * (`lib/data-sources.ts`) — replaces the old fictional 9-source catalog
+ * (`lib/dashboards.ts`'s `getDataSources()`, sources like "ENTSO-E API"/
+ * "EIA API" that don't exist in this platform). No mock fallback on
+ * fetch failure — an honest empty state beats silently reintroducing
+ * fabricated numbers (same policy as the Carbon/Ingestion/Executive
+ * pages once they were wired to real data).
+ *
+ * "Refresh latest" (`POST /v1/data-sources/{id}/run`) and "Backfill"
+ * (`POST /v1/data-sources/{id}/backfill`, trailing 7 days) are real —
+ * both routes are deliberately open, no auth required
+ * (`lib/ingestion.ts`'s `triggerIngestionRun`/`triggerBackfill`, already
+ * used by the Ingestion Pipeline page, reused directly here).
+ *
+ * Schedule editing and enable/disable ARE NOT real — both need
+ * `PATCH /v1/data-sources/{id}` with an `admin`-role bearer token, and
+ * this dashboard has no auth flow that can hold one (see
+ * `lib/data-sources.ts`'s module docstring). Shown as disabled controls
+ * with an explanatory tooltip rather than faking a local-state mutation
+ * that never reaches the backend — same "no silently fabricated
+ * success" convention `models/page.tsx`'s Train tab already follows.
  */
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   AlertCircle,
   Calendar,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
-  Database,
   Edit3,
   History,
   Info,
   Loader2,
   RefreshCw,
-  Save,
-  ToggleLeft,
-  ToggleRight,
-  X,
 } from "lucide-react";
 
 import { Card } from "@/components/dashboard/card";
 import { cn } from "@/lib/utils";
-import { getDataSources, getSourceCategories, type DataSource } from "@/lib/dashboards";
+import {
+  DATA_SOURCE_CATEGORIES,
+  fetchPublicDataSources,
+  healthDotStatus,
+  type DataSource,
+} from "@/lib/data-sources";
+import {
+  PIPELINE_CATALOG,
+  TriggerIngestionError,
+  formatRelativeTime,
+  triggerBackfill,
+  triggerIngestionRun,
+} from "@/lib/ingestion";
 
 const CRON_PRESETS: Array<{ label: string; value: string; desc: string }> = [
   { label: "Every 5 min",  value: "*/5 * * * *",   desc: "High-frequency telemetry" },
@@ -44,74 +65,80 @@ const CRON_PRESETS: Array<{ label: string; value: string; desc: string }> = [
   { label: "Monthly 1st",  value: "0 0 1 * *",     desc: "Monthly refresh" },
 ];
 
-const CRON_RE = /^(\*|\d+|\*\/\d+|\d+-\d+)( (\*|\d+|\*\/\d+|\d+-\d+)){4}$/;
+/** `sourceId` ("ds-aemo-nem") -> whether `POST .../backfill` is
+ * meaningful for it (`aemo_holidays` is an annual snapshot, not a
+ * continuous feed — see `PIPELINE_CATALOG`'s own docstring). */
+const BACKFILLABLE_SOURCE_IDS = new Set(
+  PIPELINE_CATALOG.filter((p) => p.backfillable && p.sourceId).map((p) => p.sourceId),
+);
 
-function isValidCron(expr: string): boolean {
-  return CRON_RE.test(expr.trim());
-}
-
-function describeCron(expr: string): string {
-  if (expr === "*/5 * * * *")   return "Every 5 minutes";
-  if (expr === "*/15 * * * *")  return "Every 15 minutes";
-  if (expr === "*/30 * * * *")  return "Every 30 minutes";
-  if (expr === "0 * * * *")     return "Every hour";
-  if (expr === "0 2 * * *")     return "Daily at 02:00";
-  if (expr === "0 0 * * 0")     return "Weekly on Sunday at 00:00";
-  if (expr === "0 0 1 * *")     return "Monthly on the 1st at 00:00";
-  return expr; // raw fallback
+/** Trailing 7 days from now, both ends inclusive-day per
+ * `triggerBackfill`'s own contract (`lib/ingestion.ts`). A fixed window
+ * rather than a date-range picker — this page has no modal UI for one
+ * yet; the Operational Tasks page's backfill modal is the place for an
+ * arbitrary custom range. */
+function lastSevenDaysRange(): { start: string; end: string } {
+  const end = new Date();
+  const start = new Date(end.getTime() - 6 * 24 * 60 * 60 * 1000);
+  const toDay = (d: Date) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  return { start: toDay(start).toISOString(), end: toDay(end).toISOString() };
 }
 
 export default function DataSourcesPage() {
-  const [sources, setSources] = useState<DataSource[]>(() => getDataSources());
+  const [sources, setSources] = useState<DataSource[] | null>(null);
+  const [loadError, setLoadError] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [editingId, setEditingId] = useState<string | null>(null);
   const [actionInFlight, setActionInFlight] = useState<string | null>(null);
-  const [toast, setToast] = useState<{ kind: "refresh" | "backfill" | "save" | "toggle" | "error"; msg: string } | null>(null);
+  const [toast, setToast] = useState<{ kind: "success" | "error"; msg: string } | null>(null);
 
-  const categories = useMemo(() => getSourceCategories(), []);
-  const [activeCategory, setActiveCategory] = useState<string>("all");
-  const filteredSources = activeCategory === "all"
-    ? sources
-    : sources.filter((s) => s.category === activeCategory);
-
-  function trigger(id: string, kind: "refresh" | "backfill") {
-    setActionInFlight(`${id}-${kind}`);
-    setTimeout(() => {
-      setActionInFlight(null);
-      setToast({
-        kind,
-        msg: `${kind === "refresh" ? "Refresh" : "Backfill"} job queued for ${id}. See Jobs page for progress.`,
+  useEffect(() => {
+    let cancelled = false;
+    fetchPublicDataSources()
+      .then((res) => {
+        if (!cancelled) setSources(res.data);
+      })
+      .catch(() => {
+        if (!cancelled) setLoadError(true);
       });
-      setTimeout(() => setToast(null), 4000);
-    }, 800);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const categories = useMemo(() => {
+    const present = new Set((sources ?? []).map((s) => s.category));
+    return DATA_SOURCE_CATEGORIES.filter((c) => present.has(c.id));
+  }, [sources]);
+  const [activeCategory, setActiveCategory] = useState<string>("all");
+  const filteredSources = (sources ?? []).filter(
+    (s) => activeCategory === "all" || s.category === activeCategory,
+  );
+
+  function showToast(kind: "success" | "error", msg: string) {
+    setToast({ kind, msg });
+    setTimeout(() => setToast(null), 5000);
   }
 
-  function toggle(id: string) {
-    setSources((curr) =>
-      curr.map((s) => (s.id === id ? { ...s, enabled: !s.enabled } : s)),
-    );
-    const s = sources.find((x) => x.id === id);
-    setToast({
-      kind: "toggle",
-      msg: `${s?.name} ${s?.enabled ? "disabled" : "enabled"}.`,
-    });
-    setTimeout(() => setToast(null), 3000);
-  }
-
-  function saveCron(id: string, newCron: string, newCadence: string) {
-    if (!isValidCron(newCron)) {
-      setToast({ kind: "error", msg: `Invalid cron expression: "${newCron}". Use 5 fields (min hr dom mon dow).` });
-      setTimeout(() => setToast(null), 5000);
-      return;
+  async function trigger(id: string, kind: "refresh" | "backfill") {
+    setActionInFlight(`${id}-${kind}`);
+    try {
+      if (kind === "refresh") {
+        await triggerIngestionRun(id);
+        showToast("success", `Refresh triggered for ${id}.`);
+      } else {
+        const { start, end } = lastSevenDaysRange();
+        await triggerBackfill(id, start, end);
+        showToast("success", `Backfill queued for ${id} (last 7 days).`);
+      }
+    } catch (err) {
+      const msg =
+        err instanceof TriggerIngestionError
+          ? err.message
+          : `${kind === "refresh" ? "Refresh" : "Backfill"} failed for ${id}.`;
+      showToast("error", msg);
+    } finally {
+      setActionInFlight(null);
     }
-    setSources((curr) =>
-      curr.map((s) =>
-        s.id === id ? { ...s, cron: newCron, cadence: newCadence } : s,
-      ),
-    );
-    setEditingId(null);
-    setToast({ kind: "save", msg: `Schedule updated for ${id}. Next run: ${describeCron(newCron)}.` });
-    setTimeout(() => setToast(null), 4000);
   }
 
   return (
@@ -119,8 +146,8 @@ export default function DataSourcesPage() {
       <div>
         <h1 className="text-2xl font-bold text-white">Data Sources</h1>
         <p className="mt-1 text-sm text-white/60">
-          Manage external data providers — grid, weather, carbon, fuel markets.
-          Edit cron schedules, trigger refreshes, and monitor health.
+          Real external data providers — grid, weather, carbon, fuel markets.
+          Trigger refreshes and backfills; schedule editing requires admin auth this dashboard doesn&apos;t hold.
         </p>
       </div>
 
@@ -143,64 +170,74 @@ export default function DataSourcesPage() {
         </div>
       )}
 
-      {/* Category filter */}
-      <div className="flex flex-wrap items-center gap-2">
-        <button
-          onClick={() => setActiveCategory("all")}
-          className={cn(
-            "rounded-md border px-3 py-1 text-xs",
-            activeCategory === "all"
-              ? "border-emerald-200/40 bg-emerald-200/10 text-emerald-100"
-              : "border-white/10 bg-white/[0.04] text-white/70 hover:border-white/20",
-          )}
-        >
-          All ({sources.length})
-        </button>
-        {categories.map((c) => {
-          const count = sources.filter((s) => s.category === c.id).length;
-          return (
+      {sources === null && !loadError && (
+        <Card>
+          <p className="py-8 text-center text-sm text-white/40">Loading data sources…</p>
+        </Card>
+      )}
+
+      {loadError && (
+        <Card>
+          <p className="py-8 text-center text-sm text-rose-200">
+            Couldn&apos;t reach data-pipeline&apos;s data-sources catalog. Is it running?
+          </p>
+        </Card>
+      )}
+
+      {sources !== null && (
+        <>
+          {/* Category filter */}
+          <div className="flex flex-wrap items-center gap-2">
             <button
-              key={c.id}
-              onClick={() => setActiveCategory(c.id)}
+              onClick={() => setActiveCategory("all")}
               className={cn(
                 "rounded-md border px-3 py-1 text-xs",
-                activeCategory === c.id
+                activeCategory === "all"
                   ? "border-emerald-200/40 bg-emerald-200/10 text-emerald-100"
                   : "border-white/10 bg-white/[0.04] text-white/70 hover:border-white/20",
               )}
             >
-              {c.label} ({count})
+              All ({sources.length})
             </button>
-          );
-        })}
-      </div>
+            {categories.map((c) => {
+              const count = sources.filter((s) => s.category === c.id).length;
+              return (
+                <button
+                  key={c.id}
+                  onClick={() => setActiveCategory(c.id)}
+                  className={cn(
+                    "rounded-md border px-3 py-1 text-xs",
+                    activeCategory === c.id
+                      ? "border-emerald-200/40 bg-emerald-200/10 text-emerald-100"
+                      : "border-white/10 bg-white/[0.04] text-white/70 hover:border-white/20",
+                  )}
+                >
+                  {c.label} ({count})
+                </button>
+              );
+            })}
+          </div>
 
-      <Card>
-        <div className="space-y-2" data-testid="data-sources">
-          {filteredSources.map((s) => {
-            const expanded = expandedId === s.id;
-            const isEditing = editingId === s.id;
-            return (
-              <SourceRow
-                key={s.id}
-                source={s}
-                expanded={expanded}
-                isEditing={isEditing}
-                actionInFlight={actionInFlight}
-                onToggleExpand={() => {
-                  setExpandedId(expanded ? null : s.id);
-                  setEditingId(null);
-                }}
-                onStartEdit={() => setEditingId(s.id)}
-                onCancelEdit={() => setEditingId(null)}
-                onSaveEdit={(cron, cadence) => saveCron(s.id, cron, cadence)}
-                onTrigger={(kind) => trigger(s.id, kind)}
-                onToggle={() => toggle(s.id)}
-              />
-            );
-          })}
-        </div>
-      </Card>
+          <Card>
+            <div className="space-y-2" data-testid="data-sources">
+              {filteredSources.map((s) => (
+                <SourceRow
+                  key={s.id}
+                  source={s}
+                  expanded={expandedId === s.id}
+                  actionInFlight={actionInFlight}
+                  backfillable={BACKFILLABLE_SOURCE_IDS.has(s.id)}
+                  onToggleExpand={() => setExpandedId(expandedId === s.id ? null : s.id)}
+                  onTrigger={(kind) => trigger(s.id, kind)}
+                />
+              ))}
+              {filteredSources.length === 0 && (
+                <p className="py-6 text-center text-sm text-white/40">No sources in this category.</p>
+              )}
+            </div>
+          </Card>
+        </>
+      )}
 
       <CronCheatSheet />
     </div>
@@ -208,35 +245,24 @@ export default function DataSourcesPage() {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// Source row (view + edit modes)
+// Source row
 // ────────────────────────────────────────────────────────────────────
 
 function SourceRow({
   source: s,
   expanded,
-  isEditing,
   actionInFlight,
+  backfillable,
   onToggleExpand,
-  onStartEdit,
-  onCancelEdit,
-  onSaveEdit,
   onTrigger,
-  onToggle,
 }: {
   source: DataSource;
   expanded: boolean;
-  isEditing: boolean;
   actionInFlight: string | null;
+  backfillable: boolean;
   onToggleExpand: () => void;
-  onStartEdit: () => void;
-  onCancelEdit: () => void;
-  onSaveEdit: (cron: string, cadence: string) => void;
   onTrigger: (kind: "refresh" | "backfill") => void;
-  onToggle: () => void;
 }) {
-  const [draftCron, setDraftCron] = useState(s.cron);
-  const [draftCadence, setDraftCadence] = useState(s.cadence);
-
   return (
     <div
       className="rounded-lg border border-white/5 bg-white/[0.02]"
@@ -249,18 +275,22 @@ function SourceRow({
       >
         <div className="flex items-center gap-3 min-w-0">
           {expanded ? <ChevronDown className="h-3.5 w-3.5 text-white/45" /> : <ChevronRight className="h-3.5 w-3.5 text-white/45" />}
-          <SourceStatus status={s.health} />
+          <SourceStatus status={healthDotStatus(s.health.status)} />
           <span className="font-mono text-sm text-white">{s.id}</span>
           <span className="truncate text-xs text-white/55">{s.name}</span>
         </div>
         <div className="flex items-center gap-3 text-right text-[11px]">
           <span className="rounded border border-white/10 bg-white/5 px-1.5 py-0.5 font-mono text-white/65">
-            {s.cadence}
+            {s.schedule.cadence}
           </span>
           <span className="text-white/40">last:</span>
-          <span className="font-mono text-white/70 tabular-nums">{s.last_sync}</span>
+          <span className="font-mono text-white/70 tabular-nums">
+            {formatRelativeTime(s.last_run?.started_at ?? s.schedule.last_run_at)}
+          </span>
           <span className="text-white/40">rows:</span>
-          <span className="font-mono text-white/70 tabular-nums">{s.records_today.toLocaleString()}</span>
+          <span className="font-mono text-white/70 tabular-nums">
+            {(s.last_run?.records_inserted ?? 0).toLocaleString()}
+          </span>
         </div>
       </button>
 
@@ -268,107 +298,42 @@ function SourceRow({
         <div className="border-t border-white/5 px-4 py-3 text-xs">
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             <div>
-              <p className="text-white/65">Region: {s.region} · Category: {s.category}</p>
-              <p className="mt-1 text-white/40">Endpoint: <code className="font-mono text-emerald-100">{s.api_endpoint}</code></p>
+              <p className="text-white/65">
+                Regions: {s.regions.length ? s.regions.join(", ") : "—"} · Category: {s.category}
+                {!s.schedule.enabled && <span className="ml-2 text-amber-200">(disabled)</span>}
+              </p>
+              <p className="mt-1 text-white/40">Source: <code className="font-mono text-emerald-100">{s.url}</code></p>
+              <p className="mt-1 text-white/40">{s.description}</p>
             </div>
             <div className="grid grid-cols-2 gap-2">
-              <Field label="Health" value={s.health} tone={s.health === "healthy" ? "up" : "down"} />
-              <Field label="Last Status" value={s.last_status} tone={s.last_status === "success" ? "up" : "down"} />
-              <Field label="Vendor" value={s.vendor} />
-              <Field label="Records Today" value={s.records_today.toLocaleString()} />
+              <Field label="Health" value={s.health.status} tone={s.health.status === "healthy" ? "up" : "down"} />
+              <Field
+                label="Last Status"
+                value={s.last_run?.status ?? "no runs yet"}
+                tone={s.last_run?.status === "success" ? "up" : s.last_run ? "down" : undefined}
+              />
+              <Field label="Success Rate (24h)" value={s.health.success_rate_pct_24h != null ? `${s.health.success_rate_pct_24h.toFixed(1)}%` : "—"} />
+              <Field label="Circuit Breaker" value={s.health.circuit_breaker} tone={s.health.circuit_breaker === "closed" ? "up" : "down"} />
             </div>
           </div>
 
-          {/* Cron editor */}
+          {/* Schedule (read-only) */}
           <div className="mt-4 rounded-md border border-white/5 bg-white/[0.02] p-3">
             <div className="mb-2 flex items-center justify-between">
               <h3 className="text-[11px] font-semibold uppercase tracking-wide text-white/60">Schedule</h3>
-              {!isEditing ? (
-                <button
-                  onClick={onStartEdit}
-                  data-testid={`edit-cron-${s.id}`}
-                  className="inline-flex items-center gap-1 rounded-md border border-white/10 bg-white/5 px-2 py-0.5 text-[11px] text-white/70 hover:border-emerald-200/30 hover:text-white"
-                >
-                  <Edit3 className="h-3 w-3" /> Edit
-                </button>
-              ) : (
-                <div className="flex items-center gap-1">
-                  <button
-                    onClick={onCancelEdit}
-                    className="inline-flex items-center gap-1 rounded-md border border-white/10 bg-white/5 px-2 py-0.5 text-[11px] text-white/70 hover:bg-white/10"
-                  >
-                    <X className="h-3 w-3" /> Cancel
-                  </button>
-                  <button
-                    onClick={() => onSaveEdit(draftCron, draftCadence)}
-                    data-testid={`save-cron-${s.id}`}
-                    className="inline-flex items-center gap-1 rounded-md border border-emerald-200/30 bg-emerald-200/15 px-2 py-0.5 text-[11px] font-semibold text-emerald-100 hover:bg-emerald-200/20"
-                  >
-                    <Save className="h-3 w-3" /> Save
-                  </button>
-                </div>
-              )}
+              <button
+                disabled
+                title="Editing the schedule requires admin authentication -- not available in this demo"
+                data-testid={`edit-cron-${s.id}`}
+                className="inline-flex cursor-not-allowed items-center gap-1 rounded-md border border-white/10 bg-white/5 px-2 py-0.5 text-[11px] text-white/40 opacity-50"
+              >
+                <Edit3 className="h-3 w-3" /> Edit
+              </button>
             </div>
-
-            {!isEditing ? (
-              <div className="flex items-center gap-2">
-                <code className="rounded bg-black/30 px-2 py-1 font-mono text-emerald-100">{s.cron}</code>
-                <span className="text-white/50">— {describeCron(s.cron)}</span>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
-                  <div>
-                    <label className="mb-1 block text-[10px] uppercase tracking-wide text-white/50">
-                      Cron expression <span className="text-white/30">(min hr dom mon dow)</span>
-                    </label>
-                    <input
-                      type="text"
-                      value={draftCron}
-                      onChange={(e) => setDraftCron(e.target.value)}
-                      data-testid={`cron-input-${s.id}`}
-                      className={cn(
-                        "w-full rounded-md border bg-white/[0.04] px-2.5 py-1.5 font-mono text-sm text-white focus:outline-none",
-                        isValidCron(draftCron)
-                          ? "border-emerald-200/30 focus:border-emerald-200/60"
-                          : "border-rose-300/40 focus:border-rose-300/60",
-                      )}
-                    />
-                    {!isValidCron(draftCron) && (
-                      <p className="mt-1 text-[10px] text-rose-200">Invalid format. Example: <code className="font-mono">*/5 * * * *</code></p>
-                    )}
-                  </div>
-                  <div>
-                    <label className="mb-1 block text-[10px] uppercase tracking-wide text-white/50">Cadence label</label>
-                    <input
-                      type="text"
-                      value={draftCadence}
-                      onChange={(e) => setDraftCadence(e.target.value)}
-                      data-testid={`cadence-input-${s.id}`}
-                      className="w-full rounded-md border border-white/10 bg-white/[0.04] px-2.5 py-1.5 text-sm text-white focus:border-emerald-200/60 focus:outline-none"
-                    />
-                  </div>
-                </div>
-                <div>
-                  <label className="mb-1 block text-[10px] uppercase tracking-wide text-white/50">Presets</label>
-                  <div className="flex flex-wrap gap-1">
-                    {CRON_PRESETS.map((p) => (
-                      <button
-                        key={p.value}
-                        type="button"
-                        onClick={() => {
-                          setDraftCron(p.value);
-                          setDraftCadence(p.label);
-                        }}
-                        className="rounded-md border border-white/10 bg-white/5 px-2 py-0.5 text-[10px] text-white/70 hover:border-emerald-200/30 hover:text-white"
-                      >
-                        {p.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            )}
+            <div className="flex items-center gap-2">
+              <code className="rounded bg-black/30 px-2 py-1 font-mono text-emerald-100">{s.schedule.cron}</code>
+              <span className="text-white/50">— {s.schedule.cadence}</span>
+            </div>
           </div>
 
           {/* Action buttons */}
@@ -387,40 +352,30 @@ function SourceRow({
               )}
               Refresh latest
             </button>
+            {backfillable && (
+              <button
+                type="button"
+                onClick={() => onTrigger("backfill")}
+                disabled={actionInFlight === `${s.id}-backfill`}
+                data-testid={`backfill-${s.id}`}
+                className="inline-flex items-center gap-1.5 rounded-md border border-sky-400/20 bg-sky-500/10 px-2.5 py-1 text-[11px] text-sky-200 hover:bg-sky-500/20 disabled:opacity-50"
+              >
+                {actionInFlight === `${s.id}-backfill` ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <History className="h-3 w-3" />
+                )}
+                Backfill last 7 days
+              </button>
+            )}
             <button
               type="button"
-              onClick={() => onTrigger("backfill")}
-              disabled={actionInFlight === `${s.id}-backfill`}
-              data-testid={`backfill-${s.id}`}
-              className="inline-flex items-center gap-1.5 rounded-md border border-sky-400/20 bg-sky-500/10 px-2.5 py-1 text-[11px] text-sky-200 hover:bg-sky-500/20 disabled:opacity-50"
-            >
-              {actionInFlight === `${s.id}-backfill` ? (
-                <Loader2 className="h-3 w-3 animate-spin" />
-              ) : (
-                <History className="h-3 w-3" />
-              )}
-              Backfill range
-            </button>
-            <button
-              type="button"
-              onClick={onToggle}
+              disabled
+              title="Enabling/disabling a source requires admin authentication -- not available in this demo"
               data-testid={`toggle-${s.id}`}
-              className={cn(
-                "inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px]",
-                s.enabled
-                  ? "border-amber-400/20 bg-amber-500/10 text-amber-200 hover:bg-amber-500/20"
-                  : "border-emerald-200/20 bg-emerald-300/10 text-emerald-100 hover:bg-emerald-300/20",
-              )}
+              className="inline-flex cursor-not-allowed items-center gap-1.5 rounded-md border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] text-white/40 opacity-50"
             >
-              {s.enabled ? (
-                <>
-                  <ToggleRight className="h-3 w-3" /> Enabled — disable
-                </>
-              ) : (
-                <>
-                  <ToggleLeft className="h-3 w-3" /> Disabled — enable
-                </>
-              )}
+              {s.schedule.enabled ? "Enabled" : "Disabled"}
             </button>
           </div>
         </div>
@@ -433,7 +388,7 @@ function SourceRow({
 // Helper components
 // ────────────────────────────────────────────────────────────────────
 
-function SourceStatus({ status }: { status: DataSource["health"] }) {
+function SourceStatus({ status }: { status: "healthy" | "degraded" | "down" | "unknown" }) {
   const map = {
     healthy:  { dot: "bg-emerald-200", title: "healthy"  },
     degraded: { dot: "bg-amber-400",   title: "degraded" },

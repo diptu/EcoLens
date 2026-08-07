@@ -1,4 +1,6 @@
-# GitHub Actions secrets for the scheduled ingest workflows
+# GitHub Actions secrets for the scheduled workflows
+
+## Ingest workflows
 
 `.github/workflows/ingest-{openelectricity,aemo,bom,holidays}.yml` run on a
 `schedule` trigger (plus `workflow_dispatch` for manual runs) and need these
@@ -15,6 +17,17 @@ error. None are optional — every workflow needs all of them.
 | `S3_ACCESS_KEY` | | |
 | `S3_SECRET_KEY` | | |
 | `OE_API_KEY` | | Only `ingest-openelectricity.yml` uses this. Free registration at OpenElectricity. Without it, every region's fetch fails gracefully (0 rows landed, not a crash) — see `ingest_openelectricity.run()`'s per-region `try/except`. |
+
+## Warehouse monitoring workflow
+
+`.github/workflows/warehouse-monitor.yml` runs `ecolens-warehouse dbt
+source freshness` + `check-size` hourly — read-only checks only (see the
+workflow's own header comment for why `prune`/`export-and-prune` are
+deliberately *not* on a schedule). Needs just one secret:
+
+| Secret | Example | Notes |
+| --- | --- | --- |
+| `DATABASE_URL` | `postgresql+asyncpg://user:pass@host/db?sslmode=require` | Same secret as the ingest workflows above — reused, not a second copy. `dbt`'s own `POSTGRES_HOST`/`PORT`/`USER`/`PASSWORD`/`DB` are derived from this automatically (`Settings.dbt_postgres_env`), no separate dbt-specific secrets needed. |
 
 ## Why not `localhost`
 

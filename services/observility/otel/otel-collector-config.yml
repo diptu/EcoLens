@@ -1,0 +1,71 @@
+# Traces only -- matches README.md's own architecture diagram exactly:
+# metrics flow straight from each service's `/metrics` to Prometheus
+# (scrape-based, "Avoiding Observability Spam" section), only traces go
+# through this collector on their way to Tempo. No metrics/logs pipeline
+# is configured here for that reason, not an oversight.
+#
+# KNOWN GAP (see TODO.md): none of the four business services
+# (data-pipeline, ingestion, warehouse, forecast-api) have any
+# OpenTelemetry SDK instrumentation today (confirmed: no `opentelemetry-*`
+# application dependency in any of their pyproject.toml files). This
+# collector and Tempo behind it are both ready to receive traces the
+# moment a service adds OTel instrumentation and points its exporter at
+# `otel-collector:4317` (grpc) or `:4318` (http) -- until then, the
+# Tempo datasource in Grafana will simply have nothing to show. That's
+# expected, not a bug in this config.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # Batches spans before forwarding -- README's "Avoiding Observability
+  # Spam" > Traces: "The OTel Collector should batch and buffer
+  # telemetry before forwarding it."
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+
+exporters:
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+  # Human-readable stdout copy of every span -- useful for `docker
+  # compose logs otel-collector` while no service sends real traces yet
+  # (see the Known Gap above); drop this exporter from the traces
+  # pipeline below once trace volume is non-trivial, it's not meant to
+  # run in production at scale.
+  debug:
+    verbosity: basic
+
+# `:8888/metrics` (this collector's own internal telemetry, scraped by
+# prometheus/prometheus.yml's `otel-collector` job) and `:13133/health`
+# (README.md's own "Running this stack in production" note: "otel-collector
+# has no container-level healthcheck... its :13133/health endpoint is
+# available for external monitoring instead") both come from these two
+# extensions/telemetry block, not a receiver/exporter.
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  telemetry:
+    metrics:
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/tempo, debug]

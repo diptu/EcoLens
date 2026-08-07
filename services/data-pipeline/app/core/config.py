@@ -153,6 +153,19 @@ class Settings(BaseSettings):
     rabbitmq_url: str = "amqp://guest:guest@localhost:5672/"
     rabbitmq_landing_queue: str = "ecolens.landing"
 
+    # `services/waerehouse` (services/waerehouse/README.md) is a standalone
+    # extraction of this consumer, running alongside it since — both
+    # currently consume `rabbitmq_landing_queue`, racing for whichever
+    # message either one picks up first (services/waerehouse/TODO.md
+    # Phase 4's own note). True by default so nothing changes until an
+    # operator deliberately flips `WAREHOUSE_SYNC_CONSUMER_ENABLED=false`
+    # once `services/waerehouse`'s own consumer is trusted — a config flip
+    # instead of deleting `app.service.worker`/the `warehouse-sync`
+    # compose service outright, so the cutover is reversible right up
+    # until this flag (and eventually the dead code behind it) is
+    # actually removed.
+    warehouse_sync_consumer_enabled: bool = True
+
     # Training-trigger event queue (`TODO.md`'s "Event-Driven Pipeline
     # Trigger for Online/Incremental Model Training"). Decouples "the
     # warehouse just finished a dbt build" (`pipeline.flows.daily_demand`'s

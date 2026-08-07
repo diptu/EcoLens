@@ -1,0 +1,94 @@
+# Platform alerts -- cross-service infrastructure signals, not specific
+# to one service's own business metrics.
+#
+# CPU/memory come from cAdvisor (the `cadvisor` container in
+# docker-compose.yml, job=cadvisor) -- container-level resource metrics,
+# since none of the four FastAPI services export process-level CPU/RAM
+# themselves. This is squarely observability-infrastructure territory
+# (README.md's Ownership Model: "Collector infrastructure" = ✅
+# Observability Team), not something that needed any business-service
+# code change.
+
+groups:
+  - name: ecolens_platform_alerts
+    rules:
+      # Scoped to the `ecolens` compose project's own containers via
+      # cAdvisor's `container_label_com_docker_compose_project` label
+      # (auto-populated from Docker's own `com.docker.compose.project`
+      # label -- no cAdvisor config needed) -- otherwise these alerts
+      # would also fire on this observability stack's own containers
+      # and anything unrelated running on the host.
+      - alert: PlatformHighContainerCpuUsage
+        expr: >
+          sum(rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_project="ecolens"}[5m]))
+          by (container_label_com_docker_compose_service)
+          > 1.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.container_label_com_docker_compose_service }} is using more than 1.5 CPU cores"
+          description: "5m average CPU usage: {{ $value | printf \"%.2f\" }} cores."
+
+      - alert: PlatformHighContainerMemoryUsage
+        expr: >
+          container_memory_usage_bytes{container_label_com_docker_compose_project="ecolens"}
+          /
+          container_spec_memory_limit_bytes{container_label_com_docker_compose_project="ecolens"}
+          > 0.9
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.container_label_com_docker_compose_service }} is above 90% of its memory limit"
+          description: "Container memory usage is {{ $value | humanizePercentage }} of its configured limit."
+
+      # "Service unavailable" (README's Platform alert list). All 4
+      # business-service scrape jobs now export real /metrics (forecast-
+      # api's landed 2026-08-06, see TODO.md's Known Gaps section) --
+      # no job exclusion needed here anymore.
+      - alert: PlatformServiceUnavailable
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }} target is down"
+          description: "Prometheus has not been able to scrape {{ $labels.job }} for 2+ minutes."
+
+      # "High HTTP error rate" / "High request latency" (README's
+      # Platform alert list) -- NOT expressible today. None of the four
+      # services instrument generic `http_requests_total` /
+      # `http_request_duration_seconds` / `http_errors_total` (grepped
+      # every service's metrics module -- all four only export their
+      # own domain-specific `ecolens_*` counters, no HTTP-layer
+      # middleware like `prometheus-fastapi-instrumentator` is wired up
+      # anywhere). Add that middleware to each FastAPI app before these
+      # two alerts can fire on anything real -- see TODO.md's Known
+      # Gaps section. Left as a commented placeholder rather than a
+      # silently-absent alert, so the gap doesn't get lost:
+      #
+      # - alert: PlatformHighHttpErrorRate
+      #   expr: sum(rate(http_requests_total{status=~"5.."}[5m])) by (job)
+      #         / sum(rate(http_requests_total[5m])) by (job) > 0.05
+      #   for: 5m
+      #   labels: {severity: warning}
+      #
+      # - alert: PlatformHighRequestLatency
+      #   expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, job)) > 2
+      #   for: 10m
+      #   labels: {severity: warning}
+
+      # "Telemetry collector failure" (README's Platform alert list).
+      - alert: PlatformTelemetryCollectorDown
+        expr: up{job="otel-collector"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "otel-collector is unreachable"
+          description: >
+            Prometheus can't scrape otel-collector's own :8888/metrics
+            -- traces from any instrumented service are being dropped
+            while this is down. Check `docker compose logs otel-collector`
+            and its :13133/health endpoint.

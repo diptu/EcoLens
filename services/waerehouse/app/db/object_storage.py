@@ -1,8 +1,15 @@
 """Generic S3-compatible object storage client (Cloudflare R2, local
 MinIO fallback) — this service's own copy of `services/ingestion`'s
-identical module, same account/bucket, scoped down to just what
-`retention.cold_storage` needs (upload + existence-check, no download/
-list — nothing in this service ever reads cold-storage exports back).
+identical module, same account/bucket.
+
+`upload_bytes`/`upload_file`/`object_exists` back `retention.
+cold_storage` (upload-only — nothing in this service ever reads
+cold-storage *exports* back). `download_bytes` is for a different
+concern: `consumers.landed_events.sync_landed_event`'s fallback when
+the `duckdb_staging` shared volume it'd otherwise share with
+`services/ingestion` isn't actually shared (that producer running on a
+different machine) — see `db.duckdb_client.read_run_with_fallback`'s
+own docstring.
 """
 
 from __future__ import annotations
@@ -57,6 +64,14 @@ async def upload_bytes(key: str, body: bytes, bucket: str | None = None) -> str:
 
 async def upload_file(local_path: Path, key: str, bucket: str | None = None) -> str:
     return await upload_bytes(key, local_path.read_bytes(), bucket=bucket)
+
+
+async def download_bytes(key: str, bucket: str | None = None) -> bytes:
+    settings = get_settings()
+    bucket_name = bucket or settings.object_storage_bucket
+    async with _session().client("s3", **_client_kwargs()) as s3:
+        response = await s3.get_object(Bucket=bucket_name, Key=key)
+        return await response["Body"].read()
 
 
 async def object_exists(key: str, bucket: str | None = None) -> bool:

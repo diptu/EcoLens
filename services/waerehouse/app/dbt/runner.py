@@ -38,7 +38,7 @@ def run_dbt(
     target: str = "dev",
     extra_args: list[str] | None = None,
 ) -> tuple[int, str]:
-    """Run `dbt <subcommand> --project-dir <project_dir> --target <target> [extra_args]`.
+    """Run `dbt <subcommand path> --project-dir <project_dir> --target <target> [extra_args]`.
 
     Returns `(exit_code, combined_stdout_and_stderr)`. Never raises — a
     non-zero dbt exit and a missing `dbt` binary are both just a
@@ -50,20 +50,51 @@ def run_dbt(
     `dbt_project.yml` rather than relying on `~/.dbt/` or the
     `DBT_PROFILES_DIR` env var being set correctly on whatever process/
     container ends up running this.
+
+    **Multi-word dbt subcommands** (`source freshness`, `docs generate`,
+    ...) — real bug found live (`TODO.md` Phase 4) while trying to
+    actually run `ecolens-warehouse dbt source freshness`, the CLI's own
+    documented example: dbt requires `--project-dir`/`--profiles-dir`/
+    `--target` to come *after every word of the subcommand path*, not
+    right after the first word (`dbt source --project-dir X freshness`
+    fails with `Error: No such option '--project-dir'`; `dbt source
+    freshness --project-dir X` is the only ordering that works —
+    confirmed directly against the real `dbt` CLI, not assumed). `click`
+    parses only the first word into `subcommand`, so a call like
+    `dbt("source", extra_args=["freshness"])` (what the CLI layer's
+    `@click.argument("subcommand")` + `nargs=-1 extra_args` naturally
+    produce for `ecolens-warehouse dbt source freshness`) needs
+    `"freshness"` treated as a continuation of the subcommand path, not
+    a trailing flag. `subcommand.split()` handles a pre-joined string
+    (`run_dbt("source freshness")`, e.g. from a test or a future
+    non-CLI caller); consuming extra_args' *leading non-flag* tokens
+    handles the click-split case — either path already stops at the
+    first `-`/`--`-prefixed token, since a real dbt flag never
+    continues a subcommand path.
     """
     settings = get_settings()
     resolved_project_dir = str(project_dir or settings.dbt_project_dir)
 
+    path = subcommand.split()
+    remaining_extra_args = list(extra_args or [])
+    while remaining_extra_args and not remaining_extra_args[0].startswith("-"):
+        path.append(remaining_extra_args.pop(0))
+    # Metrics/log label: the full resolved path ("source freshness"), not
+    # just the caller's original (possibly partial, pre-click-split)
+    # `subcommand` string -- otherwise `dbt source freshness` and a bare
+    # `dbt source` would be indistinguishable in Prometheus.
+    full_subcommand = " ".join(path)
+
     args = [
         "dbt",
-        subcommand,
+        *path,
         "--project-dir",
         resolved_project_dir,
         "--profiles-dir",
         resolved_project_dir,
         "--target",
         target,
-        *(extra_args or []),
+        *remaining_extra_args,
     ]
 
     # `dbt/ecolens/profiles.yml` reads POSTGRES_HOST/PORT/USER/PASSWORD/DB
@@ -85,16 +116,16 @@ def run_dbt(
         exit_code = _COMMAND_NOT_FOUND
         output = "dbt executable not found on PATH"
     finally:
-        dbt_run_duration_seconds.labels(subcommand=subcommand).observe(
+        dbt_run_duration_seconds.labels(subcommand=full_subcommand).observe(
             time.monotonic() - started
         )
 
     outcome = "success" if exit_code == 0 else "failure"
-    dbt_runs_total.labels(subcommand=subcommand, outcome=outcome).inc()
+    dbt_runs_total.labels(subcommand=full_subcommand, outcome=outcome).inc()
     if exit_code != 0:
         logger.warning(
             "dbt_run_failed",
-            subcommand=subcommand,
+            subcommand=full_subcommand,
             exit_code=exit_code,
             output=output[-2000:],
         )

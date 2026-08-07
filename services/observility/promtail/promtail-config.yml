@@ -1,0 +1,49 @@
+# Not listed in README.md's "Repository Structure" tree, but Loki alone
+# doesn't collect anything -- it needs a push client. README.md's own
+# "Structured Logs" section names the pattern this implements: "The
+# services do NOT send logs directly to the observability service. A
+# log collector such as Fluent Bit, Vector, or an equivalent agent
+# collects them." Promtail is that agent here -- it's Grafana's own
+# Loki-native log shipper, the natural choice alongside
+# Prometheus/Loki/Tempo/Grafana already in README.md's stack table.
+#
+# Reads containers' JSON-file logs directly off the Docker socket
+# (`docker_sd_configs`) -- no code change or sidecar needed in any
+# business service, matching README's "Minimal changes required in
+# existing services" key benefit. Every service already writes
+# structured JSON to stdout via structlog (services/*/app/core/logging.py)
+# -- Promtail ships it as-is; it does not parse/reshape the JSON itself
+# (that's a Loki-query-time / Grafana-panel concern, not ingestion-time).
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: docker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 15s
+        # Only containers in the `ecolens` compose project (the business
+        # services this stack exists to observe) -- otherwise this would
+        # also hoover up this observability stack's own container logs
+        # and anything unrelated running on the host.
+        filters:
+          - name: label
+            values: ["com.docker.compose.project=ecolens"]
+    relabel_configs:
+      # Docker SD's container name comes through as `/<name>` -- strip
+      # the leading slash so it reads the same as everywhere else
+      # (Prometheus job names, cAdvisor labels).
+      - source_labels: [__meta_docker_container_name]
+        regex: "/(.*)"
+        target_label: container
+      - source_labels: [__meta_docker_container_label_com_docker_compose_service]
+        target_label: service
+      - source_labels: [__meta_docker_container_log_stream]
+        target_label: stream

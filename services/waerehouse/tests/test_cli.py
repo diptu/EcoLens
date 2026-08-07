@@ -202,3 +202,50 @@ class TestCheckSizeCommand:
 
         assert result.exit_code != 0
         assert "warning" in result.output
+
+
+class TestCheckMartHistoryCommand:
+    def test_exits_zero_and_prints_each_mart_when_nothing_regressed(
+        self, runner, monkeypatch
+    ):
+        from app.retention import mart_floor_monitor
+
+        async def fake_check():
+            return [
+                mart_floor_monitor.MartFloor(
+                    mart="fct_energy_demand", min_ts="2026-01-01T00:00:00", regressed=False
+                ),
+                mart_floor_monitor.MartFloor(
+                    mart="fct_carbon_intensity", min_ts=None, regressed=False
+                ),
+            ]
+
+        monkeypatch.setattr(mart_floor_monitor, "check_mart_floors", fake_check)
+
+        result = runner.invoke(cli.main, ["check-mart-history"])
+
+        assert result.exit_code == 0
+        assert "fct_energy_demand: 2026-01-01T00:00:00" in result.output
+        assert "fct_carbon_intensity: (empty)" in result.output
+        assert "REGRESSED" not in result.output
+
+    def test_exits_nonzero_when_any_mart_regressed(self, runner, monkeypatch):
+        from app.retention import mart_floor_monitor
+
+        async def fake_check():
+            return [
+                mart_floor_monitor.MartFloor(
+                    mart="fct_energy_demand", min_ts="2026-01-10T00:00:00", regressed=True
+                ),
+                mart_floor_monitor.MartFloor(
+                    mart="fct_emissions_5min", min_ts="2026-01-01T00:00:00", regressed=False
+                ),
+            ]
+
+        monkeypatch.setattr(mart_floor_monitor, "check_mart_floors", fake_check)
+
+        result = runner.invoke(cli.main, ["check-mart-history"])
+
+        assert result.exit_code != 0
+        assert "fct_energy_demand: 2026-01-10T00:00:00 -- REGRESSED" in result.output
+        assert "fct_emissions_5min: 2026-01-01T00:00:00\n" in result.output

@@ -17,8 +17,17 @@ clean-targets:
 # staging = view (cheap, always fresh off raw.*), intermediate = ephemeral
 # (inlined into whatever mart references it, never materialized on its
 # own — these are feature-engineering CTEs, not something queried
-# directly), marts = table (what forecast-api / dashboards actually read,
-# so it should be a real table, not recomputed per query).
+# directly), marts = table by default.
+#
+# The 4 time-series `fct_*` marts override this to `materialized:
+# incremental` in their own model-level `config()` block (`TODO.md`
+# Phase 1) — `raw.*`'s 60-day retention (app/retention/pruning.py) means
+# a full `table` rebuild on every `dbt run` would silently drop mart
+# history older than the retention window, which contradicts this
+# project's own "curated tables retain the complete historical dataset"
+# contract (README's Storage Policy). The 2 `dim_*` marts stay plain
+# `table` — small reference/dimension sets (one row per fuel type or
+# per region), not history that a full rebuild can lose.
 models:
   ecolens:
     staging:

@@ -94,6 +94,40 @@ async def list_issues_endpoint(
     )
 
 
+@router.get("/public/issues", response_model=DataQualityIssuesResponse)
+async def list_issues_public_endpoint(
+    source_id: str | None = None,
+    severity: Severity | None = None,
+    category: IssueCategory | None = None,
+    status: IssueStatus = "open",
+    limit: int = Query(default=50, ge=1, le=200),
+    cursor: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis_client),
+) -> DataQualityIssuesResponse:
+    """No `require_roles` gate, unlike `list_issues_endpoint` above --
+    same reasoning as `get_public_summary_endpoint`: the dashboard has
+    no way to hold a bearer token for this service's own separate auth
+    domain. `DataQualityIssue` carries nothing sensitive --
+    `acknowledged_by` is the same class of plain identifier already
+    exposed by public run-trigger endpoints elsewhere (`triggered_by`),
+    not a credential -- so this is a real public projection, same
+    response shape as the authenticated route, not a stripped-down
+    summary."""
+    if source_id is not None:
+        require_catalog_entry(source_id)
+    return await list_issues(
+        db,
+        redis,
+        source_id=source_id,
+        severity=severity,
+        category=category,
+        status=status,
+        limit=limit,
+        cursor=cursor,
+    )
+
+
 @router.get("/outliers", response_model=DataQualityOutliersResponse)
 async def list_outliers_endpoint(
     source_id: str | None = None,
@@ -121,12 +155,55 @@ async def list_outliers_endpoint(
     )
 
 
+@router.get("/public/outliers", response_model=DataQualityOutliersResponse)
+async def list_outliers_public_endpoint(
+    source_id: str | None = None,
+    metric: str | None = None,
+    z_score_min: float = Query(default=3.0, ge=0),
+    from_: datetime | None = Query(default=None, alias="from"),
+    to: datetime | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis_client),
+) -> DataQualityOutliersResponse:
+    """No `require_roles` gate -- same reasoning as
+    `list_issues_public_endpoint`. `DataQualityOutlier` is a statistical
+    z-score reading (value/expected-range/region), nothing identifying
+    or secret."""
+    if source_id is not None:
+        require_catalog_entry(source_id)
+    now = datetime.now(UTC)
+    return await list_outliers(
+        db,
+        redis,
+        source_id=source_id,
+        metric=metric,
+        z_score_min=z_score_min,
+        from_=from_ or now - timedelta(days=7),
+        to=to or now,
+        limit=limit,
+    )
+
+
 @router.get("/schema", response_model=DataQualitySchemaResponse)
 async def get_schema_report_endpoint(
     _principal: Principal = Depends(require_roles(*ROLES)),
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis_client),
 ) -> DataQualitySchemaResponse:
+    return await get_schema_report(db, redis)
+
+
+@router.get("/public/schema", response_model=DataQualitySchemaResponse)
+async def get_schema_report_public_endpoint(
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis_client),
+) -> DataQualitySchemaResponse:
+    """No `require_roles` gate -- same reasoning as
+    `list_issues_public_endpoint`. Schema drift (column/type/severity)
+    isn't sensitive -- it's the same class of structural metadata
+    `GET /v1/data-sources/public` already exposes for the catalog
+    itself."""
     return await get_schema_report(db, redis)
 
 

@@ -425,6 +425,12 @@ rabbitmq, redis, minio, mlflow, prometheus, grafana, loki).
 ```text
   data-pipeline  → http://localhost:8001    (OpenAPI: /docs)
   forecast-api   → http://localhost:8002    (OpenAPI: /docs)
+  ingest         → http://localhost:8003    (OpenAPI: /docs)
+  warehouse      → http://localhost:8004    (OpenAPI: /docs)
+  observility    → http://localhost:8005    (OpenAPI: /docs)
+
+
+
 
 
   warehouse-sync → running headless          (logs: make logs-warehouse-sync)

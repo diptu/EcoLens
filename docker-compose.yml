@@ -19,7 +19,14 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-ecolens}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ecolens}
     ports:
-      - "5432:5432"
+      # Host-side port overridable via POSTGRES_HOST_PORT -- a real,
+      # previously-hit blocker (services/waerehouse/README.md's own
+      # "Not yet verified" note): a native Postgres install already
+      # bound to 5432 on the host makes `docker compose up` fail to bind
+      # this service, with nothing wrong in the repo itself. Container-
+      # to-container traffic (e.g. `warehouse` -> `postgres:5432`) is
+      # unaffected either way -- only the host-side mapping changes.
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./infra/docker/postgres/init:/docker-entrypoint-initdb.d:ro
@@ -193,10 +200,13 @@ services:
   # project/image, not a `data-pipeline` command variant. Runs alongside
   # `data-pipeline` (unmodified) until every source is verified and cut
   # over (Phase 4/5), not a replacement for it yet. Mounts the same
-  # `duckdb_staging` volume as `data-pipeline`/`warehouse-sync` as an
-  # explicit, temporary bridge (Phase 2's own decision note) -- real
-  # independent deployment needs the R2 handoff Phase 2 describes, not
-  # this shared volume.
+  # `duckdb_staging` volume as `data-pipeline`/`warehouse-sync` purely as
+  # a same-host performance fast-path now, not a hard requirement --
+  # both consumers fall back to downloading the run's snapshot from
+  # object storage (`read_staged_with_fallback`/`read_run_with_fallback`)
+  # when this volume isn't actually shared, i.e. `ingestion` is deployed
+  # on a different machine than its consumer. See
+  # `docs/runbooks/independent-service-deployment.md`.
   ingestion:
     build:
       context: .
@@ -273,9 +283,12 @@ services:
   # alongside `data-pipeline`'s own `warehouse-sync` below (unmodified)
   # until this service is verified and cut over, same "extract, don't
   # replace yet" pattern `services/ingestion` already established.
-  # Read-only on the shared `duckdb_staging` volume (`app.db.
-  # duckdb_client`'s own module docstring -- writing/appending stays
-  # ingestion's job).
+  # Read-only on the shared `duckdb_staging` volume when it's there
+  # (`app.db.duckdb_client`'s own module docstring -- writing/appending
+  # stays ingestion's job) -- falls back to downloading from object
+  # storage when `ingestion` runs on a different machine and this
+  # volume isn't actually shared, see
+  # `docs/runbooks/independent-service-deployment.md`.
   warehouse:
     build:
       context: .
@@ -297,6 +310,16 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+    # Lightweight FastAPI control plane (status/storage/metrics reads) --
+    # same `deploy.resources.limits`-on-plain-`compose up` mechanism
+    # `train-worker`'s own comment below explains; bounds this from
+    # starving `api`/`data-pipeline` on the same host, not a real
+    # node-pool-level isolation guarantee.
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
 
   # The actual RabbitMQ consumer (`ecolens.landing` -> Postgres `raw.*`)
   # -- same image/entrypoint as `warehouse` above, `command: consume` is
@@ -314,6 +337,15 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+    # Same `deploy.resources.limits` reasoning as `warehouse` above --
+    # DuckDB reads + pyarrow COPY loads are heavier per-message than the
+    # API's own reads, hence the higher memory ceiling than `warehouse`'s
+    # own 1g, still nowhere near `train-worker`'s 4g.
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 2g
 
   # ── Warehouse-sync consumer (overview.md §2, data-pipeline's own
   # legacy version) ─────────────────────────────────────────────────────────

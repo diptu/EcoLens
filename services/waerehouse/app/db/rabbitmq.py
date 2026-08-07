@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import signal
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -160,3 +161,47 @@ async def consume_landed_events(
                 )
                 await _publish_to_dlq(channel, dlx, message.body, str(exc))
                 await message.ack()
+
+
+async def run_consumer_forever(
+    handler: Callable[[dict[str, Any]], Awaitable[None]],
+) -> None:
+    """`consume_landed_events(handler)`, but exits cleanly on SIGTERM
+    (what `docker stop`/an orchestrator sends on shutdown, not SIGINT/
+    Ctrl+C) instead of running until the container's stop grace period
+    elapses and SIGKILL ends it mid-anything. `cli.py`'s `consume`
+    command is the only real caller; split out here (not left inline in
+    the CLI command) so the shutdown logic is testable without actually
+    sending a process a signal.
+
+    **Not a data-safety fix** — `consume_landed_events` only ever acks a
+    message *after* its handler succeeds, so a message in flight when
+    killed (SIGTERM *or* a bare SIGKILL, same as before this existed) is
+    simply redelivered by RabbitMQ on reconnect either way, landing
+    through the same idempotent `ON CONFLICT DO NOTHING` path either
+    time. This is about exiting promptly with a clean log line and a
+    closed connection instead of relying on SIGKILL as the only way this
+    process ever stops.
+
+    `loop.add_signal_handler` isn't implemented on Windows' default
+    asyncio event loop — falls back to no-op there (Ctrl+C/
+    `KeyboardInterrupt` still works for local dev); every real deployment
+    of this service runs in a Linux container, where it works.
+    """
+    loop = asyncio.get_running_loop()
+    task = asyncio.ensure_future(consume_landed_events(handler))
+
+    def _handle_sigterm() -> None:
+        task.cancel()
+
+    try:
+        loop.add_signal_handler(signal.SIGTERM, _handle_sigterm)
+    except NotImplementedError:
+        pass
+
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    finally:
+        await close_rabbitmq()

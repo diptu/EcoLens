@@ -232,6 +232,32 @@ class TestAuth:
         assert response.status_code == 200
 
 
+class TestListingPublic:
+    def test_does_not_require_auth(self, client):
+        response = client.get("/v1/data-sources/public")
+
+        assert response.status_code == 200
+
+    def test_agrees_with_authenticated_endpoint(self, client):
+        authed = client.get("/v1/data-sources", headers=_auth()).json()
+        public = client.get("/v1/data-sources/public").json()
+
+        assert public == authed
+
+    def test_filters_still_work(self, client):
+        response = client.get("/v1/data-sources/public?category=grid")
+
+        ids = {d["id"] for d in response.json()["data"]}
+        assert ids == {"ds-aemo-nem", "ds-aemo-wem"}
+
+    def test_no_credential_value_is_ever_exposed(self, client):
+        response = client.get("/v1/data-sources/public")
+
+        body = response.json()
+        for source in body["data"]:
+            assert set(source["auth"].keys()) == {"type"}
+
+
 class TestListing:
     def test_returns_all_five_catalog_sources_with_computed_health(self, client):
         response = client.get("/v1/data-sources", headers=_auth())

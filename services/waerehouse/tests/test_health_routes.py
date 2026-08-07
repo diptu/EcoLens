@@ -67,3 +67,14 @@ def test_metrics_endpoint_returns_prometheus_text(client):
     assert response.status_code == 200
     assert "text/plain" in response.headers["content-type"]
     assert b"ecolens_warehouse" in response.content
+
+
+def test_metrics_endpoint_identifies_this_service_via_build_info(client):
+    from app import __version__
+
+    response = client.get("/metrics")
+
+    assert (
+        f'ecolens_build_info{{service="warehouse",version="{__version__}"}} 1.0'
+        in response.text
+    )

@@ -45,3 +45,27 @@ async def test_run_closes_the_connection_even_if_consuming_raises(monkeypatch):
         await worker.run()
 
     assert closed == [True]
+
+
+async def test_run_is_a_noop_when_warehouse_sync_consumer_disabled(monkeypatch):
+    """`services/waerehouse/TODO.md` Phase 4's cutover switch — flipping
+    `warehouse_sync_consumer_enabled` off must not open a RabbitMQ
+    connection at all, not just skip consuming from it."""
+    calls = []
+
+    async def fake_consume(handler):
+        calls.append("consume")
+
+    async def fake_close():
+        calls.append("close")
+
+    class FakeSettings:
+        warehouse_sync_consumer_enabled = False
+
+    monkeypatch.setattr(worker, "consume_landed_events", fake_consume)
+    monkeypatch.setattr(worker, "close_rabbitmq", fake_close)
+    monkeypatch.setattr(worker, "get_settings", lambda: FakeSettings())
+
+    await worker.run()
+
+    assert calls == []

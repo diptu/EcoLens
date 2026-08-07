@@ -15,6 +15,17 @@ downloads/
 eggs/
 .eggs/
 lib/
+# This unanchored Python-packaging `lib/` rule above also matches
+# `services/dashboard/src/lib/` (any directory literally named `lib/`,
+# anywhere) -- silently swallowing every new TypeScript file added
+# there (confirmed: data-quality.ts/health.ts/data-sources.ts were
+# never tracked despite `git add`/status never flagging an error,
+# since gitignore only suppresses *untracked* files rather than
+# erroring). Un-ignore that one real source directory explicitly
+# rather than re-anchoring the rule above, which risks missing some
+# other Python `lib/` build dir elsewhere in the tree that still needs
+# to stay ignored.
+!services/dashboard/src/lib/
 lib64/
 parts/
 sdist/

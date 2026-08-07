@@ -25,10 +25,14 @@ async def _fake_get_session():
 async def test_sync_landed_event_happy_path(monkeypatch):
     calls = {}
 
+    async def fake_read_staged_with_fallback(
+        path, table, run_id, object_storage_key, object_storage_bucket
+    ):
+        calls["read"] = (path, table, run_id, object_storage_key, object_storage_bucket)
+        return pd.DataFrame({"a": [1, 2]})
+
     monkeypatch.setattr(
-        warehouse_sync,
-        "read_staged",
-        lambda path, table, run_id: pd.DataFrame({"a": [1, 2]}),
+        warehouse_sync, "read_staged_with_fallback", fake_read_staged_with_fallback
     )
 
     async def fake_load_to_postgres(session, df, table, schema="raw"):
@@ -56,6 +60,8 @@ async def test_sync_landed_event_happy_path(monkeypatch):
         "table": "bom_observations",
         "schema": "raw",
         "duckdb_path": "/fake/staging/bom_observations-run.duckdb",
+        "object_storage_key": "staging/bom_observations-run.duckdb",
+        "object_storage_bucket": "ecolense",
         "rows": 2,
     }
 
@@ -63,6 +69,17 @@ async def test_sync_landed_event_happy_path(monkeypatch):
 
     assert calls["load"] == ("bom_observations", "raw", 2)
     assert calls["synced"] == ("11111111-1111-1111-1111-111111111111", 2)
+    # The object-storage fields from the payload are threaded through to
+    # the fallback reader, not silently dropped -- this is exactly what
+    # makes cross-machine deployment work (see duckdb_staging.
+    # read_staged_with_fallback's own docstring).
+    assert calls["read"] == (
+        "/fake/staging/bom_observations-run.duckdb",
+        "bom_observations",
+        "11111111-1111-1111-1111-111111111111",
+        "staging/bom_observations-run.duckdb",
+        "ecolense",
+    )
     assert deleted["call"] == (
         "/fake/staging/bom_observations-run.duckdb",
         "bom_observations",
@@ -70,11 +87,55 @@ async def test_sync_landed_event_happy_path(monkeypatch):
     )
 
 
+async def test_sync_landed_event_defaults_object_storage_fields_to_none_when_absent(
+    monkeypatch,
+):
+    """This service's own legacy producer never populates
+    object_storage_key/_bucket -- `.get()` on the payload, not `[]`,
+    means those events still work rather than raising a `KeyError`."""
+    calls = {}
+
+    async def fake_read_staged_with_fallback(
+        path, table, run_id, object_storage_key, object_storage_bucket
+    ):
+        calls["read"] = (object_storage_key, object_storage_bucket)
+        return pd.DataFrame({"a": [1]})
+
+    monkeypatch.setattr(
+        warehouse_sync, "read_staged_with_fallback", fake_read_staged_with_fallback
+    )
+
+    async def fake_load_to_postgres(session, df, table, schema="raw"):
+        return 1
+
+    monkeypatch.setattr(warehouse_sync, "load_to_postgres", fake_load_to_postgres)
+    monkeypatch.setattr(warehouse_sync, "get_session", _fake_get_session)
+
+    async def fake_log_run_synced(run_id, rows_loaded):
+        return None
+
+    monkeypatch.setattr(warehouse_sync, "log_run_synced", fake_log_run_synced)
+    monkeypatch.setattr(
+        warehouse_sync, "delete_staged", lambda path, table, run_id: None
+    )
+
+    payload = {
+        "run_id": "33333333-3333-3333-3333-333333333333",
+        "source": "bom",
+        "table": "bom_observations",
+        "duckdb_path": "/fake/staging/bom_observations-run.duckdb",
+    }
+
+    await warehouse_sync.sync_landed_event(payload)
+
+    assert calls["read"] == (None, None)
+
+
 async def test_sync_landed_event_failure_logs_sync_failed_and_reraises(monkeypatch):
-    def boom(path, table, run_id):
+    async def boom(path, table, run_id, object_storage_key, object_storage_bucket):
         raise RuntimeError("duckdb file corrupted")
 
-    monkeypatch.setattr(warehouse_sync, "read_staged", boom)
+    monkeypatch.setattr(warehouse_sync, "read_staged_with_fallback", boom)
 
     calls = {}
 

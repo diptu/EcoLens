@@ -139,5 +139,13 @@ jobs:
       - name: dbt run
         run: uv run --directory services/waerehouse ecolens-warehouse dbt run
 
+      # Re-run so the 4 incremental fct_* marts (TODO.md Phase 1) actually
+      # exercise their `is_incremental()` branch at least once -- on the
+      # first run above the relations don't exist yet, so that Jinja
+      # block never executes and a syntax/logic error in it would
+      # otherwise pass CI silently.
+      - name: dbt run (second pass, exercises incremental path)
+        run: uv run --directory services/waerehouse ecolens-warehouse dbt run
+
       - name: dbt test
         run: uv run --directory services/waerehouse ecolens-warehouse dbt test

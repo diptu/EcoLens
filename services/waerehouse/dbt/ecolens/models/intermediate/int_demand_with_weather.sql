@@ -40,7 +40,7 @@ weather as (
 ),
 
 generation as (
-    select ts, region, total_generation_mw, total_renewable_mw
+    select ts, region, total_generation_mw, total_renewable_mw, renewable_mw_source
     from {{ ref('stg_openelectricity_mix') }}
 )
 
@@ -51,6 +51,13 @@ select
     d.price_mwh,
     g.total_generation_mw,
     g.total_renewable_mw,
+    -- 'provider' / 'derived' / null -- stg_openelectricity_mix.sql's own
+    -- header comment (TODO.md Phase 2's renewable-share fallback).
+    -- Surfaced here so downstream consumers (dashboard, forecast-api)
+    -- can tell which rows used the derived fallback instead of the
+    -- provider's own reported figure -- previously only visible by
+    -- querying raw_staging.stg_openelectricity_mix directly.
+    g.renewable_mw_source,
     w.temp_c,
     w.apparent_temp_c,
     w.humidity_pct,
@@ -72,7 +79,7 @@ left join lateral (
     limit 1
 ) w on true
 left join lateral (
-    select g2.total_generation_mw, g2.total_renewable_mw
+    select g2.total_generation_mw, g2.total_renewable_mw, g2.renewable_mw_source
     from generation g2
     where g2.region = d.region and g2.ts <= d.ts
     order by g2.ts desc

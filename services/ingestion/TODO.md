@@ -437,6 +437,39 @@ mechanism itself.
     applied here because it's a live change against the real R2 bucket
     config, not a code change `services/ingestion` itself owns or can
     safely make unattended.
+[x] **Update 2026-08-07 — the consumer side of this handoff is now
+    real, not just this producer's own upload.** This section's own
+    Ground Truth already documented that `upload_staged_file` uploads
+    every run to object storage and `publish_landed_event` carries
+    `object_storage_key`/`_bucket` alongside `duckdb_path` — but until
+    now, **neither consumer actually read those fields.**
+    `services/data-pipeline`'s `warehouse_sync.sync_landed_event` and
+    `services/waerehouse`'s `consumers.landed_events.sync_landed_event`
+    both only ever read the local `duckdb_path`, meaning the shared
+    `duckdb_staging` Docker volume this repo's `docker-compose.yml`
+    happens to mount into all three containers was silently doing 100%
+    of the real work — the object-storage fields were dead data as far
+    as consumption went, and running `services/ingestion` on a
+    different machine than its consumer would have either raised on a
+    missing file or (worse, `services/waerehouse`'s own `read_run`)
+    silently synced **zero rows** as if nothing was wrong. Fixed both
+    consumers: `data-pipeline`'s new `duckdb_staging.
+    read_staged_with_fallback` and `waerehouse`'s new `duckdb_client.
+    read_run_with_fallback` try the local file first (same-host fast
+    path, unchanged), then download+read the run's object-storage
+    snapshot when it's missing. `services/waerehouse`'s own
+    `db/object_storage.py` gained `download_bytes` (it was upload-only
+    before — "nothing in this service ever reads cold-storage exports
+    back" was true of cold-storage specifically, not of this new
+    staging-snapshot read path). See `docs/runbooks/independent-
+    service-deployment.md` for the operational requirement this
+    creates (real R2 credentials, not local MinIO, are now required —
+    not just convenient — on both sides once ingestion and its
+    consumer are on different machines). 9 new tests across both
+    consumer services, `data-pipeline` full suite (749 passed/5
+    skipped, same 1 pre-existing unrelated failure) and `waerehouse`
+    full suite (83 passed/1 skipped) both green, `ruff`/`mypy` clean on
+    every changed file.
 
 ---
 

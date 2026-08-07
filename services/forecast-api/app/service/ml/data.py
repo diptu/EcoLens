@@ -297,6 +297,57 @@ async def load_generation_mix(
     return [dict(row) for row in result.mappings().all()]
 
 
+async def load_emissions_trace(
+    db: AsyncSession, region: str, limit: int
+) -> tuple[list[dict], dict[object, list[dict]]]:
+    """The most recent `limit` hours of `fct_carbon_intensity` for
+    `region`, plus the `fct_generation_mix` per-fuel rows that sum into
+    each of those same hours — backs `GET /v1/emissions/trace`. Two
+    queries rather than one join: the aggregate table is one row per
+    hour, the per-fuel table is many rows per hour, and fetching the
+    per-fuel rows only for the exact hour set the first query actually
+    returned (not a separate `[start, end]` window recomputed
+    independently) guarantees the two can never disagree about which
+    hours are in scope.
+
+    Returns `(intensity_rows, mix_rows_by_hour)` — `mix_rows_by_hour`
+    keyed by the same `hour` value `intensity_rows` uses, so the route
+    layer can zip them together without a third query.
+    """
+    intensity_result = await db.execute(
+        text(
+            "SELECT hour, total_generation_mwh, total_emissions_kgco2e, "  # nosec B608 -- `MARTS_SCHEMA` is a fixed module-level constant, not user input
+            "intensity_kgco2e_per_mwh, factors_version "
+            f"FROM {MARTS_SCHEMA}.fct_carbon_intensity "
+            "WHERE region = :region ORDER BY hour DESC LIMIT :limit"
+        ),
+        {"region": region, "limit": limit},
+    )
+    intensity_rows = [dict(row) for row in intensity_result.mappings().all()]
+    if not intensity_rows:
+        return [], {}
+
+    hours = [row["hour"] for row in intensity_rows]
+    # `[min(hours), max(hours)]` rather than an exact `IN`/`= ANY` set --
+    # `intensity_rows` is already exactly the N most recent hours for
+    # this region with no gaps skipped, so a plain range covers the
+    # identical hour set without needing array-parameter binding at all.
+    mix_result = await db.execute(
+        text(
+            "SELECT hour, fuel_type, total_generation_mwh, total_emissions_kgco2e "  # nosec B608 -- `MARTS_SCHEMA` is a fixed module-level constant, not user input
+            f"FROM {MARTS_SCHEMA}.fct_generation_mix "
+            "WHERE region = :region AND hour >= :min_hour AND hour <= :max_hour "
+            "ORDER BY hour DESC, total_emissions_kgco2e DESC NULLS LAST"
+        ),
+        {"region": region, "min_hour": min(hours), "max_hour": max(hours)},
+    )
+    mix_rows_by_hour: dict[object, list[dict]] = {}
+    for row in mix_result.mappings().all():
+        mix_rows_by_hour.setdefault(row["hour"], []).append(dict(row))
+
+    return intensity_rows, mix_rows_by_hour
+
+
 async def load_ytd_intensity(db: AsyncSession, start, end) -> dict | None:
     """All-region rollup across `[start, end]` — backs `GET
     /v1/emissions/ytd`. Same `sum(emissions) / sum(generation)`

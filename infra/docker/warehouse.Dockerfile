@@ -20,7 +20,22 @@ COPY --from=ghcr.io/astral-sh/uv:0.9.6 /uv /uvx /usr/local/bin/
 # dbt-postgres needs a real `git` on PATH for package installs
 # (`dbt deps`) even though this project doesn't currently declare any
 # packages -- cheap to have, expensive to debug the absence of later.
-RUN apt-get update && apt-get install -y --no-install-recommends git \
+#
+# wget -- docker-compose.yml's own healthcheck for this service
+# (`CMD wget -qO- http://localhost:8004/v1/healthz`) needs it on PATH
+# inside the container; `python:3.12-slim` doesn't ship it. Real bug
+# found live (`TODO.md` Phase 4) while verifying `docker compose up
+# warehouse` end-to-end: `/v1/healthz`/`/v1/readyz` both answered
+# correctly over the published port the whole time, but the container's
+# own Docker healthcheck never once succeeded (`FailingStreak` climbing
+# forever, `exec: "wget": executable file not found in $PATH`) --
+# the app was healthy, Docker just couldn't tell. The same gap exists in
+# every sibling service's Dockerfile (`ingestion`/`forecast-api` install
+# neither wget nor curl; `data-pipeline` installs curl, not wget, so its
+# identical wget-based healthcheck is equally broken) -- out of scope to
+# fix here since only this service was asked for, noted in `TODO.md` so
+# it isn't lost.
+RUN apt-get update && apt-get install -y --no-install-recommends git wget \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app/services/waerehouse

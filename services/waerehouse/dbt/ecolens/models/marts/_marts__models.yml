@@ -10,6 +10,23 @@ models:
         tests: [not_null]
       - name: demand_mw
         tests: [not_null]
+      - name: renewable_mw_source
+        description: >
+          'provider' / 'derived' / null — see int_demand_with_weather's
+          own column doc (TODO.md Phase 2). Tested there, not duplicated
+          here.
+      - name: is_anomalous
+        description: >
+          True if services/ingestion's hybrid detector flagged this
+          (ts, region)'s demand reading (meta.anomalies, joined via
+          int_anomaly_by_demand — TODO.md Phase 3). Never filtered out —
+          flagged rows stay in this mart, just labeled.
+        tests: [not_null]
+      - name: anomaly_reason
+        tests:
+          - not_null:
+              config:
+                where: "is_anomalous"
 
   - name: fct_emissions_5min
     description: Row-level carbon intensity + emissions, one row per (ts, network_code, region).
@@ -20,6 +37,18 @@ models:
         tests: [not_null]
       - name: intensity_kgco2e_per_mwh
         description: Null when total_generation_mwh is 0/null for that row — nothing to weight.
+      - name: is_anomalous
+        description: >
+          True if services/ingestion's hybrid detector flagged the
+          openelectricity_mix reading behind this row (meta.anomalies,
+          joined via int_anomaly_by_mix_row, row-grain — TODO.md's "prod
+          grade" pass, extending Phase 3 past its original 2 marts).
+        tests: [not_null]
+      - name: anomaly_reason
+        tests:
+          - not_null:
+              config:
+                where: "is_anomalous"
 
   - name: fct_carbon_intensity
     description: Hourly generation-weighted carbon intensity per region.
@@ -28,6 +57,19 @@ models:
         tests: [not_null]
       - name: region
         tests: [not_null]
+      - name: is_anomalous
+        description: >
+          True if services/ingestion's hybrid detector flagged the
+          openelectricity_mix reading behind this (hour, network_code,
+          region) (meta.anomalies, joined via int_anomaly_by_mix, same
+          hourly rollup fct_generation_mix uses — TODO.md's "prod grade"
+          pass, extending Phase 3 past its original 2 marts).
+        tests: [not_null]
+      - name: anomaly_reason
+        tests:
+          - not_null:
+              config:
+                where: "is_anomalous"
 
   - name: fct_generation_mix
     description: >
@@ -47,6 +89,20 @@ models:
               arguments:
                 to: ref('emissions_factors')
                 field: fuel_type
+      - name: is_anomalous
+        description: >
+          True if services/ingestion's hybrid detector flagged the
+          openelectricity_mix reading behind this (hour, network_code,
+          region) (meta.anomalies, joined via int_anomaly_by_mix —
+          TODO.md Phase 3). Shared across every fuel_type row for that
+          hour — the flag is on the mix reading, not one fuel in
+          isolation.
+        tests: [not_null]
+      - name: anomaly_reason
+        tests:
+          - not_null:
+              config:
+                where: "is_anomalous"
 
   - name: dim_energy_mix
     description: One row per fuel type — emissions factor + renewable/fossil/storage classification.

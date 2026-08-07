@@ -5,13 +5,13 @@
  *   forecast-api /v1/readyz, data-pipeline /v1/readyz, IAM / + /db_health
  *     (lib/health.ts)
  *   GET /v1/model (lib/emissions.ts, forecast-api)
- *
- * data-pipeline has no "list pipelines with schedule/health", scheduler
- * status, or failed-runs-list endpoint (only a trigger+poll API — see
- * `lib/ingestion.ts`), so the pipeline inventory shown here is the
- * static real-source catalog (`PIPELINE_CATALOG`) with no live
- * status — trigger/monitor a run from the Ingestion Pipeline or
- * Operational Tasks pages instead of here.
+ *   GET /v1/data-sources/public (lib/data-sources.ts, data-pipeline) —
+ *     real per-source health/schedule, replaces the old static
+ *     `PIPELINE_CATALOG` (real source names, but no live status) now
+ *     that a public, unauthenticated mirror of `GET /v1/data-sources`
+ *     exists (added specifically to unblock this and the Data Sources
+ *     page — see that endpoint's own docstring in data-pipeline's
+ *     `api/v1/datasources/routes.py`).
  */
 "use client";
 
@@ -21,13 +21,14 @@ import { Server } from "lucide-react";
 import { Card } from "@/components/dashboard/card";
 import { SectionPage } from "@/components/dashboard/section-page";
 import { cn } from "@/lib/utils";
+import { fetchPublicDataSources, healthDotStatus, type DataSource } from "@/lib/data-sources";
 import { fetchModelInfo, type ModelInfo } from "@/lib/emissions";
 import { fetchAllServicesHealth, type ServiceHealth } from "@/lib/health";
-import { PIPELINE_CATALOG } from "@/lib/ingestion";
 
 export default function OperationsDashboardPage() {
   const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null);
   const [servicesHealth, setServicesHealth] = useState<ServiceHealth[] | null>(null);
+  const [sources, setSources] = useState<DataSource[] | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -39,6 +40,11 @@ export default function OperationsDashboardPage() {
     fetchAllServicesHealth().then((r) => {
       if (!cancelled) setServicesHealth(r);
     });
+    fetchPublicDataSources()
+      .then((r) => {
+        if (!cancelled) setSources(r.data);
+      })
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
@@ -46,11 +52,12 @@ export default function OperationsDashboardPage() {
 
   const kpis = useMemo(() => {
     const healthyCount = servicesHealth?.filter((s) => s.ready).length ?? null;
+    const healthySourceCount = sources?.filter((s) => s.health.status === "healthy").length ?? null;
     return [
       {
         label: "Ingestion Pipelines",
-        value: `${PIPELINE_CATALOG.length}`,
-        sub: "trigger from Ingestion Pipeline page",
+        value: sources ? `${sources.length}` : "…",
+        sub: healthySourceCount != null ? `${healthySourceCount} healthy` : "trigger from Ingestion Pipeline page",
       },
       {
         label: "Model Status",
@@ -66,7 +73,7 @@ export default function OperationsDashboardPage() {
           .join(", ") || (healthyCount != null ? "all ready" : undefined),
       },
     ];
-  }, [modelInfo, servicesHealth]);
+  }, [modelInfo, servicesHealth, sources]);
 
   return (
     <SectionPage
@@ -84,19 +91,26 @@ export default function OperationsDashboardPage() {
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             <Card>
               <h2 className="mb-3 text-base font-semibold text-white">Ingestion Pipelines</h2>
-              <ul className="space-y-1.5 text-sm">
-                {PIPELINE_CATALOG.map((p) => (
-                  <li key={p.id} className="flex items-center justify-between rounded-md border border-white/5 bg-white/[0.02] p-2.5">
-                    <span className="text-white/85">{p.label}</span>
-                    {!p.triggerable && <span className="text-[11px] text-white/40">dbt build</span>}
-                  </li>
-                ))}
-              </ul>
+              {sources === null ? (
+                <p className="text-sm text-white/40">Loading…</p>
+              ) : (
+                <ul className="space-y-1.5 text-sm">
+                  {sources.map((s) => (
+                    <li key={s.id} className="flex items-center justify-between rounded-md border border-white/5 bg-white/[0.02] p-2.5">
+                      <span className="flex items-center gap-2 text-white/85">
+                        <SourceDot status={healthDotStatus(s.health.status)} />
+                        {s.name}
+                      </span>
+                      <span className="text-[11px] text-white/40">{s.schedule.cadence}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
               <a
-                href="/dashboard/ingestion/"
+                href="/dashboard/data-sources/"
                 className="mt-3 inline-flex w-full items-center justify-center gap-1 text-xs text-emerald-100 hover:underline"
               >
-                Trigger or monitor runs on the Ingestion Pipeline page
+                Trigger or monitor runs on the Data Sources page
               </a>
             </Card>
             <Card>
@@ -176,6 +190,16 @@ export default function OperationsDashboardPage() {
       }}
     />
   );
+}
+
+function SourceDot({ status }: { status: "healthy" | "degraded" | "down" | "unknown" }) {
+  const map = {
+    healthy:  "bg-emerald-200",
+    degraded: "bg-amber-400",
+    down:     "bg-rose-400",
+    unknown:  "bg-white/40",
+  } as const;
+  return <span className={cn("h-2 w-2 rounded-full", map[status])} title={status} />;
 }
 
 function HealthChip({ health }: { health: string }) {

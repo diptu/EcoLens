@@ -116,54 +116,6 @@ export function getEmissionsBySource(): SourceSlice[] {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// Data Sources
-// ────────────────────────────────────────────────────────────────────
-
-export type SourceHealth = "healthy" | "degraded" | "down" | "unknown";
-export type DataSourceCategory = "grid" | "weather" | "carbon" | "fuel" | "custom";
-
-export interface DataSource {
-  id: string;
-  name: string;
-  category: DataSourceCategory;
-  vendor: string;
-  region: string;
-  cadence: string;
-  cron: string;
-  description: string;
-  enabled: boolean;
-  last_sync: string;
-  last_status: "success" | "failed" | "partial" | "queued";
-  records_today: number;
-  health: SourceHealth;
-  api_endpoint: string;
-}
-
-export function getDataSources(): DataSource[] {
-  return [
-    { id: "ds-aemo-nem",   name: "AEMO NEM",            category: "grid",    vendor: "AEMO",            region: "AU NEM", cadence: "Every 5 min",   cron: "*/5 * * * *",   description: "5-min dispatch + SCADA for the 5 NEM regions",                              enabled: true,  last_sync: "2 min ago",  last_status: "success", records_today: 8_640,  health: "healthy",  api_endpoint: "https://nemweb.com.au/..." },
-    { id: "ds-aemo-wem",   name: "AEMO WEM",            category: "grid",    vendor: "AEMO WA",         region: "AU WEM", cadence: "Every 30 min",  cron: "*/30 * * * *",  description: "30-min market data for WA (single region)",                                  enabled: true,  last_sync: "12 min ago", last_status: "success", records_today: 48,     health: "healthy",  api_endpoint: "data.wa.aemo.com.au"      },
-    { id: "ds-entsoe",     name: "ENTSO-E",             category: "grid",    vendor: "ENTSO-E",         region: "EU",     cadence: "Hourly",        cron: "0 * * * *",     description: "European grid transparency (load + generation + prices)",                  enabled: true,  last_sync: "1 hr ago",   last_status: "success", records_today: 24,     health: "healthy",  api_endpoint: "transparency.entsoe.eu"  },
-    { id: "ds-open-meteo", name: "Open-Meteo",          category: "weather", vendor: "Open-Meteo",      region: "Global", cadence: "Hourly",        cron: "0 * * * *",     description: "Free global weather forecast (no API key required)",                        enabled: true,  last_sync: "15 min ago", last_status: "success", records_today: 4_320,  health: "healthy",  api_endpoint: "api.open-meteo.com"      },
-    { id: "ds-bom",        name: "BoM Observations",    category: "weather", vendor: "BoM",             region: "AU",     cadence: "Every 30 min",  cron: "*/30 * * * *",  description: "6 NEM/WEM weather stations via BoM v1 API",                                 enabled: true,  last_sync: "22 min ago", last_status: "success", records_today: 1_440,  health: "healthy",  api_endpoint: "api.weather.bom.gov.au"  },
-    { id: "ds-carbon",     name: "Carbon Intensity API",category: "carbon", vendor: "Electricity Maps",region: "Global", cadence: "Hourly",        cron: "0 * * * *",     description: "Carbon intensity (gCO₂/kWh) per region",                                     enabled: true,  last_sync: "30 min ago", last_status: "success", records_today: 24,     health: "healthy",  api_endpoint: "api.electricitymaps.com" },
-    { id: "ds-fuel-ice",   name: "ICE Fuel Prices",     category: "fuel",    vendor: "ICE",             region: "Global", cadence: "Every 2 hours", cron: "0 */2 * * *",   description: "Gas + coal + oil benchmark prices",                                          enabled: false, last_sync: "1 hr ago",   last_status: "failed",  records_today: 0,      health: "degraded", api_endpoint: "theice.com/..."          },
-    { id: "ds-eia",        name: "EIA Open Data",       category: "grid",    vendor: "EIA",             region: "US",     cadence: "Hourly",        cron: "0 * * * *",     description: "US EIA generation + demand + price (US benchmark)",                         enabled: true,  last_sync: "1 hr ago",   last_status: "success", records_today: 24,     health: "healthy",  api_endpoint: "api.eia.gov"             },
-    { id: "ds-custom-1",   name: "Custom REST — Site Meters", category: "custom", vendor: "Internal", region: "AU NEM", cadence: "Every 5 min",   cron: "*/5 * * * *",   description: "Customer's internal site-meter telemetry (REST/JSON)",                       enabled: true,  last_sync: "3 min ago",  last_status: "success", records_today: 12_000, health: "healthy",  api_endpoint: "https://internal/meters" },
-  ];
-}
-
-export function getSourceCategories() {
-  return [
-    { id: "grid",    label: "Grid Operators", count: 4 },
-    { id: "weather", label: "Weather",        count: 2 },
-    { id: "carbon",  label: "Carbon",         count: 1 },
-    { id: "fuel",    label: "Fuel Markets",   count: 1 },
-    { id: "custom",  label: "Custom REST",    count: 1 },
-  ];
-}
-
-// ────────────────────────────────────────────────────────────────────
 // Data Quality
 // ────────────────────────────────────────────────────────────────────
 

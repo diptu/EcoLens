@@ -15,7 +15,28 @@ from prometheus_client import (
     generate_latest,
 )
 
+from app import __version__
+
 REGISTRY = CollectorRegistry()
+
+# Standard Prometheus "info metric" pattern -- always 1, the labels carry
+# the actual data. Closes part of README's "Observability Contract"
+# (services/observility/README.md: every metric should be identifiable by
+# `service=`/`version=`) without needing a separate `/version` endpoint
+# or a hardcoded label in the scrape config that would drift the moment
+# this service ships a new version without someone remembering to update
+# it there too -- this way the number scraped is always whatever's
+# actually running. `environment=` is deliberately not repeated here --
+# that's Prometheus's own `external_labels.environment`
+# (services/observility/prometheus/prometheus.yml), which already
+# applies to every series scraped from every job, including this one.
+build_info = Gauge(
+    "ecolens_build_info",
+    "Always 1 -- service identity via labels.",
+    ["service", "version"],
+    registry=REGISTRY,
+)
+build_info.labels(service="data-pipeline", version=__version__).set(1)
 
 # Ingest (ECO-D24-D29)
 ingest_runs_total = Counter(

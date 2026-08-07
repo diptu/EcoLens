@@ -52,3 +52,21 @@ def test_ingest_rows_total_increments():
 
     text = metrics.metrics_as_text().decode()
     assert "ecolens_ingest_rows_total" in text
+
+
+def test_ingest_runs_total_increments_by_outcome():
+    metrics.ingest_runs_total.labels(source="aemo_wem", outcome="success").inc()
+
+    value = metrics.REGISTRY.get_sample_value(
+        "ecolens_ingest_runs_total", {"source": "aemo_wem", "outcome": "success"}
+    )
+    assert value == 1.0
+
+
+def test_build_info_identifies_this_service():
+    from app import __version__
+
+    value = metrics.REGISTRY.get_sample_value(
+        "ecolens_build_info", {"service": "ingestion", "version": __version__}
+    )
+    assert value == 1

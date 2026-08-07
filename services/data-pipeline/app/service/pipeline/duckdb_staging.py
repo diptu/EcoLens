@@ -27,16 +27,34 @@ what tracks this — once this service's own legacy ingest tasks are
 decommissioned (Phase 6, not started), the `landed`-table branch below
 can go away and this whole module can be deleted in favour of always
 reading the shared-file shape.
+
+`services/ingestion`'s producer *also* publishes `object_storage_key`/
+`object_storage_bucket` alongside `duckdb_path` (its own `_common.
+standard_run` uploads every run's staged rows to R2/MinIO in addition
+to writing them locally). This service's own legacy producer never
+does — it has no object-storage upload step at all, so those two
+payload fields are always absent from its events, and it's always
+same-host with its own consumer by definition (one service, one
+process pair). `read_staged_with_fallback` below is what makes cross-
+machine deployment of `services/ingestion` actually work: today's root
+`docker-compose.yml` only works because `ingestion`/`data-pipeline`
+happen to share one Docker-local `duckdb_staging` volume on one host —
+move `ingestion` to a different machine and that volume isn't shared
+anymore, so the local file this consumer expects at `duckdb_path` just
+isn't there. Object storage (a real network service, not a local
+mount) is what actually crosses that machine boundary.
 """
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 
 import duckdb
 import pandas as pd
 
 from app.core.config import get_settings
+from app.service import object_storage
 
 _TABLE = "landed"
 _RUN_ID_COLUMN = "_ingest_run_id"
@@ -102,6 +120,48 @@ def read_staged(path: str, table: str, run_id: str) -> pd.DataFrame:
         ).df()
     finally:
         con.close()
+
+
+async def read_staged_with_fallback(
+    path: str,
+    table: str,
+    run_id: str,
+    object_storage_key: str | None,
+    object_storage_bucket: str | None,
+) -> pd.DataFrame:
+    """`read_staged`, but downloads the run's object-storage snapshot
+    first when `path` doesn't exist locally — the cross-machine case
+    (see this module's own docstring): `services/ingestion` ran on a
+    different host than this consumer, so the `duckdb_staging` Docker
+    volume they'd otherwise share isn't actually shared.
+
+    `object_storage_key`/`_bucket` being `None` (this service's own
+    legacy producer never populates them) just means the local-file
+    branch below is the only one ever exercised for that producer's
+    events — same as before this function existed. If the local file is
+    genuinely missing with no object-storage fallback available either,
+    delegates to `read_staged` so the caller sees the same real,
+    honest "file not found" failure it always would have, rather than
+    a different error invented here.
+
+    Ingestion's object-storage snapshot is already the "legacy" `landed`-
+    table shape (`services/ingestion/app/service/pipeline/duckdb_staging.
+    py`'s `_export_run_snapshot` — just this run's rows, no `_ingest_
+    run_id` column) — `read_staged` already handles that shape via its
+    own first branch, so no new SQL/table-shape logic is needed here,
+    only the download-to-a-real-local-file step DuckDB itself requires
+    (it can't open a database directly from an in-memory byte buffer).
+    """
+    if Path(path).exists() or not object_storage_key:
+        return read_staged(path, table, run_id)
+
+    tmp_path = Path(tempfile.gettempdir()) / f"remote-{table}-{run_id}.duckdb"
+    body = await object_storage.download_bytes(object_storage_key, bucket=object_storage_bucket)
+    tmp_path.write_bytes(body)
+    try:
+        return read_staged(str(tmp_path), table, run_id)
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 def delete_staged(path: str, table: str, run_id: str) -> None:

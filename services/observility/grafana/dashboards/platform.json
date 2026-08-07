@@ -1,0 +1,104 @@
+{
+  "uid": "ecolens-platform",
+  "title": "ecoLens / Platform",
+  "tags": ["ecolens", "platform"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Service targets up",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "up",
+          "legendFormat": "{{job}}",
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" } } },
+            { "type": "value", "options": { "1": { "text": "UP", "color": "green" } } }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
+        }
+      },
+      "options": { "textMode": "value_and_name", "colorMode": "background", "graphMode": "none" },
+      "description": "All 4 business-service scrape jobs (data-pipeline, ingestion, warehouse, forecast-api) export real /metrics -- a DOWN reading here means the service is actually unreachable, not a known gap."
+    },
+    {
+      "id": 2,
+      "title": "Container CPU usage (5m rate, cores)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_project=\"ecolens\"}[5m])) by (container_label_com_docker_compose_service)",
+          "legendFormat": "{{container_label_com_docker_compose_service}}",
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+    {
+      "id": 3,
+      "title": "Container memory usage (% of limit)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "container_memory_usage_bytes{container_label_com_docker_compose_project=\"ecolens\"} / container_spec_memory_limit_bytes{container_label_com_docker_compose_project=\"ecolens\"}",
+          "legendFormat": "{{container_label_com_docker_compose_service}}",
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1, "min": 0 } }
+    },
+    {
+      "id": 4,
+      "title": "otel-collector health",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 12, "w": 8, "h": 6 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "up{job=\"otel-collector\"}",
+          "legendFormat": "otel-collector",
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" } } },
+            { "type": "value", "options": { "1": { "text": "UP", "color": "green" } } }
+          ]
+        }
+      },
+      "options": { "textMode": "value", "colorMode": "background" }
+    },
+    {
+      "id": 5,
+      "title": "Known gaps -- read before trusting an empty panel",
+      "type": "text",
+      "gridPos": { "x": 8, "y": 12, "w": 16, "h": 6 },
+      "options": {
+        "mode": "markdown",
+        "content": "- **HTTP error rate / request latency** panels don't exist here -- no service exports `http_requests_total`/`http_request_duration_seconds` yet (no `prometheus-fastapi-instrumentator`-equivalent middleware anywhere). See `prometheus/rules/platform.yml`'s commented-out placeholder alerts.\n- CPU/memory come from **cAdvisor**, scoped to `com.docker.compose.project=ecolens` -- this stack's own containers are excluded on purpose.\n- No service currently binds `service`/`environment`/`version` as structured-log or metric labels yet (README's Observability Contract) -- see `TODO.md`."
+      }
+    }
+  ]
+}

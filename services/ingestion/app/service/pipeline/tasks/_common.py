@@ -46,6 +46,7 @@ from app.core.metrics import (
     ingest_duration_seconds,
     ingest_failures_total,
     ingest_rows_total,
+    ingest_runs_total,
     latest_ingest_ts,
 )
 from app.db.rabbitmq import publish_landed_event
@@ -246,6 +247,7 @@ def standard_run(
                         rows_loaded=0,
                         circuit_state=await _read_breaker_state(source, breaker),
                     )
+                    ingest_runs_total.labels(source=source, outcome="success").inc()
                     log.info(
                         "ingest.run_succeeded",
                         source=source,
@@ -297,6 +299,7 @@ def standard_run(
                     circuit_state=await _read_breaker_state(source, breaker),
                 )
                 ingest_rows_total.labels(source=source).inc(rows_staged)
+                ingest_runs_total.labels(source=source, outcome="success").inc()
                 latest_ingest_ts.labels(source=source).set(time.time())
                 log.info(
                     "ingest.run_staged",
@@ -308,6 +311,7 @@ def standard_run(
                 return rows_staged
             except Exception as e:
                 ingest_failures_total.labels(source=source).inc()
+                ingest_runs_total.labels(source=source, outcome="failure").inc()
                 await _log_run_finish(
                     run_id,
                     status="failed",

@@ -211,6 +211,39 @@ export async function fetchEmissionsForecast(region?: string): Promise<Emissions
   return res.json();
 }
 
+/** Shape of forecast-api's `EmissionsTraceResponse` — the real
+ * per-interval calculation chain (`raw_marts.fct_carbon_intensity` +
+ * the `fct_generation_mix` rows that sum into it), not a mock. Backs
+ * the Carbon Methodology page's "show me the real numbers" trace. */
+export type EmissionsTrace = {
+  region: string;
+  generated_at: string;
+  intervals: {
+    hour: string;
+    total_generation_mwh: number | null;
+    total_emissions_kgco2e: number | null;
+    intensity_kgco2e_per_mwh: number | null;
+    factors_version: string | null;
+    by_fuel: {
+      fuel_type: string;
+      generation_mwh: number;
+      emissions_kgco2e: number;
+      effective_factor_kgco2e_per_mwh: number | null;
+    }[];
+  }[];
+};
+
+/** Live call to `GET /v1/emissions/trace`. No mock fallback on fetch
+ * failure — same policy as every other emissions endpoint on this
+ * page once wired to real data. */
+export async function fetchEmissionsTrace(region: string, limit = 5): Promise<EmissionsTrace> {
+  const res = await fetch(`${FORECAST_API_URL}/emissions/trace?region=${region}&limit=${limit}`);
+  if (!res.ok) {
+    throw new Error(`GET /v1/emissions/trace failed: ${res.status}`);
+  }
+  return res.json();
+}
+
 /** Shape of forecast-api's `ForecastResponse` (demand, not emissions). */
 export type DemandForecast = {
   region: string;

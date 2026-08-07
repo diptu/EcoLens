@@ -188,3 +188,4 @@ yarn-error.log*
 # Redis dump files
 dump.rdb
 .claude/worktrees/
+*.duckdb.*

@@ -2,8 +2,8 @@
  * /dashboard/operations — Operations Dashboard (Ops Manager view)
  *
  * Real data where it exists, honest placeholders where it doesn't:
- *   forecast-api /v1/readyz, data-pipeline /v1/readyz, IAM / + /db_health
- *     (lib/health.ts)
+ *   forecast-api /v1/readyz, data-pipeline /v1/readyz, ingestion
+ *     /v1/readyz (added 2026-08-07), IAM / + /db_health (lib/health.ts)
  *   GET /v1/model (lib/emissions.ts, forecast-api)
  *   GET /v1/data-sources/public (lib/data-sources.ts, data-pipeline) —
  *     real per-source health/schedule, replaces the old static

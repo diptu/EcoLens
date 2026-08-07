@@ -78,10 +78,63 @@ from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 from openelectricity import AsyncOEClient, DataMetric
+from openelectricity.models.timeseries import TimeSeriesResponse
 
 from app.core.config import get_settings
 
 _LONG_FORM_COLUMNS = ("ts", "fuel_type", "value")
+
+
+def _to_records_linear(self: TimeSeriesResponse) -> list[dict]:
+    """Drop-in replacement for the installed SDK's own `TimeSeriesResponse.
+    to_records()` (`openelectricity/models/timeseries.py`), monkeypatched
+    on below. The original re-scans the entire `records` list built so
+    far -- calling `.isoformat()` on every existing record's interval --
+    for every single point, an O(n^2) merge live-confirmed to make a
+    single day's fetch take 30-60+ minutes once a network-region's real
+    fueltech-grouping count grew large enough (`ingest_openelectricity.
+    py`'s own docstring already knew this path was O(n^2) and kept calls
+    to one day at a time for it, but hadn't hit a slow-enough day yet to
+    need this). Same output shape/semantics, just an O(1) dict lookup
+    (keyed by the same `(timestamp, sorted groupings)` identity) instead
+    of a linear scan, making the whole merge O(n).
+    """
+    if not self.data:
+        return []
+
+    records: list[dict] = []
+    index: dict[tuple, dict] = {}
+
+    for series in self.data:
+        for result in series.results:
+            groupings = {
+                k: v
+                for k, v in result.columns.__dict__.items()
+                if v is not None and k != "unit_code"
+            }
+            sorted_groupings = tuple(sorted(groupings.items()))
+
+            for point in result.data:
+                record_key = (point.timestamp.isoformat(), sorted_groupings)
+                existing_record = index.get(record_key)
+
+                if existing_record is not None:
+                    existing_record[series.metric] = point.value
+                else:
+                    record = {
+                        "interval": self._create_network_date(
+                            point.timestamp, series.network_timezone_offset
+                        ),
+                        **groupings,
+                        series.metric: point.value,
+                    }
+                    records.append(record)
+                    index[record_key] = record
+
+    return records
+
+
+TimeSeriesResponse.to_records = _to_records_linear
 
 # OE's API reports (and expects `date_start` in) each network's own
 # fixed local time, not UTC -- confirmed live against real API responses

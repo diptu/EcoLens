@@ -40,9 +40,15 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
             except ApiError as exc:
                 response = await api_error_handler(request, exc)
             except Exception as exc:  # noqa: BLE001 - last-resort catch, see module docstring
-                logger.error(
-                    "unhandled_exception", path=request.url.path, error=str(exc)
-                )
+                # `exc_info=exc` (not `error=str(exc)`) -- structlog's
+                # configured `format_exc_info` processor renders the full
+                # exception type + traceback from this. `str(exc)` alone
+                # is a real, previously-live bug: some exception types
+                # (e.g. bare `asyncio.TimeoutError()`) have an empty
+                # string representation, so the old logging made a real
+                # 500 completely undebuggable from logs alone --
+                # confirmed live 2026-08-07 chasing exactly that.
+                logger.error("unhandled_exception", path=request.url.path, exc_info=exc)
                 response = JSONResponse(
                     status_code=500, content={"detail": "internal server error"}
                 )

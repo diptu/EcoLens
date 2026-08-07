@@ -124,11 +124,22 @@ async def _verify(
         raise click.UsageError(
             f"unknown source '{source}' — expected one of {sorted(SOURCES)}"
         )
+    # `meta._ingest_log.source` stores `registry.SOURCES[key].source` (e.g.
+    # "openelectricity", "aemo_nem", "aemo_wem"), *not* the registry key
+    # itself (`--source oe`/`aemo-nem`/`aemo-wem`) -- a real, live-confirmed
+    # bug found 2026-08-07: passing the raw CLI key straight into `_collect`'s
+    # `WHERE source = :source` silently matched zero rows for every source
+    # except `bom`, whose key and `.source` value happen to be identical by
+    # coincidence. That's why a same-day shadow-vs-manual smoke test for
+    # `oe`/`aemo-nem`/`aemo-wem` came back trivially `0/0` (looked like a
+    # missing-comparison-data gap, not a query bug) while `bom` alone showed
+    # a real, meaningful match.
+    log_source = SOURCES[source].source
 
     all_within_tolerance = True
     for day in _daterange(start, end):
-        shadow = await _collect(source, day, "shadow")
-        real = await _collect(source, day, against)
+        shadow = await _collect(log_source, day, "shadow")
+        real = await _collect(log_source, day, against)
 
         rows_delta_pct = _pct_delta(shadow.rows_landed, real.rows_landed)
         anomalies_delta_pct = _pct_delta(

@@ -34,6 +34,29 @@ def get_engine() -> AsyncEngine:
         # engine factory -- see that module's docstring for the full
         # `DuplicatePreparedStatementError` failure mode this avoids.
         connect_args={"statement_cache_size": 0},
+        # **2026-08-07 — explicit, conservative pool sizing, added after
+        # a real (if not reliably reproducible) 500 chased live while
+        # verifying `POST /{id}/run`: unconfigured meant SQLAlchemy's
+        # defaults (`pool_size=5`, `max_overflow=10` -- up to 15
+        # connections *per engine instance*). `get_engine` is `@lru_
+        # cache`'d per *process*, and this service now runs as several
+        # independent processes against the same Neon database at once
+        # (the FastAPI server, an 8-child-prefork Celery worker each
+        # with its own engine post the persistent-event-loop fix above)
+        # -- worst case, `9 processes * 15 = 135` possible connections
+        # from this service alone, well past what Neon's pooler
+        # comfortably serves alongside `data-pipeline`'s own connections
+        # to the same database. Small per-process pool + a short
+        # `pool_timeout` (fail fast with a real error in seconds, not
+        # hang for the default 30s and surface an empty, undebuggable
+        # exception the way the live-observed 500 did) + `pool_recycle`
+        # (Neon can terminate idle connections server-side; recycling
+        # avoids handing out one that looks fine to `pool_pre_ping` but
+        # was already dropped moments before).
+        pool_size=2,
+        max_overflow=3,
+        pool_timeout=10,
+        pool_recycle=300,
     )
 
 

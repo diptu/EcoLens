@@ -48,26 +48,63 @@ _BACKFILL_MAX_DAYS = 90
 # what's actually needed.
 _CHUNK_SECONDS = {"PT1H": 3600, "P1D": 86400, "P1W": 604800}
 
+# **2026-08-07 — a real, live-confirmed structural gap this bounds.**
+# `status='staged'` means "fetched and durably staged (DuckDB + R2),
+# waiting for `data-pipeline`'s `warehouse_sync` consumer to promote it
+# to `success`" — but that consumer lives entirely in a *different*
+# service. In any deployment where this service runs without that
+# consumer alongside it (confirmed live: `aemo_wem` alone had 497
+# `staged` rows and only 2 `success`), a `staged` row never resolves,
+# and an *unbounded* in-flight check (the original design) means `POST
+# .../run` 409s forever after the very first successful fetch — this
+# service's own trigger endpoint becomes permanently unusable without
+# ever touching this service's own code or data. `staged` gets a
+# generous but real time bound because of that; `running` deliberately
+# does not (see `_already_in_flight`'s own docstring for why those two
+# needed different answers, not the same one).
+_STAGED_STALE_AFTER = timedelta(hours=1)
+
 
 def _synthetic_run_id(prefix: str) -> str:
     return f"{prefix}-{int(datetime.now(UTC).timestamp())}-{uuid.uuid4().hex[:5]}"
 
 
 async def _already_in_flight(db: AsyncSession, source: str) -> bool:
-    """`meta._ingest_log` has a `running`/`staged` row for `source` —
-    used for `POST .../run`'s 409 `already_running`. Deliberately no time
-    bound: a permanently-stuck `staged` row (the warehouse-sync consumer
-    crashed) needs an operator to notice and intervene, same philosophy
-    as data-pipeline's identical check — silently ignoring it after some
-    timeout would let a duplicate run start against data that's still
-    mid-sync.
+    """`meta._ingest_log` has a blocking row for `source` — used for
+    `POST .../run`'s 409 `already_running`.
+
+    `status='running'` has **no time bound, deliberately** — a
+    genuinely stuck `running` row (the fetch process itself crashed
+    mid-flight) needs an operator to notice and intervene, not a
+    silent timeout that lets a duplicate fetch start while the first
+    one might still be writing. (Real orphaned `running` rows *did*
+    accumulate this way during 2026-08-07's live debugging — 132 of
+    them, corrected by hand after confirming each was genuinely
+    abandoned. That correction was the intended remedy, not evidence
+    the no-timeout design was wrong.)
+
+    `status='staged'` **does** get a time bound
+    (`_STAGED_STALE_AFTER`) — see that constant's own comment for the
+    real structural reason: unlike `running`, a `staged` row isn't
+    "still being written to," it's durably complete and just waiting
+    on a separate service's consumer. Blocking on a stale `staged` row
+    the same way as a stuck `running` one would make this service's
+    own trigger endpoint dependent on another service's process being
+    alive, in a way this endpoint's own caller has no way to fix or
+    even see.
     """
     result = await db.execute(
         text(
             "SELECT 1 FROM meta._ingest_log "
-            "WHERE source = :source AND status IN ('running', 'staged') LIMIT 1"
+            "WHERE source = :source AND ("
+            "  status = 'running'"
+            "  OR (status = 'staged' AND started_at >= :staged_cutoff)"
+            ") LIMIT 1"
         ),
-        {"source": source},
+        {
+            "source": source,
+            "staged_cutoff": datetime.now(UTC) - _STAGED_STALE_AFTER,
+        },
     )
     return result.first() is not None
 

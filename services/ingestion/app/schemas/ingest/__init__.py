@@ -12,6 +12,15 @@ from app.schemas.ingest.base import (
     IngestSourceKey,
     TriggeredBy,
 )
+from app.schemas.ingest.public import (
+    PublicPipelineOut,
+    PublicPipelineSchedule,
+    PublicPipelinesListResponse,
+    PublicPipelinesMeta,
+    PublicRunOut,
+    PublicRunsListResponse,
+    PublicRunsMeta,
+)
 from app.schemas.ingest.runs import IngestionRunOut
 
 __all__ = [
@@ -25,5 +34,12 @@ __all__ = [
     "IngestResponse",
     "IngestSourceKey",
     "IngestionRunOut",
+    "PublicPipelineOut",
+    "PublicPipelineSchedule",
+    "PublicPipelinesListResponse",
+    "PublicPipelinesMeta",
+    "PublicRunOut",
+    "PublicRunsListResponse",
+    "PublicRunsMeta",
     "TriggeredBy",
 ]

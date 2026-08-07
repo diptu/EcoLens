@@ -57,3 +57,20 @@ async def test_get_session_commits_with_no_pending_work():
 
 async def test_dispose_is_safe_without_a_live_connection():
     await db_session.dispose()
+
+
+def test_get_engine_has_conservative_explicit_pool_sizing():
+    """Added 2026-08-07 after a real (if not reliably reproducible) 500
+    chased live while verifying `POST /{id}/run` -- unconfigured pool
+    settings meant SQLAlchemy's defaults (`pool_size=5`, `max_
+    overflow=10`) per `@lru_cache`'d engine *per process*, and this
+    service now runs as several independent processes (FastAPI server +
+    an 8-child Celery worker) against the same Neon database at once.
+    See `get_engine`'s own docstring for the full reasoning."""
+    engine = db_session.get_engine()
+    pool = engine.pool
+
+    assert pool.size() == 2
+    assert pool._max_overflow == 3
+    assert pool._timeout == 10
+    assert pool._recycle == 300

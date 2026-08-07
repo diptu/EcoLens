@@ -11,16 +11,24 @@ _ingest_log` (`status="failed"`, via `_common.standard_run` itself) and
 the next Beat tick picks the source back up on its own regular cadence;
 a Celery-level retry on top would just be a second, uncoordinated retry
 mechanism racing the circuit breaker's own half-open/backoff logic.
+
+**2026-08-07 — uses `app.celery_app.run_async`, not `asyncio.run(...)`
+directly.** See that function's own module-level docstring in
+`celery_app.py` for the real, live-confirmed bug this fixes (a fresh
+event loop per task is fundamentally incompatible with the several
+process-lifetime-cached async clients `run_source`'s call graph touches
+— Postgres, Redis, RabbitMQ all hit `RuntimeError: Event loop is
+closed` in turn before this was fixed at the root instead of patched
+per-client).
 """
 
 from __future__ import annotations
 
-import asyncio
-
 from celery import group
 
-from app.celery_app import celery_app
+from app.celery_app import celery_app, run_async
 from app.core.logging import configure_logging, get_logger
+from app.service.pipeline.backfill import BACKFILLABLE_SOURCES
 from app.service.pipeline.tasks.registry import SOURCES, run_source
 
 log = get_logger(__name__)
@@ -39,7 +47,7 @@ def ingest_source_task(
     configure_logging()
     log.info("celery_tasks.ingest_started", source=key, triggered_by=triggered_by)
     try:
-        rows = asyncio.run(
+        rows = run_async(
             run_source(key, triggered_by=triggered_by, **kwargs)  # type: ignore[arg-type]
         )
     except Exception as exc:
@@ -82,5 +90,63 @@ def ingest_all_sources_task(triggered_by: str = "schedule") -> list[str]:
         ingest_source_task.si(key, triggered_by=triggered_by) for key in SOURCES
     )
     log.info("celery_tasks.dispatching_all_sources", sources=sorted(SOURCES))
+    result = job.apply_async()
+    return [child.id for child in result.results]
+
+
+@celery_app.task(
+    name="app.service.pipeline.tasks.celery_tasks.train_anomaly_model_task"
+)
+def train_anomaly_model_task(key: str) -> dict[str, object] | None:
+    """Same body as `ecolens-ingestion train-anomaly-model <source>`
+    (`app/cli.py`), wrapped as a Celery task so `train_all_anomaly_
+    models_task` below can schedule it on Beat instead of relying on an
+    operator to run the CLI by hand — `ml_anomaly`'s own module docstring
+    left this as "a small, additive follow-up... once real
+    retraining-cadence needs are known", not a redesign of anything
+    around it. `train_and_publish` returning `None` (not enough real
+    history yet, `ml_anomaly.MIN_TRAINING_ROWS`) is logged at `warning`,
+    not silently swallowed — the whole point of adding this is to make a
+    skipped/failed retrain visible instead of only discoverable by
+    noticing a model's `ml_score` never seems to fire.
+    """
+    from app.service.pipeline.ml_anomaly import train_and_publish
+
+    configure_logging()
+    entry = SOURCES[key]
+    log.info("celery_tasks.retrain_started", source=key)
+    try:
+        summary = run_async(train_and_publish(entry.source, entry.table))
+    except Exception as exc:
+        log.error("celery_tasks.retrain_failed", source=key, error=str(exc))
+        raise
+    if summary is None:
+        log.warning(
+            "celery_tasks.retrain_skipped",
+            source=key,
+            reason="not enough accumulated history yet (below ml_anomaly."
+            "MIN_TRAINING_ROWS)",
+        )
+        return None
+    log.info("celery_tasks.retrain_finished", **summary)
+    return summary
+
+
+@celery_app.task(
+    name="app.service.pipeline.tasks.celery_tasks.train_all_anomaly_models_task"
+)
+def train_all_anomaly_models_task() -> list[str]:
+    """Weekly Beat entry (`app.celery_app`'s `beat_schedule`) fanning out
+    one `train_anomaly_model_task` per backfillable source
+    (`pipeline.backfill.BACKFILLABLE_SOURCES` — `holidays` excluded, same
+    reason it never gets an anomaly model at all: no numeric columns).
+    Same independent-`celery.group` shape as `ingest_all_sources_task`,
+    for the same reason: one source's retrain being slow or skipped
+    (too little history) shouldn't delay the others.
+    """
+    job = group(train_anomaly_model_task.si(key) for key in BACKFILLABLE_SOURCES)
+    log.info(
+        "celery_tasks.dispatching_all_retrains", sources=sorted(BACKFILLABLE_SOURCES)
+    )
     result = job.apply_async()
     return [child.id for child in result.results]

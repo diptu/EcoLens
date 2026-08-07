@@ -376,3 +376,88 @@ class TestSourceHistory:
         )
 
         assert response.status_code == 422
+
+
+class _StatusRow:
+    def __init__(self, status: str, started_at: datetime):
+        self.status = status
+        self.started_at = started_at
+
+
+class _AlreadyInFlightFakeSession:
+    """Evaluates `_already_in_flight`'s real SQL semantics (status +
+    `started_at` cutoff) against a small fixed set of rows, instead of
+    the router-level `FakeSession`'s simple boolean membership check --
+    needed here specifically because the behavior under test *is* the
+    status/age distinction, not just "does it 409"."""
+
+    def __init__(self, rows: list[_StatusRow]):
+        self.rows = rows
+
+    async def execute(self, query, params=None):
+        params = params or {}
+        cutoff = params["staged_cutoff"]
+        matched = any(
+            row.status == "running"
+            or (row.status == "staged" and row.started_at >= cutoff)
+            for row in self.rows
+        )
+        return FakeResult([(1,)] if matched else [])
+
+
+class TestAlreadyInFlightStagedStaleness:
+    """Real, live-confirmed structural gap (2026-08-07): `status=
+    'staged'` only ever resolves to `'success'` via `data-pipeline`'s
+    `warehouse_sync` consumer, a *different* service. Without it running
+    alongside this one, `staged` rows never resolve — confirmed live,
+    `aemo_wem` alone had 497 `staged` rows and only 2 `success`. An
+    unbounded in-flight check made `POST .../run` permanently 409 after
+    the first successful fetch. `running` still has no bound
+    (deliberately); `staged` now does.
+
+    Scoped `anyio` marker on this class only (not module-wide) — every
+    other test in this file is synchronous (`TestClient`-driven); these
+    call `_already_in_flight` directly and need a real event loop.
+    """
+
+    pytestmark = pytest.mark.anyio
+
+    @pytest.fixture
+    def anyio_backend(self):
+        return "asyncio"
+
+    async def test_a_running_row_blocks_regardless_of_age(self):
+        session = _AlreadyInFlightFakeSession(
+            [_StatusRow("running", NOW - timedelta(days=3))]
+        )
+
+        assert await datasources_actions._already_in_flight(session, "bom") is True
+
+    async def test_a_recent_staged_row_blocks(self):
+        session = _AlreadyInFlightFakeSession(
+            [_StatusRow("staged", NOW - timedelta(minutes=5))]
+        )
+
+        assert await datasources_actions._already_in_flight(session, "bom") is True
+
+    async def test_a_stale_staged_row_does_not_block(self):
+        session = _AlreadyInFlightFakeSession(
+            [_StatusRow("staged", NOW - timedelta(hours=2))]
+        )
+
+        assert await datasources_actions._already_in_flight(session, "bom") is False
+
+    async def test_success_and_failed_rows_never_block(self):
+        session = _AlreadyInFlightFakeSession(
+            [
+                _StatusRow("success", NOW),
+                _StatusRow("failed", NOW),
+            ]
+        )
+
+        assert await datasources_actions._already_in_flight(session, "bom") is False
+
+    async def test_no_rows_at_all_does_not_block(self):
+        session = _AlreadyInFlightFakeSession([])
+
+        assert await datasources_actions._already_in_flight(session, "bom") is False

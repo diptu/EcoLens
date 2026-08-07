@@ -45,6 +45,22 @@ log = get_logger(__name__)
 # around longer than strictly necessary rather than pruning too
 # aggressively before this policy has seen real production use. Easy to
 # tighten once actual disk usage/growth rate is observed.
+#
+# **Not the same number as R2's own retention, on purpose.** The real
+# `ecolense` R2 bucket has its own lifecycle rule
+# (`expire-staging-snapshots-60d`, applied 2026-08-07) expiring
+# `staging/*` objects after 60 days -- double this constant's 30.
+# Deliberate, not drift: R2 is the durable long-term artifact copy,
+# this constant only governs the *local*, already-synced-to-Postgres
+# scratch copy `duckdb_staging`'s own module docstring describes as a
+# recovery artifact. A shorter local window and a longer R2 window are
+# both the conservative direction to diverge in -- local rows are safe
+# to prune once Postgres has them regardless of R2's own window, and
+# R2 keeping its copy longer costs nothing local pruning depends on.
+# If this number ever changes, the R2 rule is a separate, independent
+# setting (Cloudflare dashboard, or the same `aioboto3`/R2-credentials
+# path `app/service/object_storage.py` uses) -- not automatically kept
+# in sync.
 DEFAULT_RETENTION_DAYS = 30
 
 # `meta._ingest_log.source` -> `duckdb_staging`'s table name -- the log

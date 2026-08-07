@@ -15,6 +15,18 @@
  * Values below match `.env.local`'s own documented canonical port map
  * (from `make dev`'s printed service list): iam 8000, data-pipeline
  * 8001, forecast-api 8002.
+ *
+ * `INGESTION_API_URL` added 2026-08-07 — `services/ingestion` (the
+ * Celery-based rewrite of `data-pipeline`'s ingestion half,
+ * `services/ingestion/TODO.md`) runs its own FastAPI app on port 8003
+ * (`docker-compose.yml`'s `ingestion:` service, confirmed real
+ * `/v1/healthz` healthcheck there) but had no entry here at all until
+ * now — this dashboard had zero way to reach it, which is exactly why
+ * nothing here noticed when its worker/beat processes silently died
+ * (see `TODO.md`'s "Frontend integration" section). Additive only:
+ * still reads exclusively from `DATA_PIPELINE_API_URL` for every actual
+ * data-serving page — this just makes the service reachable for health
+ * monitoring, not a cutover.
  */
 
 export const IAM_API_URL =
@@ -25,6 +37,9 @@ export const FORECAST_API_URL =
 
 export const DATA_PIPELINE_API_URL =
   process.env.NEXT_PUBLIC_DATA_PIPELINE_API_URL ?? "http://localhost:8001/v1";
+
+export const INGESTION_API_URL =
+  process.env.NEXT_PUBLIC_INGESTION_API_URL ?? "http://localhost:8003/v1";
 
 /** IAM's health routes (`/`, `/db_health`) live at the app root, not
  * under `/api/v1` like every other IAM route this dashboard calls. */

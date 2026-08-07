@@ -150,6 +150,51 @@ async def test_collect_returns_zeroed_stats_for_no_runs(script, monkeypatch):
     assert stats.anomalies_flagged == 0
 
 
+@pytest.mark.parametrize(
+    "registry_key,expected_log_source",
+    [
+        ("oe", "openelectricity"),
+        ("aemo-nem", "aemo_nem"),
+        ("aemo-wem", "aemo_wem"),
+        ("bom", "bom"),
+    ],
+)
+async def test_verify_queries_meta_ingest_log_source_not_the_registry_key(
+    script, monkeypatch, registry_key, expected_log_source
+):
+    """A real, live-confirmed bug (2026-08-07): `meta._ingest_log.source`
+    stores `registry.SOURCES[key].source` ("openelectricity", "aemo_nem",
+    "aemo_wem"), not the registry key itself ("oe", "aemo-nem",
+    "aemo-wem") -- `_verify` used to pass the raw CLI `--source` value
+    straight into `_collect`'s `WHERE source = :source`, silently
+    matching zero rows for every source except `bom`, whose key and
+    `.source` value happen to be identical by coincidence (that
+    coincidence is exactly why every pre-existing test in this file,
+    all written against `"bom"`, never caught this). This test fails
+    against the old code for the first three params and only passes for
+    `"bom"` by accident, same as the real bug did."""
+    captured_sources: list[str] = []
+
+    async def fake_collect(source, day, trigger):
+        captured_sources.append(source)
+        return script._GroupStats(
+            trigger=trigger,
+            runs=0,
+            rows_landed=0,
+            anomalies_flagged=0,
+            statuses={},
+            circuit_states={},
+        )
+
+    monkeypatch.setattr(script, "_collect", fake_collect)
+
+    await script._verify(
+        registry_key, date(2026, 1, 1), date(2026, 1, 1), "schedule", tolerance_pct=1.0
+    )
+
+    assert captured_sources == [expected_log_source, expected_log_source]
+
+
 async def test_verify_reports_within_tolerance_when_counts_match(script, monkeypatch):
     log_rows = {
         "shadow": [

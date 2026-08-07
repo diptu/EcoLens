@@ -36,7 +36,9 @@ file on disk is the only persistent local copy.
 
 from __future__ import annotations
 
+import random
 import tempfile
+import time
 from pathlib import Path
 
 import duckdb
@@ -50,6 +52,47 @@ log = get_logger(__name__)
 
 _TABLE = "landed"
 _RUN_ID_COLUMN = "_ingest_run_id"
+
+# `ingest_all_sources_task` (`pipeline.tasks.celery_tasks`) deliberately
+# fans every source out as an independent parallel `celery.group` child
+# so one slow source can't hold up the others -- real, live-confirmed
+# 2026-08-07 side effect: when two or more finish fetching at close to
+# the same moment, they race for DuckDB's single read-write lock on this
+# shared file and the loser gets a hard `duckdb.IOException` ("Could not
+# set lock on file... Conflicting lock is held"), not a queued wait.
+# Retried here rather than fixed by serializing the fan-out itself --
+# the parallelism across *fetches* (the slow, network-bound part) is
+# still worth keeping; only the brief final write needs to not collide.
+_LOCK_RETRY_ATTEMPTS = 5
+_LOCK_RETRY_BASE_SECONDS = 0.5
+
+
+def _connect_rw_with_retry(path: Path) -> duckdb.DuckDBPyConnection:
+    """`duckdb.connect(path)` (read-write), retrying with jittered
+    backoff if another process currently holds the file's single
+    read-write lock, instead of failing the whole ingest run on what's
+    usually a few hundred milliseconds of contention from a sibling
+    source's own staging call."""
+    last_error: duckdb.IOException | None = None
+    for attempt in range(_LOCK_RETRY_ATTEMPTS):
+        try:
+            return duckdb.connect(str(path))
+        except duckdb.IOException as exc:
+            if "Conflicting lock" not in str(exc):
+                raise
+            last_error = exc
+            sleep_seconds = _LOCK_RETRY_BASE_SECONDS * (2**attempt) + random.uniform(
+                0, 0.25
+            )
+            log.warning(
+                "duckdb_staging.lock_contention_retry",
+                attempt=attempt + 1,
+                max_attempts=_LOCK_RETRY_ATTEMPTS,
+                sleep_seconds=round(sleep_seconds, 2),
+            )
+            time.sleep(sleep_seconds)
+    assert last_error is not None  # noqa: S101 -- loop above always sets it before falling through
+    raise last_error
 
 
 def _staging_path() -> Path:
@@ -137,7 +180,7 @@ def stage_dataframe(df: pd.DataFrame, table: str, run_id: str) -> tuple[str, int
     path = _staging_path()
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    con = duckdb.connect(str(path))
+    con = _connect_rw_with_retry(path)
     try:
         con.register("df_view", df)
         if _table_exists(con, table):
@@ -189,7 +232,7 @@ def merge_staging_file(source_file: Path, table: str) -> int:
     path = _staging_path()
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    con = duckdb.connect(str(path))
+    con = _connect_rw_with_retry(path)
     try:
         con.register("df_view", df)
         if _table_exists(con, table):
@@ -292,7 +335,7 @@ def delete_staged(path: str, table: str, run_id: str) -> int:
     """
     if not Path(path).exists():
         return 0
-    con = duckdb.connect(path)
+    con = _connect_rw_with_retry(Path(path))
     try:
         if not _table_exists(con, table):
             return 0

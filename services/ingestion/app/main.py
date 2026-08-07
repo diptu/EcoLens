@@ -73,7 +73,10 @@ def create_app() -> FastAPI:
     async def unhandled_exception_handler(
         request: Request, exc: Exception
     ) -> JSONResponse:
-        logger.error("unhandled_exception", path=request.url.path, error=str(exc))
+        # See `core.middleware.RequestIdMiddleware`'s identical fix for
+        # why `exc_info=exc`, not `error=str(exc)` -- str() is empty for
+        # some real exception types, making a 500 undebuggable from logs.
+        logger.error("unhandled_exception", path=request.url.path, exc_info=exc)
         return JSONResponse(
             status_code=500, content={"detail": "internal server error"}
         )

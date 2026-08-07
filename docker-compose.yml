@@ -237,6 +237,7 @@ services:
       dockerfile: infra/docker/ingestion.Dockerfile
     <<: *common-env
     command: worker --loglevel=info
+    restart: unless-stopped
     volumes:
       - duckdb_staging:/app/services/ingestion/data/staging
     depends_on:
@@ -249,18 +250,23 @@ services:
       minio-setup:
         condition: service_completed_successfully
 
-  # Celery Beat -- fires each `beat_schedule` entry on its real cadence
-  # (`oe` every 5 min, `aemo-nem`/`aemo-wem` every 15, `bom` every 30,
-  # `holidays` annually); `ingestion-worker` is what actually executes
-  # what this enqueues. Exactly one `beat` process must ever run at a
-  # time (it's the sole scheduler) -- `replicas` isn't set here for
-  # exactly that reason, don't scale this service.
+  # Celery Beat -- fires each `beat_schedule` entry on its real cadence.
+  # **2026-08-07: this is now a single unified `ingest-all-sources` entry
+  # every 30 minutes for all 5 sources** (`app/celery_app.py`), not the
+  # earlier per-source cadence (`oe` every 5 min, `aemo-nem`/`aemo-wem`
+  # every 15, `bom` every 30) this comment used to describe -- that
+  # design was replaced 2026-08-05; this comment just hadn't caught up.
+  # `ingestion-worker` is what actually executes what this enqueues.
+  # Exactly one `beat` process must ever run at a time (it's the sole
+  # scheduler) -- `replicas` isn't set here for exactly that reason,
+  # don't scale this service.
   ingestion-beat:
     build:
       context: .
       dockerfile: infra/docker/ingestion.Dockerfile
     <<: *common-env
     command: beat --loglevel=info
+    restart: unless-stopped
     depends_on:
       rabbitmq:
         condition: service_healthy

@@ -2,11 +2,13 @@ import os
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+import duckdb
 import pandas as pd
 import pytest
 
 from app.core.config import get_settings
 from app.service import object_storage
+from app.service.pipeline import duckdb_staging
 from app.service.pipeline.duckdb_staging import (
     delete_staged,
     merge_staging_file,
@@ -286,3 +288,120 @@ class TestMergeStagingFile:
         merged = merge_staging_file(Path(scratch_path), "bom_observations")
 
         assert merged == 0
+
+
+class TestConnectRwWithRetry:
+    """`_connect_rw_with_retry` -- added 2026-08-07 after a real,
+    live-confirmed failure: `ingest_all_sources_task`'s parallel
+    `celery.group` fan-out means multiple sources can finish fetching at
+    close to the same moment and race for DuckDB's single read-write
+    lock on the shared staging file. Before this, the loser got a hard
+    `duckdb.IOException` and the whole ingest run failed -- confirmed
+    live against real concurrent Celery workers (`aemo-nem`/`bom` both
+    failed with "Conflicting lock is held" in the same 30-min tick)."""
+
+    def test_retries_and_succeeds_after_transient_lock_contention(
+        self, tmp_path, monkeypatch
+    ):
+        path = tmp_path / "landed.duckdb"
+        real_connect = duckdb.connect
+        calls = {"n": 0}
+
+        def flaky_connect(target, *args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise duckdb.IOException(
+                    f'IO Error: Could not set lock on file "{target}": '
+                    "Conflicting lock is held in some other process"
+                )
+            return real_connect(target, *args, **kwargs)
+
+        monkeypatch.setattr(duckdb, "connect", flaky_connect)
+        monkeypatch.setattr(duckdb_staging.time, "sleep", lambda _: None)
+
+        con = duckdb_staging._connect_rw_with_retry(path)
+        con.close()
+
+        assert calls["n"] == 3
+
+    def test_gives_up_after_max_attempts_still_locked(self, tmp_path, monkeypatch):
+        path = tmp_path / "landed.duckdb"
+
+        def always_locked(target, *args, **kwargs):
+            raise duckdb.IOException(
+                f'IO Error: Could not set lock on file "{target}": '
+                "Conflicting lock is held forever"
+            )
+
+        monkeypatch.setattr(duckdb, "connect", always_locked)
+        monkeypatch.setattr(duckdb_staging.time, "sleep", lambda _: None)
+
+        with pytest.raises(duckdb.IOException, match="Conflicting lock"):
+            duckdb_staging._connect_rw_with_retry(path)
+
+    def test_a_different_ioexception_is_not_retried(self, tmp_path, monkeypatch):
+        calls = {"n": 0}
+
+        def not_a_lock_error(target, *args, **kwargs):
+            calls["n"] += 1
+            raise duckdb.IOException("IO Error: disk full")
+
+        monkeypatch.setattr(duckdb, "connect", not_a_lock_error)
+
+        with pytest.raises(duckdb.IOException, match="disk full"):
+            duckdb_staging._connect_rw_with_retry(tmp_path / "landed.duckdb")
+
+        assert calls["n"] == 1
+
+    def test_concurrent_stage_dataframe_calls_do_not_lose_either_write(
+        self, tmp_path, monkeypatch
+    ):
+        """The real-world scenario, without needing two OS processes:
+        thread B's write is deliberately made to look like it's mid-lock
+        while thread A holds the connection, by monkeypatching `connect`
+        to raise "Conflicting lock" exactly once for the second caller
+        -- confirming the retry actually recovers a real write, not just
+        a mocked-away connection object."""
+        monkeypatch.setenv("DUCKDB_STAGING_DIR", str(tmp_path))
+        get_settings.cache_clear()
+
+        df_a = pd.DataFrame({"demand_mw": [1, 2]})
+        df_b = pd.DataFrame({"demand_mw": [3, 4]})
+
+        real_connect = duckdb.connect
+        state = {"first_call_done": False}
+
+        def contend_once(target, *args, **kwargs):
+            if not state["first_call_done"]:
+                state["first_call_done"] = True
+                return real_connect(target, *args, **kwargs)
+            state["first_call_done"] = "retried"
+            raise duckdb.IOException(
+                f'IO Error: Could not set lock on file "{target}": '
+                "Conflicting lock is held in some other process"
+            )
+
+        # Only the *second* stage_dataframe call should ever hit the
+        # simulated contention -- the first proceeds normally, occupies
+        # and releases the lock (this module holds it only for the
+        # duration of one call, per its own module docstring), then the
+        # second's first attempt is rejected and its retry succeeds for
+        # real against the now-free file.
+        path, rows_a = stage_dataframe(df_a, "aemo_nem_dispatch", "run-a")
+        assert rows_a == 2
+
+        monkeypatch.setattr(duckdb, "connect", contend_once)
+        monkeypatch.setattr(duckdb_staging.time, "sleep", lambda _: None)
+        state["first_call_done"] = False  # arm contention for this call only
+
+        _, rows_b = stage_dataframe(df_b, "aemo_nem_dispatch", "run-b")
+        assert rows_b == 2
+
+        monkeypatch.setattr(duckdb, "connect", real_connect)
+        con = duckdb.connect(path, read_only=True)
+        try:
+            total = con.execute("SELECT count(*) FROM aemo_nem_dispatch").fetchone()
+            assert total is not None
+            assert total[0] == 4
+        finally:
+            con.close()

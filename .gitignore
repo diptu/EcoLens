@@ -129,6 +129,13 @@ __pypackages__/
 celerybeat-schedule
 celerybeat.pid
 
+# Local MLflow dev server (sqlite backend store + filesystem artifact
+# root, e.g. `services/forecast-api/.mlflow/`) -- a real docker-compose
+# `mlflow` service exists for shared/production use; this is only ever a
+# throwaway local tracking store for one machine.
+.mlflow/
+mlruns/
+
 # SageMath parsed files
 *.sage.py
 

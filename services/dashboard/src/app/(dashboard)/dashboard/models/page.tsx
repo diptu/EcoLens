@@ -27,7 +27,6 @@ import { cn } from "@/lib/utils";
 import {
   deleteModelVersion,
   fetchModelVersions,
-  MODEL_ARCHITECTURES,
   pollForNewModelVersion,
   promoteModelVersion,
   type ModelVersion,
@@ -35,6 +34,32 @@ import {
 import { formatRelativeTime, triggerTraining, type TrainTrigger } from "@/lib/ingestion";
 
 type Tab = "registry" | "train" | "fine-tune";
+
+// This page's own architecture list, deliberately narrower than
+// `lib/emissions.ts`'s shared `MODEL_ARCHITECTURES` (which also backs
+// `training/page.tsx` and includes `energy_forecast_multi_task`) --
+// Model Registry is scoped to the three forecasting architectures the
+// product description names (LSTM, TFT, TimesFM), not the separate
+// carbon-insights model. Same scoping decision `performance/page.tsx`
+// already made -- see that file's `PERFORMANCE_ARCHITECTURES` comment
+// for the full TimesFM caveat (zero-shot, no MLflow Model Registry
+// entry of its own, `lstm_demand_timesfm` is a real evaluation-run tag,
+// not a registrable model name).
+//
+// Registry/Train tabs behave honestly for TimesFM (empty "no model
+// trained" state, Train tab already permanently disabled regardless of
+// architecture). Fine-tune tab caveat, pre-existing and NOT introduced
+// by adding TimesFM here: `POST /v1/model/train` (`triggerTraining`)
+// takes no architecture parameter at all -- `service/model/actions.py`'s
+// `_build_and_publish_training_trigger` hardcodes `"architecture":
+// "lstm"` server-side regardless of which tab is selected client-side,
+// so selecting TFT *or* TimesFM and clicking "Start fine-tune" already
+// silently fine-tunes LSTM today, same as it does for TFT.
+const MODEL_ARCHITECTURES = [
+  { modelName: "lstm_demand", label: "LSTM" },
+  { modelName: "lstm_demand_tft", label: "TFT" },
+  { modelName: "lstm_demand_timesfm", label: "TimesFM" },
+] as const;
 
 export default function AdminModelsPage() {
   const [tab, setTab] = useState<Tab>("registry");

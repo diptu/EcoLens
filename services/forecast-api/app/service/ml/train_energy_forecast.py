@@ -58,6 +58,10 @@ from app.service.ml.energy_data import (
     collate_energy,
     load_energy_training_data,
 )
+from app.service.ml.energy_data_offline import (
+    load_energy_training_data_from_master,
+    load_holidays_from_master,
+)
 from app.service.ml.energy_features import (
     DEMAND_TARGET_COLUMN,
     FEATURE_COLUMNS,
@@ -68,6 +72,7 @@ from app.service.ml.losses import energy_forecast_loss
 from app.service.ml.train import mae, mape, rmse, state_dict_bytes
 from app.service.mlops.registry import register_model
 from app.service.mlops.tracking import configure_mlflow, git_sha
+from app.service.model.actions import log_training_finish, log_training_start
 
 log = get_logger(__name__)
 
@@ -462,23 +467,69 @@ async def train_and_register_energy_forecast(
     config: EnergyTrainConfig | None = None,
     register: bool = True,
     since: pd.Timestamp | None = None,
+    source: str = "postgres",
 ) -> TrainAndRegisterEnergyResult:
     """The real, DB + MLflow-backed entrypoint -- `cli.py`'s
     `train-energy-forecast` command calls this, mirroring `ml/train.
     train_and_register`'s shape exactly (including the `since` scoping
     it documents for the same reason: real per-column history depth
     varies, and an unscoped chronological split can starve train/val of
-    the columns that only have recent real data)."""
+    the columns that only have recent real data).
+
+    `source="postgres"` (default): `{MARTS_SCHEMA}.fct_energy_demand`,
+    same as always -- requires `services/waerehouse`'s dbt build to have
+    materialized real marts.
+
+    `source="r2_master"`: `energy_data_offline.
+    load_energy_training_data_from_master` -- the R2-hosted
+    `master.duckdb` bootstrap path (see that module's own docstring for
+    why this exists), for when the Postgres marts aren't populated yet.
+    Training/scaling/model code below is identical either way -- only
+    the raw dataframe's source changes."""
     settings = settings or get_settings()
     config = config or EnergyTrainConfig.from_settings(settings)
-    configure_mlflow(settings)
 
-    async with get_session() as db:
-        raw_df = await load_energy_training_data(db, regions, since=since)
-        holidays_df = await load_holidays(db)
+    if source == "r2_master":
+        configure_mlflow(settings)
+        raw_df = load_energy_training_data_from_master(regions, since=since)
+        holidays_df = load_holidays_from_master()
+    elif source == "postgres":
+        configure_mlflow(settings)
+        async with get_session() as db:
+            raw_df = await load_energy_training_data(db, regions, since=since)
+            holidays_df = await load_holidays(db)
+    else:
+        raise ValueError(f"unknown source={source!r} -- expected 'postgres' or 'r2_master'")
 
     if raw_df.empty:
-        raise ValueError(f"no training data found in fct_energy_demand for regions={list(regions)}")
+        raise ValueError(f"no training data found (source={source!r}) for regions={list(regions)}")
 
-    result = train_energy_model(raw_df, config, holidays=holidays_df)
-    return log_and_register_energy_run(result, config, regions, model_name, register=register)
+    # `meta._training_log` row for this run -- previously only
+    # `training_worker.handle_training_trigger` (the RabbitMQ-triggered
+    # LSTM/TFT path) wrote here, so a CLI-invoked `energy_forecast_multi_task`
+    # run never showed up in `GET /v1/model/training-runs` (the
+    # dashboard's Training Jobs tab) at all. `window_start`/`window_end`
+    # are the real min/max `ts` actually used, not a fixed lookback --
+    # more honest than fabricating one for a `since`-scoped or
+    # `r2_master`-sourced run that doesn't have a fixed window concept.
+    log_id = await log_training_start(
+        model_name,
+        "cli",
+        list(regions),
+        raw_df["ts"].min().to_pydatetime(),
+        raw_df["ts"].max().to_pydatetime(),
+    )
+    try:
+        result = train_energy_model(raw_df, config, holidays=holidays_df)
+        registered = log_and_register_energy_run(result, config, regions, model_name, register=register)
+    except Exception as exc:
+        await log_training_finish(log_id, status="failed", error_message=str(exc))
+        raise
+
+    await log_training_finish(
+        log_id,
+        status="success",
+        run_id=registered.run_id,
+        model_version=registered.model_version,
+    )
+    return registered

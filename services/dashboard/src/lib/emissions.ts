@@ -321,6 +321,7 @@ export type ModelVersionsList = {
 export const MODEL_ARCHITECTURES = [
   { modelName: "lstm_demand", label: "LSTM" },
   { modelName: "lstm_demand_tft", label: "TFT" },
+  { modelName: "energy_forecast_multi_task", label: "Energy Forecast" },
 ] as const;
 
 /** Live call to `GET /v1/model/versions` -- every registered MLflow
@@ -443,6 +444,98 @@ export async function fetchLossCurve(
     );
   }
   return res.json();
+}
+
+export type MlflowExperiment = {
+  experiment_id: string;
+  name: string;
+  run_count: number;
+  last_run_at: string | null;
+};
+
+/** Live call to `GET /v1/model/experiments` -- real MLflow experiments.
+ * Every architecture this platform trains (LSTM/TFT/energy-forecast)
+ * logs to one shared experiment (`mlops.tracking.EXPERIMENT_NAME`), so
+ * this is typically a single real row, not a per-model breakdown --
+ * replaces `dashboards.getMlflowExperiments()`'s fabricated sample
+ * experiments (`lstm_demand_v8_hptune`, `rf_baseline`, etc., none of
+ * which correspond to anything real). */
+export async function fetchMlflowExperiments(): Promise<MlflowExperiment[]> {
+  const res = await fetch(`${FORECAST_API_URL}/model/experiments`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(
+      body?.error?.message ?? `GET /v1/model/experiments failed: ${res.status}`,
+    );
+  }
+  const json: { data: MlflowExperiment[] } = await res.json();
+  return json.data;
+}
+
+export type MlflowRun = {
+  run_id: string;
+  experiment_name: string;
+  architecture: string | null;
+  status: "running" | "finished" | "failed" | "killed";
+  started_at: string | null;
+  duration_seconds: number | null;
+  metrics: Record<string, number>;
+};
+
+/** Live call to `GET /v1/model/mlflow-runs` -- real recent MLflow runs
+ * across every experiment, newest first. `architecture` comes from each
+ * run's own tag, so LSTM/TFT/energy-forecast runs are distinguishable
+ * even though they share one experiment -- replaces `dashboards.
+ * getMlflowRuns()`'s fabricated sample runs. */
+export async function fetchMlflowRuns(limit = 8): Promise<MlflowRun[]> {
+  const res = await fetch(`${FORECAST_API_URL}/model/mlflow-runs?limit=${limit}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(
+      body?.error?.message ?? `GET /v1/model/mlflow-runs failed: ${res.status}`,
+    );
+  }
+  const json: { data: MlflowRun[] } = await res.json();
+  return json.data;
+}
+
+export type DriftReport = {
+  feature: string;
+  psi: number | null;
+  psi_severity: "none" | "moderate" | "major" | "unknown";
+  ks_statistic: number | null;
+  ks_pvalue: number | null;
+  reference_n: number;
+  comparison_n: number;
+};
+
+/** Live call to `GET /v1/model/drift` -- real PSI/KS drift, top 10
+ * features by PSI, between an older ("reference") and more recent
+ * ("comparison") chronological slice of the same real training data.
+ * `[]` is a real, expected state when there isn't enough data on both
+ * sides yet (e.g. this architecture's Postgres marts are empty).
+ *
+ * Real, disclosed limitation (`live_drift.py`'s own docstring): this is
+ * NOT a training-vs-live-serving comparison -- there's no live serving
+ * feature snapshot logged anywhere yet. A feature like `day_of_year`
+ * will show extreme PSI here purely because the reference/comparison
+ * windows don't each span a full year (different seasons look like
+ * "drift" even with a perfectly stable model) -- callers should treat
+ * high-PSI calendar/seasonal features as a methodology artifact, not
+ * necessarily a real signal, until each window covers a full year. */
+export async function fetchDrift(modelName?: string): Promise<DriftReport[]> {
+  const url = modelName
+    ? `${FORECAST_API_URL}/model/drift?model_name=${encodeURIComponent(modelName)}`
+    : `${FORECAST_API_URL}/model/drift`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(
+      body?.error?.message ?? `GET /v1/model/drift failed: ${res.status}`,
+    );
+  }
+  const json: { data: DriftReport[] } = await res.json();
+  return json.data;
 }
 
 /** Polls `fetchModelVersions()` every `intervalMs` until the newest

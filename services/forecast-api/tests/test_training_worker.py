@@ -9,6 +9,7 @@ import pytest
 
 from app.core.config import get_settings
 from app.service import training_worker
+from app.service.model import actions as model_actions
 from app.service.ml.train import TrainAndRegisterResult
 
 pytestmark = pytest.mark.anyio
@@ -28,9 +29,13 @@ def anyio_backend():
 class _FakeSession:
     def __init__(self):
         self.queries: list[tuple[str, dict]] = []
+        self.committed = 0
 
     async def execute(self, query, params=None):
         self.queries.append((str(query), params or {}))
+
+    async def commit(self):
+        self.committed += 1
 
 
 class _FakeSessionCtx:
@@ -46,13 +51,16 @@ class _FakeSessionCtx:
 
 @pytest.fixture(autouse=True)
 def fake_training_log_session(monkeypatch):
-    """`handle_training_trigger` writes `meta._training_log` rows --
-    fake the DB session for every test in this module so none of them
-    need a real Postgres. Tests that care about the logged rows request
-    this fixture explicitly to inspect `.queries`."""
+    """`handle_training_trigger` writes `meta._training_log` rows via
+    `log_training_start`/`log_training_finish` (`service/model/
+    actions.py` -- moved there from this module so `train_energy_
+    forecast.py`'s CLI-triggered runs can log too, see that module's own
+    docstring). Fake the DB session for every test in this module so
+    none of them need a real Postgres. Tests that care about the logged
+    rows request this fixture explicitly to inspect `.queries`."""
     session = _FakeSession()
     monkeypatch.setattr(
-        training_worker, "get_session", lambda: _FakeSessionCtx(session)
+        model_actions, "get_session", lambda: _FakeSessionCtx(session)
     )
     return session
 

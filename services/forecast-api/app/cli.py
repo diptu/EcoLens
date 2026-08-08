@@ -233,12 +233,23 @@ def train_tft(
     default=False,
     help="Log to MLflow but skip registering a model version.",
 )
+@click.option(
+    "--source",
+    type=click.Choice(["postgres", "r2_master"]),
+    default="postgres",
+    show_default=True,
+    help="'postgres' reads raw_marts.fct_energy_demand (needs a real dbt "
+    "build). 'r2_master' bootstraps from the R2-hosted master.duckdb "
+    "instead (see energy_data_offline.py's docstring) -- for training "
+    "before the Postgres marts are populated.",
+)
 def train_energy_forecast(
     regions: tuple[str, ...],
     model_name: str,
     epochs: int | None,
     since: str | None,
     no_register: bool,
+    source: str,
 ) -> None:
     """Train the multi-task demand + generation-mix forecast LSTM
     (`app/models/energy_forecast_lstm.py`) and log (+ register) it in
@@ -269,6 +280,7 @@ def train_energy_forecast(
                 config=config,
                 register=not no_register,
                 since=resolved_since,
+                source=source,
             )
         )
     except Exception as exc:

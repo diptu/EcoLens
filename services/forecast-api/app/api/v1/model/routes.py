@@ -13,6 +13,8 @@ action in this platform's current scope)."""
 
 from __future__ import annotations
 
+import math
+
 from fastapi import APIRouter, Depends, Query
 from mlflow.exceptions import MlflowException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,8 +22,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.v1.deps import get_app_settings, get_db, get_model_registry
 from app.core.errors import ApiError
 from app.schemas.model import (
+    DriftListResponse,
+    DriftReportOut,
+    ExperimentOut,
+    ExperimentsListResponse,
     LossCurveOut,
     LossCurvePointOut,
+    MlflowRunOut,
+    MlflowRunsListResponse,
     ModelInfo,
     ModelVersionOut,
     ModelVersionsListResponse,
@@ -32,6 +40,8 @@ from app.schemas.model import (
 )
 from app.core.config import Settings
 from app.service.model.actions import list_training_runs, trigger_training
+from app.service.mlops.experiments import list_experiments, list_mlflow_runs
+from app.service.mlops.live_drift import compute_drift
 from app.service.ml.registry import (
     DeletionRejected,
     ModelRegistry,
@@ -61,6 +71,94 @@ async def get_training_runs(
 ) -> TrainingRunsListResponse:
     runs = await list_training_runs(db, limit)
     return TrainingRunsListResponse(data=runs)
+
+
+@router.get("/model/experiments", response_model=ExperimentsListResponse)
+async def get_experiments(
+    settings: Settings = Depends(get_app_settings),
+) -> ExperimentsListResponse:
+    """Real MLflow experiments (`service/mlops/experiments.py`) --
+    backs the dashboard's Training & Experiments page. Every
+    architecture this service trains logs to one shared experiment
+    (`mlops.tracking.EXPERIMENT_NAME`), so this is typically a
+    single-row list, not a per-model breakdown -- see that module's own
+    docstring."""
+    experiments = await list_experiments(settings)
+    return ExperimentsListResponse(
+        data=[
+            ExperimentOut(
+                experiment_id=e.experiment_id,
+                name=e.name,
+                run_count=e.run_count,
+                last_run_at=e.last_run_at,
+            )
+            for e in experiments
+        ]
+    )
+
+
+@router.get("/model/mlflow-runs", response_model=MlflowRunsListResponse)
+async def get_mlflow_runs(
+    limit: int = Query(default=8, ge=1, le=50),
+    settings: Settings = Depends(get_app_settings),
+) -> MlflowRunsListResponse:
+    """Real recent MLflow runs across every experiment, newest first --
+    `architecture` comes from each run's own tag (set by
+    `log_and_register_run`/`log_and_register_energy_run`/
+    `train_tft.py`'s equivalent), so a caller can tell LSTM/TFT/
+    energy-forecast runs apart even though they share one experiment."""
+    runs = await list_mlflow_runs(settings, limit)
+    return MlflowRunsListResponse(
+        data=[
+            MlflowRunOut(
+                run_id=r.run_id,
+                experiment_name=r.experiment_name,
+                architecture=r.architecture,
+                status=r.status,
+                started_at=r.started_at,
+                duration_seconds=r.duration_seconds,
+                metrics=r.metrics,
+            )
+            for r in runs
+        ]
+    )
+
+
+def _none_if_nan(value: float) -> float | None:
+    return None if math.isnan(value) else value
+
+
+@router.get("/model/drift", response_model=DriftListResponse)
+async def get_model_drift(
+    model_name: str | None = None,
+    region: list[str] | None = Query(default=None),
+    settings: Settings = Depends(get_app_settings),
+) -> DriftListResponse:
+    """Real per-feature PSI/KS drift (`mlops/live_drift.py`) -- top 10
+    features by PSI between an older and a more recent slice of the same
+    real training data. `[]` when there isn't enough real data on both
+    sides yet (this environment's empty Postgres marts for `lstm_demand`/
+    `lstm_demand_tft` today) -- a real, expected state, not an error.
+    See `live_drift.py`'s own docstring for the real, disclosed
+    limitation this comparison has (chronological split of one dataset,
+    not training-vs-live-serving)."""
+    model_name = model_name or settings.mlflow_registry_model_name
+    regions = region or settings.model_default_regions
+    reports = await compute_drift(model_name, regions)
+    return DriftListResponse(
+        data=[
+            DriftReportOut(
+                feature=r.feature,
+                psi=_none_if_nan(r.psi),
+                psi_severity=r.psi_severity,
+                ks_statistic=_none_if_nan(r.ks_statistic),
+                ks_pvalue=_none_if_nan(r.ks_pvalue),
+                reference_n=r.reference_n,
+                comparison_n=r.comparison_n,
+            )
+            for r in reports
+        ]
+    )
 
 
 def _registry_error(exc: MlflowException, *, not_found_message: str) -> ApiError:

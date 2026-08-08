@@ -163,3 +163,4 @@ cython_debug/
 
 data/
 *.duckdb.*
+services/ingestion/data/

@@ -7,7 +7,9 @@ requires-python = ">=3.12"
 dependencies = [
     "aio-pika>=9.5",
     "asyncpg>=0.30.0",
+    "boto3>=1.34",
     "click>=8.4.2",
+    "duckdb>=1.1",
     "fastapi[standard]>=0.139.2",
     "gunicorn>=26.0.0",
     "joblib>=1.4",
@@ -79,5 +81,5 @@ ignore_missing_imports = true
 # equivalents (`optuna`/`timesfm`/`scipy`/`croniter`) now that this
 # service trains too.
 [[tool.mypy.overrides]]
-module = ["pandas.*", "sklearn.*", "joblib.*", "mlflow.*", "optuna.*", "timesfm.*", "scipy.*"]
+module = ["pandas.*", "sklearn.*", "joblib.*", "mlflow.*", "optuna.*", "timesfm.*", "scipy.*", "boto3.*"]
 ignore_missing_imports = true

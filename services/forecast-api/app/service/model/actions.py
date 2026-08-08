@@ -26,6 +26,7 @@ in the worst case, never conflicting.
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import text
@@ -94,6 +95,95 @@ async def trigger_training(
         anomalies_flagged=payload["anomalies_flagged"],
         triggered_by=triggered_by,
     )
+
+
+async def log_training_start(
+    model_name: str,
+    triggered_by: str,
+    regions: list[str],
+    window_start,
+    window_end,
+) -> uuid.UUID:
+    """Insert a 'running' row into `meta._training_log` -- mirrors
+    `services/waerehouse`'s `_try_start_build`'s pattern for
+    `meta._dbt_build_log`. Returns the row id.
+
+    Shared by `training_worker.handle_training_trigger` (the RabbitMQ-
+    triggered LSTM/TFT path) and `train_energy_forecast.
+    train_and_register_energy_forecast` (the CLI-triggered
+    `energy_forecast_multi_task` path) -- previously private to
+    `training_worker.py` only, so CLI-invoked energy-forecast runs never
+    showed up in `GET /v1/model/training-runs` (the dashboard's Training
+    Jobs tab) at all. Moved here rather than duplicated -- both callers
+    are the same service, unlike the deliberate cross-service
+    duplication convention `service/ml/features.py` etc. use.
+
+    `get_session()`'s own docstring calls this service "read-only" and
+    its context manager never commits (`session.close()` in a `finally`
+    only) -- true for every other caller, but not this one. Confirmed
+    live: without the explicit `commit()` below, this INSERT never
+    actually persisted (`GET /v1/model/training-runs` stayed empty after
+    a real training run) even though `execute()` raised no error --
+    SQLAlchemy's async session opens an implicit transaction on first
+    `execute()` and silently rolls it back on close without one."""
+    log_id = uuid.uuid4()
+    async with get_session() as session:
+        await session.execute(
+            text(
+                """
+                INSERT INTO meta._training_log
+                    (id, model_name, status, triggered_by, regions, window_start, window_end, started_at, hostname)
+                VALUES
+                    (:id, :model_name, 'running', :triggered_by, CAST(:regions AS jsonb), :window_start, :window_end, now(), :hostname)
+                """
+            ),
+            {
+                "id": str(log_id),
+                "model_name": model_name,
+                "triggered_by": triggered_by,
+                "regions": json.dumps(regions),
+                "window_start": window_start,
+                "window_end": window_end,
+                "hostname": get_settings().hostname,
+            },
+        )
+        await session.commit()
+    return log_id
+
+
+async def log_training_finish(
+    log_id: uuid.UUID,
+    *,
+    status: str,
+    run_id: str | None = None,
+    model_version: str | None = None,
+    error_message: str | None = None,
+) -> None:
+    """Close out a `meta._training_log` row as `'success'`/`'failed'` --
+    see `log_training_start`'s docstring for why the explicit `commit()`
+    below is required, not optional."""
+    async with get_session() as session:
+        await session.execute(
+            text(
+                """
+                UPDATE meta._training_log
+                SET finished_at = now(),
+                    status = :status,
+                    run_id = :run_id,
+                    model_version = :model_version,
+                    error_message = :error_message
+                WHERE id = :id
+                """
+            ),
+            {
+                "id": str(log_id),
+                "status": status,
+                "run_id": run_id,
+                "model_version": model_version,
+                "error_message": error_message[:500] if error_message else None,
+            },
+        )
+        await session.commit()
 
 
 async def list_training_runs(db: AsyncSession, limit: int = 20) -> list[TrainingRunOut]:

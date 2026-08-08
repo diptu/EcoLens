@@ -4,14 +4,13 @@
  * Modeled on an ML-monitoring mockup (registry, error metrics, conformal
  * coverage, concept-drift, online-learning, model health, alerts,
  * automated actions, tech stack). Sections are split strictly into real
- * (fetched from `GET /v1/model/versions` and `GET /v1/model/training-runs`,
- * same as `models/page.tsx`) and illustrative (no backend concept exists
- * yet — `mlops/drift.py`'s PSI detector has zero callers anywhere, there
- * is no rolling error time-series, no health-score formula, no alert
- * policy). Every illustrative section carries `IllustrativeBadge` — this
- * app's convention is no silently fabricated dashboards (see
- * `training/page.tsx` for the precedent this deliberately does NOT
- * follow).
+ * (fetched from `GET /v1/model/versions`, `GET /v1/model/training-runs`,
+ * and `GET /v1/model/drift` — same convention as `models/page.tsx`) and
+ * illustrative (no backend concept exists yet — there is no rolling error
+ * time-series, no health-score formula, no alert policy). Every
+ * illustrative section carries `IllustrativeBadge` — this app's
+ * convention is no silently fabricated dashboards (see `training/
+ * page.tsx` for the precedent this deliberately does NOT follow).
  */
 "use client";
 
@@ -29,9 +28,10 @@ import { ArcGauge } from "@/components/dashboard/gauge";
 import { IllustrativeBadge } from "@/components/dashboard/illustrative-badge";
 import { cn } from "@/lib/utils";
 import {
+  fetchDrift,
   fetchLossCurve,
   fetchModelVersions,
-  MODEL_ARCHITECTURES,
+  type DriftReport,
   type LossCurve,
   type ModelVersion,
 } from "@/lib/emissions";
@@ -39,10 +39,32 @@ import { fetchTrainingRuns, formatRelativeTime, type TrainingRunLog } from "@/li
 
 // `Settings.conformal_alpha = 0.2` (data-pipeline) -- a fixed training-time
 // config value, not something any API currently exposes live. Documented
-// here as a known real fact (same pattern `MODEL_ARCHITECTURES` already
-// uses for a hardcoded-but-real list), not an invented number.
+// here as a known real fact (same pattern `PERFORMANCE_ARCHITECTURES`
+// below uses for a hardcoded-but-real list), not an invented number.
 const CONFORMAL_ALPHA = 0.2;
 const TARGET_COVERAGE_PCT = (1 - CONFORMAL_ALPHA) * 100;
+
+// This page's own architecture list, deliberately narrower than
+// `lib/emissions.ts`'s shared `MODEL_ARCHITECTURES` (which also backs
+// `models/page.tsx`/`training/page.tsx` and includes
+// `energy_forecast_multi_task`) -- Performance is scoped to the three
+// forecasting architectures the product description names (LSTM, TFT,
+// TimesFM), not the separate carbon-insights model.
+//
+// TimesFM's `modelName` here (`lstm_demand_timesfm`) is real but not an
+// MLflow Model Registry entry -- `ml/evaluate.py`'s own comment on that
+// exact constant: "a label for evaluation runs to tag themselves with,
+// not an MLflow Model Registry entry." TimesFM is zero-shot (Google's
+// pretrained checkpoint, evaluated via `cli.py evaluate-timesfm`) and has
+// no versions of our own to register -- so every registry/error-metric/
+// coverage/loss-curve card on this page will honestly show its existing
+// real empty state ("No Production version yet", etc.) for this tab, not
+// fabricated data. That's expected, not a bug.
+const PERFORMANCE_ARCHITECTURES = [
+  { modelName: "lstm_demand", label: "LSTM" },
+  { modelName: "lstm_demand_tft", label: "TFT" },
+  { modelName: "lstm_demand_timesfm", label: "TimesFM" },
+] as const;
 
 // Candidate metric keys, in priority order -- training runs log different
 // keys depending on whether a live-evaluation gate ran (`eval_*`) or only
@@ -72,7 +94,9 @@ const STAGE_COLORS: Record<string, string> = {
 };
 
 export default function PerformancePage() {
-  const [architecture, setArchitecture] = useState<string>(MODEL_ARCHITECTURES[0].modelName);
+  const [architecture, setArchitecture] = useState<string>(
+    PERFORMANCE_ARCHITECTURES[0].modelName,
+  );
   const [versions, setVersions] = useState<ModelVersion[] | null>(null);
   const [runs, setRuns] = useState<TrainingRunLog[] | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -81,6 +105,8 @@ export default function PerformancePage() {
   const [selectedLossCurveVersion, setSelectedLossCurveVersion] = useState<string | null>(
     null,
   );
+  const [drift, setDrift] = useState<DriftReport[] | null>(null);
+  const [driftLoaded, setDriftLoaded] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -102,6 +128,26 @@ export default function PerformancePage() {
       })
       .finally(() => {
         if (!cancelled) setLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [architecture]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setDriftLoaded(false);
+    fetchDrift(architecture)
+      .then((reports) => {
+        if (cancelled) return;
+        setDrift(reports);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setDrift([]);
+      })
+      .finally(() => {
+        if (!cancelled) setDriftLoaded(true);
       });
     return () => {
       cancelled = true;
@@ -220,7 +266,7 @@ export default function PerformancePage() {
       </Card>
 
       <div className="mb-3 flex flex-wrap gap-1" role="tablist" aria-label="Model architecture">
-        {MODEL_ARCHITECTURES.map((arch) => (
+        {PERFORMANCE_ARCHITECTURES.map((arch) => (
           <button
             key={arch.modelName}
             type="button"
@@ -524,47 +570,64 @@ export default function PerformancePage() {
         </div>
       </Card>
 
-      {/* ── Concept drift (illustrative) ────────────────────── */}
+      {/* ── Concept drift (real) ─────────────────────────────── */}
       <Card
         title={
           <span className="flex items-center gap-2">
-            <Radar className="h-4 w-4 text-amber-200" /> Concept drift tracking
+            <Radar className="h-4 w-4 text-emerald-200" /> Concept drift tracking
           </span>
         }
-        subtitle="mlops/drift.py's PSI detector is real, tested code — but has zero callers anywhere in the pipeline today"
-        badge={<IllustrativeBadge />}
+        subtitle="Real per-feature PSI/KS from GET /v1/model/drift — chronological split of real training data, top 10 features by PSI"
       >
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-          <div>
+        {!driftLoaded ? (
+          <p className="py-10 text-center text-xs text-white/40">Loading…</p>
+        ) : !drift || drift.length === 0 ? (
+          <p className="py-10 text-center text-xs text-white/40">
+            Not enough real data yet to split into reference/comparison windows
+            for {architecture} (needs 200+ rows on each side).
+          </p>
+        ) : (
+          <>
             <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-white/40">
-              Sample shape — impact-ranked drift features
+              Impact-ranked drift features (reference vs. comparison window)
             </div>
             <div className="space-y-1.5">
-              {[
-                { feature: "Temperature", psi: 0.42 },
-                { feature: "Generation mix (gas)", psi: 0.31 },
-                { feature: "Wind speed", psi: 0.27 },
-                { feature: "Solar generation", psi: 0.18 },
-              ].map((row) => (
+              {drift.map((row) => (
                 <div key={row.feature} className="flex items-center gap-2 text-xs">
                   <span className="w-40 truncate text-white/60">{row.feature}</span>
                   <div className="h-2 flex-1 overflow-hidden rounded-full bg-white/5">
                     <div
-                      className="h-full rounded-full bg-amber-300/50"
-                      style={{ width: `${Math.min(100, (row.psi / 0.5) * 100)}%` }}
+                      className={cn(
+                        "h-full rounded-full",
+                        row.psi_severity === "major"
+                          ? "bg-rose-400/60"
+                          : row.psi_severity === "moderate"
+                            ? "bg-amber-300/50"
+                            : row.psi_severity === "unknown"
+                              ? "bg-white/15"
+                              : "bg-emerald-300/40",
+                      )}
+                      style={{
+                        width: `${row.psi !== null ? Math.min(100, (row.psi / 0.5) * 100) : 0}%`,
+                      }}
                     />
                   </div>
-                  <span className="w-10 text-right font-mono text-white/50">{row.psi}</span>
+                  <span className="w-10 text-right font-mono text-white/50">
+                    {row.psi !== null ? row.psi.toFixed(2) : "—"}
+                  </span>
                 </div>
               ))}
             </div>
-          </div>
-          <div className="flex items-center justify-center rounded-md border border-white/5 bg-white/[0.01] p-4 text-center text-xs text-white/40">
-            Drift-vs-error correlation scatter would render here once
-            `compute_feature_drift` is wired to a real scheduled job and
-            exposed via an API.
-          </div>
-        </div>
+            <p className="mt-3 text-[10px] text-white/35">
+              Not a training-vs-live-serving comparison — there's no live
+              serving feature snapshot logged yet. This compares an older vs.
+              a more recent chronological slice of the same training data, so
+              a calendar/seasonal feature can read as high-PSI purely because
+              the two windows don't each span a full year, not because
+              anything is actually wrong.
+            </p>
+          </>
+        )}
       </Card>
 
       {/* ── Model health score (illustrative) ──────────────── */}

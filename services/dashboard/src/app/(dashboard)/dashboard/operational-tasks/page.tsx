@@ -24,16 +24,19 @@
  * "pipeline" (`source_id: null`) can't be triggered this way — it uses
  * its own `triggerDbtBuild()` (`POST /v1/dbt/build`, `services/waerehouse`).
  *
- * AEMO NEM/WEM and BoM additionally get a "Backfill" action
- * (`triggerBackfill()`, `POST /v1/data-sources/{id}/backfill`) with a
- * month/year picker — real historical data for the whole selected
- * month, not the 30-min-lookback "Run now" gets. Only these three:
- * `PIPELINE_CATALOG[].backfillable` is `false` for OpenElectricity/
- * Holidays/dbt-warehouse because their backfill path isn't actually
- * date-anchored yet (see that flag's own docstring in `lib/ingestion.ts`).
- * BoM joined the real-backfill set 2026-08-05, sourced from Open-Meteo's
- * ERA5 archive rather than BoM's own API (which has no date-range query
- * at all) — see `ingest_bom.py`'s module docstring for why.
+ * AEMO NEM/WEM, BoM, and OpenElectricity additionally get a "Backfill"
+ * action (`triggerBackfill()`, `POST /v1/data-sources/{id}/backfill`)
+ * with a month/day picker — real historical data for the selected
+ * range, not the 30-min-lookback "Run now" gets. `PIPELINE_CATALOG[].
+ * backfillable` is `false` only for Holidays/dbt-warehouse: Holidays is
+ * a once-a-year (region, date) snapshot with no HTTP call and no
+ * date-range concept at all (`ingest_holidays.py`'s own docstring), and
+ * dbt-warehouse isn't a data source to begin with (see that flag's own
+ * docstring in `lib/ingestion.ts`). BoM joined the real-backfill set
+ * 2026-08-05, sourced from Open-Meteo's ERA5 archive rather than BoM's
+ * own API (which has no date-range query at all) — see `ingest_bom.py`'s
+ * module docstring for why. OpenElectricity joined the same day, real
+ * `network_region`/`date_start`/`date_end` params on its own API.
  *
  * **2026-08-08 follow-up pass**: KPI row, Active Tasks (`ingestion`-typed
  * rows), and Scheduled Operations are now real too -- derived from

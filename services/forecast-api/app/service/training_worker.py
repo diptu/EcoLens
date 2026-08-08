@@ -27,17 +27,13 @@ for the consume loop / DLX behavior on a failed handler call.
 
 from __future__ import annotations
 
-import json
-import uuid
 from typing import Any
 
 import pandas as pd
-from sqlalchemy import text
 
 from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
 from app.db.rabbitmq import close_rabbitmq, consume_training_trigger_events
-from app.db.session import get_session
 from app.service.ml.evaluate import (
     Forecaster,
     load_registered_model,
@@ -47,74 +43,9 @@ from app.service.ml.evaluate import (
 from app.service.ml.incremental import train_and_register_incremental
 from app.service.ml.incremental_tft import train_and_register_tft_incremental
 from app.service.ml.train_tft import TFT_MODEL_NAME
+from app.service.model.actions import log_training_finish, log_training_start
 
 log = get_logger(__name__)
-
-
-async def _log_training_start(
-    model_name: str,
-    triggered_by: str,
-    regions: list[str],
-    window_start,
-    window_end,
-) -> uuid.UUID:
-    """Insert a 'running' row into `meta._training_log` -- mirrors
-    `services/waerehouse`'s `_try_start_build`'s pattern for
-    `meta._dbt_build_log`. Returns the row id."""
-    log_id = uuid.uuid4()
-    async with get_session() as session:
-        await session.execute(
-            text(
-                """
-                INSERT INTO meta._training_log
-                    (id, model_name, status, triggered_by, regions, window_start, window_end, started_at, hostname)
-                VALUES
-                    (:id, :model_name, 'running', :triggered_by, CAST(:regions AS jsonb), :window_start, :window_end, now(), :hostname)
-                """
-            ),
-            {
-                "id": str(log_id),
-                "model_name": model_name,
-                "triggered_by": triggered_by,
-                "regions": json.dumps(regions),
-                "window_start": window_start,
-                "window_end": window_end,
-                "hostname": get_settings().hostname,
-            },
-        )
-    return log_id
-
-
-async def _log_training_finish(
-    log_id: uuid.UUID,
-    *,
-    status: str,
-    run_id: str | None = None,
-    model_version: str | None = None,
-    error_message: str | None = None,
-) -> None:
-    """Close out a `meta._training_log` row as `'success'`/`'failed'`."""
-    async with get_session() as session:
-        await session.execute(
-            text(
-                """
-                UPDATE meta._training_log
-                SET finished_at = now(),
-                    status = :status,
-                    run_id = :run_id,
-                    model_version = :model_version,
-                    error_message = :error_message
-                WHERE id = :id
-                """
-            ),
-            {
-                "id": str(log_id),
-                "status": status,
-                "run_id": run_id,
-                "model_version": model_version,
-                "error_message": error_message[:500] if error_message else None,
-            },
-        )
 
 
 async def _run_live_evaluation_gate(
@@ -204,7 +135,7 @@ async def handle_training_trigger(payload: dict[str, Any]) -> None:
     )
     triggered_by = payload.get("triggered_by") or "schedule"
 
-    log_id = await _log_training_start(
+    log_id = await log_training_start(
         model_name,
         triggered_by,
         list(regions),
@@ -219,10 +150,10 @@ async def handle_training_trigger(payload: dict[str, Any]) -> None:
         else:
             result = await train_and_register_incremental(model_name, regions, since)
     except Exception as exc:
-        await _log_training_finish(log_id, status="failed", error_message=str(exc))
+        await log_training_finish(log_id, status="failed", error_message=str(exc))
         raise
 
-    await _log_training_finish(
+    await log_training_finish(
         log_id,
         status="success",
         run_id=result.run_id,

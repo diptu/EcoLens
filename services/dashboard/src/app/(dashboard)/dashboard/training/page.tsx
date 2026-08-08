@@ -8,15 +8,18 @@
  * This page used to be this app's own documented "known precedent
  * violation" of its no-silently-fabricated-dashboards rule
  * (`IllustrativeBadge`'s own docstring named it directly) — every tab
- * read from hardcoded mock generators with no real backend at all, even
- * though `GET /v1/model/versions` and `GET /v1/model/training-runs`
- * (real, already used by `models`/`performance`/`operational-tasks`)
- * cover most of what "Training Jobs" and "Model Registry" need. Fixed:
- * those two tabs are now real. MLflow experiments, feature-store
- * listings, deployment status, and hyperparameter-search history have
- * no backing endpoint anywhere in this platform — those stay
- * illustrative, now honestly marked as such (`IllustrativeBadge`)
- * instead of presented as real.
+ * read from hardcoded mock generators with no real backend at all.
+ * Fixed incrementally: "Training Jobs"/"Model Registry" (`GET /v1/
+ * model/versions`, `GET /v1/model/training-runs`) were real first;
+ * "Experiments" is real now too (`GET /v1/model/experiments`, `GET
+ * /v1/model/mlflow-runs` — new endpoints, `service/mlops/
+ * experiments.py`) — every architecture this platform trains logs to
+ * one shared MLflow experiment, so this is a real but typically
+ * single-experiment list, not a per-model breakdown the old mock
+ * implied. Feature-store listings, deployment status, and
+ * hyperparameter-search history still have no backing endpoint
+ * anywhere in this platform — those stay illustrative, honestly marked
+ * (`IllustrativeBadge`) instead of presented as real.
  */
 "use client";
 
@@ -26,9 +29,17 @@ import { Beaker, Play, Clock } from "lucide-react";
 import { Card } from "@/components/dashboard/card";
 import { IllustrativeBadge } from "@/components/dashboard/illustrative-badge";
 import { cn } from "@/lib/utils";
-import { fetchModelVersions, MODEL_ARCHITECTURES, type ModelVersion } from "@/lib/emissions";
+import {
+  fetchModelVersions,
+  fetchMlflowExperiments,
+  fetchMlflowRuns,
+  MODEL_ARCHITECTURES,
+  type ModelVersion,
+  type MlflowExperiment,
+  type MlflowRun,
+} from "@/lib/emissions";
 import { fetchTrainingRuns, formatRelativeTime, type TrainingRunLog } from "@/lib/ingestion";
-import { getFeatureGroups, getMlflowExperiments, getMlflowRuns, getDeployments } from "@/lib/dashboards";
+import { getFeatureGroups, getDeployments } from "@/lib/dashboards";
 
 function useModelVersions() {
   const [versions, setVersions] = useState<ModelVersion[] | null>(null);
@@ -72,16 +83,60 @@ function useTrainingRuns() {
   return { runs, error };
 }
 
+function useMlflowExperiments() {
+  const [experiments, setExperiments] = useState<MlflowExperiment[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchMlflowExperiments()
+      .then((res) => {
+        if (!cancelled) setExperiments(res);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : "failed to load");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return { experiments, error };
+}
+
+function useMlflowRuns(limit: number) {
+  const [runs, setRuns] = useState<MlflowRun[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchMlflowRuns(limit)
+      .then((res) => {
+        if (!cancelled) setRuns(res);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : "failed to load");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [limit]);
+
+  return { runs, error };
+}
+
 export default function TrainingPage() {
   const { versions, error: versionsError } = useModelVersions();
   const { runs, error: runsError } = useTrainingRuns();
+  const { experiments, error: experimentsError } = useMlflowExperiments();
+  const { runs: mlflowRuns, error: mlflowRunsError } = useMlflowRuns(8);
 
-  // No real endpoint for any of these -- see this page's own module
-  // docstring. Kept as static sample content (not deleted) so the tabs
-  // still show what the real thing would look like, but every card now
-  // carries `IllustrativeBadge` per this app's own convention.
-  const experiments = useMemo(() => getMlflowExperiments(), []);
-  const mlflowRuns = useMemo(() => getMlflowRuns(8), []);
+  // Feature Store / Deployments have no real backing concept anywhere
+  // in this platform (no registered feature-group store, no replica/
+  // traffic tracking for this single-process CPU-serving setup) -- see
+  // this page's own module docstring. Kept as static sample content
+  // (not deleted) so the tabs still show what the real thing would look
+  // like, `IllustrativeBadge`-marked per this app's own convention.
   const featureGroups = useMemo(() => getFeatureGroups(), []);
   const deployments = useMemo(() => getDeployments(), []);
 
@@ -255,56 +310,76 @@ export default function TrainingPage() {
           <Card>
             <div className="mb-3 flex items-center justify-between">
               <h2 className="text-base font-semibold text-white">MLflow Experiments</h2>
-              <IllustrativeBadge label="No experiments-listing endpoint exists yet" />
+              <span className="text-[11px] text-white/40">GET /v1/model/experiments (forecast-api)</span>
             </div>
-            <ul className="space-y-1.5 text-sm opacity-60">
-              {experiments.map((e) => (
-                <li key={e.id} className="rounded-md border border-white/5 bg-white/[0.02] p-3">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <div className="text-white/85 font-medium">{e.name}</div>
-                      <div className="text-[11px] text-white/50">Owner: {e.owner} · {e.runs} runs</div>
+            {experimentsError ? (
+              <p className="py-6 text-center text-sm text-white/40">Couldn&apos;t load experiments ({experimentsError}).</p>
+            ) : experiments === null ? (
+              <p className="py-6 text-center text-sm text-white/40">Loading…</p>
+            ) : experiments.length === 0 ? (
+              <p className="text-sm text-white/55">No MLflow experiments yet.</p>
+            ) : (
+              <ul className="space-y-1.5 text-sm">
+                {experiments.map((e) => (
+                  <li key={e.experiment_id} className="rounded-md border border-white/5 bg-white/[0.02] p-3">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <div className="text-white/85 font-medium">{e.name}</div>
+                        <div className="text-[11px] text-white/50">
+                          Every architecture trained here logs to this experiment
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <div className="text-emerald-100 tabular-nums">{e.run_count} runs</div>
+                        <div className="text-[11px] text-white/50">
+                          {e.last_run_at ? `last ${formatRelativeTime(e.last_run_at)}` : "no runs yet"}
+                        </div>
+                      </div>
                     </div>
-                    <div className="text-right">
-                      <div className="text-emerald-100 tabular-nums">{e.best_value} {e.best_metric}</div>
-                      <div className="text-[11px] text-white/50">best</div>
-                    </div>
-                  </div>
-                </li>
-              ))}
-            </ul>
+                  </li>
+                ))}
+              </ul>
+            )}
           </Card>
 
           <Card>
             <div className="mb-3 flex items-center justify-between">
               <h2 className="text-base font-semibold text-white">Recent MLflow Runs</h2>
-              <IllustrativeBadge />
+              <span className="text-[11px] text-white/40">GET /v1/model/mlflow-runs (forecast-api)</span>
             </div>
-            <table className="w-full text-left text-sm opacity-60">
-              <thead className="border-b border-white/5 text-[11px] uppercase tracking-wide text-white/40">
-                <tr>
-                  <th className="py-2">Run</th>
-                  <th className="py-2">Experiment</th>
-                  <th className="py-2">Started</th>
-                  <th className="py-2">Status</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-white/5">
-                {mlflowRuns.map((r) => (
-                  <tr key={r.id} className="text-white/85">
-                    <td className="py-2 font-mono text-[11px] text-white/60">{r.id}</td>
-                    <td className="py-2 text-white/80">{r.experiment}</td>
-                    <td className="py-2 text-white/60">{r.started}</td>
-                    <td className="py-2"><span className={cn("rounded-md border px-2 py-0.5 text-[11px] font-medium",
-                      r.status === "finished" ? "border-emerald-200/40 bg-emerald-200/10 text-emerald-100" :
-                      r.status === "running"  ? "border-cyan-300/40 bg-cyan-300/10 text-cyan-200" :
-                      r.status === "failed"   ? "border-rose-300/40 bg-rose-300/10 text-rose-200" :
-                                                "border-white/10 bg-white/5 text-white/60"
-                    )}>{r.status}</span></td>
+            {mlflowRunsError ? (
+              <p className="py-6 text-center text-sm text-white/40">Couldn&apos;t load runs ({mlflowRunsError}).</p>
+            ) : mlflowRuns === null ? (
+              <p className="py-6 text-center text-sm text-white/40">Loading…</p>
+            ) : mlflowRuns.length === 0 ? (
+              <p className="text-sm text-white/55">No MLflow runs yet.</p>
+            ) : (
+              <table className="w-full text-left text-sm">
+                <thead className="border-b border-white/5 text-[11px] uppercase tracking-wide text-white/40">
+                  <tr>
+                    <th className="py-2">Run</th>
+                    <th className="py-2">Architecture</th>
+                    <th className="py-2">Started</th>
+                    <th className="py-2">Status</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {mlflowRuns.map((r) => (
+                    <tr key={r.run_id} className="text-white/85">
+                      <td className="py-2 font-mono text-[11px] text-white/60">{r.run_id.slice(0, 8)}</td>
+                      <td className="py-2 text-white/80">{r.architecture ?? "—"}</td>
+                      <td className="py-2 text-white/60">{r.started_at ? formatRelativeTime(r.started_at) : "—"}</td>
+                      <td className="py-2"><span className={cn("rounded-md border px-2 py-0.5 text-[11px] font-medium",
+                        r.status === "finished" ? "border-emerald-200/40 bg-emerald-200/10 text-emerald-100" :
+                        r.status === "running"  ? "border-cyan-300/40 bg-cyan-300/10 text-cyan-200" :
+                        r.status === "failed"   ? "border-rose-300/40 bg-rose-300/10 text-rose-200" :
+                                                  "border-white/10 bg-white/5 text-white/60"
+                      )}>{r.status}</span></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
           </Card>
         </div>
       )}

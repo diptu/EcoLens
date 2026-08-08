@@ -9,34 +9,19 @@
  * is dynamically imported so it loads after first paint and doesn't
  * block the LCP.
  */
-import dynamic from "next/dynamic";
-
 import { Hero } from "@/components/landing/hero";
 import { Navbar } from "@/components/landing/navbar";
 import { StatsBar } from "@/components/landing/stats-bar";
 import { MotionProvider } from "@/components/motion/motion-provider";
-
-// Below-the-fold sections — load on idle so the initial paint is fast
-const FeaturesGlobe = dynamic(
-  () => import("@/components/landing/features-globe").then((m) => m.FeaturesGlobe),
-  { ssr: false },
-);
-const FeaturesRow = dynamic(
-  () => import("@/components/landing/features-row").then((m) => m.FeaturesRow),
-  { ssr: false },
-);
-const TrustedBy = dynamic(
-  () => import("@/components/landing/trusted-by").then((m) => m.TrustedBy),
-  { ssr: false },
-);
-const CtaSection = dynamic(
-  () => import("@/components/landing/cta-section").then((m) => m.CtaSection),
-  { ssr: false },
-);
-const Footer = dynamic(
-  () => import("@/components/landing/footer").then((m) => m.Footer),
-  { ssr: false },
-);
+// Below-the-fold sections — dynamically imported (ssr: false) in this
+// Client Component wrapper so they load on idle after first paint.
+import {
+  CtaSection,
+  FeaturesGlobe,
+  FeaturesRow,
+  Footer,
+  TrustedBy,
+} from "@/components/landing/below-the-fold";
 
 export function LandingPage() {
   return (

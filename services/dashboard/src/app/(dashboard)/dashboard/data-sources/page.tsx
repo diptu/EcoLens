@@ -1,7 +1,7 @@
 /**
  * /dashboard/data-sources — Data Sources management
  *
- * Real data from data-pipeline's `GET /v1/data-sources/public`
+ * Real data from ingestion's `GET /v1/data-sources`
  * (`lib/data-sources.ts`) — replaces the old fictional 9-source catalog
  * (`lib/dashboards.ts`'s `getDataSources()`, sources like "ENTSO-E API"/
  * "EIA API" that don't exist in this platform). No mock fallback on

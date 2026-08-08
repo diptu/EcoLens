@@ -63,6 +63,26 @@ scrape_configs:
     static_configs:
       - targets: ["${FORECAST_API_TARGET}"]
 
+  # ── Shared infra (RabbitMQ, both ingestion and warehouse depend on
+  #    it) ────────────────────────────────────────────────────────────
+  # `rabbitmq_prometheus` (`../../infra/docker/rabbitmq/enabled_plugins`
+  # enables it) -- two jobs, not one, because the plugin's default
+  # `/metrics` only exposes cluster-wide aggregates; per-queue labels
+  # (`queue`, needed for `prometheus/rules/rabbitmq.yml`'s DLQ/queue-
+  # depth alerts) only come from `/metrics/detailed`'s
+  # `family=queue_coarse_metrics` query param.
+  - job_name: rabbitmq
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["${RABBITMQ_TARGET}"]
+
+  - job_name: rabbitmq-queues
+    metrics_path: /metrics/detailed
+    params:
+      family: ["queue_coarse_metrics"]
+    static_configs:
+      - targets: ["${RABBITMQ_TARGET}"]
+
   # ── Observability stack's own components ────────────────────────────
   # Unparametrized -- these always run alongside this Prometheus
   # instance itself (same compose project), never on a separate

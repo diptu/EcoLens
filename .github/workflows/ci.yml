@@ -15,12 +15,15 @@ name: CI
 #
 # forecast-api and services/waerehouse are each their own independent
 # `uv` project (own venv/lockfile, not a member of the root workspace) —
-# both restructured packages are named `app`, same as data-pipeline's, so
-# sharing one workspace venv would collide them. Their steps use `uv run
-# --directory services/<name>` rather than the root workspace sync the
-# data-pipeline steps use. (`services/ingestion` is the same shape but
-# isn't wired into this workflow yet — a pre-existing gap, not something
-# this change touches.)
+# both restructured packages are named `app`, so sharing one workspace
+# venv would collide them. Their steps use `uv run --directory
+# services/<name>` rather than a root workspace sync. (`services/
+# ingestion` is the same shape but isn't wired into this workflow yet —
+# a pre-existing gap, not something this change touches.) `services/
+# data-pipeline`'s own lint/test steps were removed 2026-08-08 -- that
+# service no longer exists on disk (decommissioned in favor of
+# ingestion/waerehouse/forecast-api); its history is still in git if
+# ever needed (commit `6d0b5cb`).
 #
 # `warehouse-dbt` is a separate job from `lint`/`test` (README Phase 5's
 # "execute dbt test runs against an ephemeral test database") — it needs
@@ -47,8 +50,8 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Sync root workspace (data-pipeline + dev tools)
-        run: uv sync --all-packages
+      - name: Sync root dev tools
+        run: uv sync
 
       - name: Sync forecast-api (independent project)
         run: uv sync --directory services/forecast-api
@@ -56,17 +59,11 @@ jobs:
       - name: Sync warehouse (independent project)
         run: uv sync --directory services/waerehouse
 
-      - name: ruff check (data-pipeline, repo root)
-        run: uv run ruff check .
-
       - name: ruff check (forecast-api)
         run: uv run --directory services/forecast-api ruff check .
 
       - name: ruff check (warehouse)
         run: uv run --directory services/waerehouse ruff check .
-
-      - name: mypy (data-pipeline)
-        run: uv run mypy services/data-pipeline/app
 
       - name: mypy (forecast-api)
         run: uv run --directory services/forecast-api mypy app
@@ -83,17 +80,11 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Sync root workspace (data-pipeline + dev tools)
-        run: uv sync --all-packages
-
       - name: Sync forecast-api (independent project)
         run: uv sync --directory services/forecast-api
 
       - name: Sync warehouse (independent project)
         run: uv sync --directory services/waerehouse
-
-      - name: pytest (data-pipeline)
-        run: uv run pytest services/data-pipeline -q
 
       - name: pytest (forecast-api)
         run: uv run --directory services/forecast-api pytest -q
@@ -149,3 +140,24 @@ jobs:
 
       - name: dbt test
         run: uv run --directory services/waerehouse ecolens-warehouse dbt test
+
+      # README Phase 4's "Automated Documentation" -- `dbt docs generate`
+      # needs a real `dbt run`/`manifest.json` to describe, so this runs
+      # after the real seed/run/test above, not standalone. Uploaded as a
+      # build artifact (downloadable from the Actions run, `actions/
+      # download-artifact` or the UI) rather than published anywhere
+      # public -- there's no static-hosting target in this repo to push
+      # it to yet, and a self-documenting data dictionary that's one
+      # click away from every CI run already closes the real gap (no
+      # `dbt docs generate` had ever been run/documented anywhere before
+      # this). `dbt docs serve` (a local dev server over these same
+      # generated files) is documented in `services/waerehouse/README.md`
+      # for local use instead.
+      - name: dbt docs generate
+        run: uv run --directory services/waerehouse ecolens-warehouse dbt docs generate
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dbt-docs
+          path: services/waerehouse/dbt/ecolens/target/
+          retention-days: 30

@@ -15,6 +15,22 @@ models:
           'provider' / 'derived' / null — see int_demand_with_weather's
           own column doc (TODO.md Phase 2). Tested there, not duplicated
           here.
+      - name: coal_mw
+        description: >
+          Generation-mix bucket for the multi-task forecast model's
+          generation head (4 named buckets + other_mw catch-all — see
+          int_demand_with_weather's own column doc). Null only when
+          total_generation_mw itself is null for that row.
+      - name: gas_mw
+      - name: wind_mw
+      - name: solar_mw
+        description: solar_utility_mw + solar_rooftop_mw, summed.
+      - name: other_mw
+        description: >
+          hydro + biomass + distillate + pumped_hydro + battery_discharge
+          — everything real generation that isn't coal/gas/wind/solar.
+          Sum-within-total bound tested in
+          assert_generation_buckets_within_total.sql, not duplicated here.
       - name: is_anomalous
         description: >
           True if services/ingestion's hybrid detector flagged this

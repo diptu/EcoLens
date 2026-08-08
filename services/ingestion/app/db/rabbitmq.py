@@ -24,6 +24,7 @@ from typing import Any
 
 import aio_pika
 from aio_pika.abc import AbstractRobustConnection
+from opentelemetry.propagate import inject
 
 from app.core.config import get_settings
 
@@ -52,8 +53,9 @@ async def publish_landed_event(
     payload: dict[str, Any], *, queue_name: str | None = None
 ) -> None:
     """Publish a "data staged" event — `payload` becomes the JSON message
-    body `warehouse_sync.sync_landed_event` receives on the consumer side
-    (still `data-pipeline`'s job, per this module's docstring).
+    body `consumers.landed_events.sync_landed_event` receives on the
+    consumer side (`services/waerehouse`'s job now, not `data-pipeline`'s
+    -- that service no longer exists).
 
     `queue_name` defaults to `Settings.rabbitmq_landing_queue` — pass
     `Settings.rabbitmq_landing_queue_shadow` for a Phase 4 shadow run
@@ -64,6 +66,16 @@ async def publish_landed_event(
     RabbitMQ restart between publish and consume (matches `meta.
     _ingest_log`'s own durability expectations — a "staged" row shouldn't
     be able to silently vanish before it's synced).
+
+    `inject(headers)` (`TODO.md` Observability Phase 1's "Distributed
+    Trace Propagation") writes the current span's W3C `traceparent` into
+    the AMQP message headers -- called from within `pipeline.tasks.
+    _common.standard_run`'s own `ingestion.standard_run` span, so this
+    picks up *that* span's context automatically (no span reference
+    needs threading through here). A real no-op dict (no header written)
+    if tracing is disabled or there's no current span -- `services/
+    waerehouse`'s consumer starts its own fresh, unlinked span in that
+    case, same as it always did before this existed.
     """
     settings = get_settings()
     connection = await get_rabbitmq_connection()
@@ -72,11 +84,14 @@ async def publish_landed_event(
         queue = await channel.declare_queue(
             queue_name or settings.rabbitmq_landing_queue, durable=True
         )
+        headers: dict[str, Any] = {}
+        inject(headers)
         await channel.default_exchange.publish(
             aio_pika.Message(
                 body=json.dumps(payload).encode(),
                 delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
                 content_type="application/json",
+                headers=headers,
             ),
             routing_key=queue.name,
         )

@@ -49,4 +49,6 @@ explicit_package_bases = true
 # each one independently. This section is kept (rather than deleted) so
 # a future root-level dev-tooling package has an obvious place to
 # register, not because anything currently belongs here.
-members = []
+members = [
+    "services/observility",
+]

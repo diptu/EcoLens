@@ -23,6 +23,7 @@ NEM+WEM whole-of-market aggregate.
 
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime, timedelta
 
 import numpy as np
@@ -39,19 +40,27 @@ from app.api.v1.deps import (
     get_redis_client,
 )
 from app.core.errors import ApiError
+from app.core.logging import get_logger
 from app.core.metrics import forecast_predictions_total, forecast_prediction_latency_seconds
+from app.core.tracing import get_tracer
 from app.schemas.forecast import ForecastPoint, ForecastResponse
 from app.core.config import Settings
+from app.service.ml.adaptive_calibration import get_calibration_scale
 from app.service.ml.data import load_holidays, load_latest_window
+from app.service.ml.evaluate import BaselineForecaster, _infer_period_steps
 from app.service.ml.features import (
     FEATURE_COLUMNS,
     NUMERIC_COLUMNS,
     build_features,
 )
 from app.models.ml import DemandForecast
+from app.service.ml.forecast_breaker import OPEN, ForecastCircuitBreaker
+from app.service.ml.forecast_reconciliation import breaker_name, record_served_forecast
 from app.service.ml.registry import ModelBundle, ModelRegistry
 
 router = APIRouter(prefix="/v1", tags=["forecast"])
+log = get_logger(__name__)
+tracer = get_tracer()
 
 # The 5 NEM regions -- same 5-min AEMO dispatch clock, same 48-step/4h
 # native horizon, so `region=NEM` (`_run_nem_aggregate_forecast`) can sum
@@ -238,11 +247,23 @@ async def _forecast_arrays_nem(db: AsyncSession, bundle: ModelBundle) -> Forecas
 
 
 async def _run_single_region_forecast(
-    db: AsyncSession, bundle: ModelBundle, settings: Settings, region: str
+    db: AsyncSession, bundle: ModelBundle, settings: Settings, region: str, redis: Redis
 ) -> ForecastResponse:
     lo, p50, hi, step, last_ts = await _forecast_arrays_single_region(
         db, bundle, region
     )
+    # `TODO.md` Forecasting Phase 4's adaptive-bound-tightening item --
+    # `adaptive_calibration.py`'s scale, driven by how often this exact
+    # `(model, region)`'s previously-served intervals actually contained
+    # what happened. Applied symmetrically around `p50` (the point
+    # estimate itself is never touched, only the interval width) --
+    # `region == "NEM"` is excluded the same way the circuit
+    # breaker/fallback above is: an aggregate of 5 independently-scaled
+    # regions summed together isn't what this scale was fit against.
+    scale = await get_calibration_scale(redis, settings.mlflow_registry_model_name, region)
+    if scale != 1.0:
+        lo = p50 - (p50 - lo) * scale
+        hi = p50 + (hi - p50) * scale
     return _build_response(region, settings, bundle, lo, p50, hi, step, last_ts)
 
 
@@ -251,6 +272,58 @@ async def _run_nem_aggregate_forecast(
 ) -> ForecastResponse:
     lo, p50, hi, step, last_ts = await _forecast_arrays_nem(db, bundle)
     return _build_response("NEM", settings, bundle, lo, p50, hi, step, last_ts)
+
+
+#: Rows fetched for the seasonal-naive fallback's own history pool --
+#: generous enough to cover `BaselineForecaster`'s default `n_periods=8`
+#: at NEM's real 5-min cadence (8 * 288 = 2304 rows/day-periods), the
+#: most demanding case; a 30-min WEM region ends up with more pooled
+#: history than it strictly needs, which is harmless.
+_BASELINE_FALLBACK_HISTORY_ROWS = 2500
+
+
+async def _run_baseline_fallback_forecast(
+    db: AsyncSession, settings: Settings, bundle: ModelBundle, region: str
+) -> ForecastResponse:
+    """Served instead of the real model when `region`'s forecast-quality
+    circuit breaker (`service/ml/forecast_breaker.py`) is open --
+    `TODO.md` Forecasting Phase 4's "instantaneous fallback... to a
+    pre-validated statistical baseline model". Uses the same real,
+    already-built `BaselineForecaster`/`_infer_period_steps` this
+    service's own walk-forward evaluation harness (`service/ml/
+    evaluate.py`) scores every model against -- not a second, separately
+    written baseline implementation.
+    """
+    raw_df = await load_latest_window(db, region, _BASELINE_FALLBACK_HISTORY_ROWS)
+    if len(raw_df) < 2:
+        raise ApiError(
+            503,
+            "insufficient_data",
+            f"Not enough recent warehouse data for region '{region}' to build "
+            "even a baseline fallback forecast",
+        )
+    period_steps = _infer_period_steps(raw_df)
+    forecaster = BaselineForecaster(period_steps=period_steps)
+    p10, p50, hi = forecaster.predict(raw_df, horizon=bundle.horizon)
+
+    step = _infer_step(raw_df["ts"])
+    last_ts = raw_df["ts"].iloc[-1].to_pydatetime()
+    if last_ts.tzinfo is None:
+        last_ts = last_ts.replace(tzinfo=UTC)
+
+    response = _build_response(
+        region,
+        settings,
+        bundle,
+        p10.reshape(1, -1),
+        p50.reshape(1, -1),
+        hi.reshape(1, -1),
+        step,
+        last_ts,
+    )
+    response.model = forecaster.name
+    response.served_by = "baseline_fallback"
+    return response
 
 
 @router.get("/forecast", response_model=ForecastResponse)
@@ -269,22 +342,92 @@ async def get_forecast(
             503, "model_not_loaded", "No Production model version is loaded yet"
         )
 
+    # `TODO.md` Forecasting Phase 4's fallback mechanism -- checked before
+    # the cache lookup below, since a cached *model* response from before
+    # the breaker tripped shouldn't keep being served once it's open, and
+    # a cached *baseline* response from while it was open shouldn't keep
+    # being served once it recovers. `region == "NEM"` (the 5-region sum)
+    # is deliberately excluded -- checking/serving a fallback for an
+    # aggregate of 5 independently-breakered regions is real added scope
+    # this pass doesn't cover; NEM always uses the real model.
+    is_fallback = False
+    if region != "NEM":
+        breaker = ForecastCircuitBreaker(
+            breaker_name(settings.mlflow_registry_model_name, region), redis
+        )
+        is_fallback = await breaker.state == OPEN
+
     # Times the whole handler (cache hit or miss alike) rather than just
     # the inference branch below -- a cache hit's near-zero latency is
     # itself a meaningful data point (proves the cache is doing its job),
     # not noise to exclude. `cache` label on forecast_predictions_total
     # is how a Grafana panel tells hits from misses apart if it needs to.
     with forecast_prediction_latency_seconds.labels(region=region).time():
-        cache_key = f"forecast:v1:{region}:{bundle.version}"
+        cache_key = (
+            f"forecast:v1:{region}:baseline_fallback"
+            if is_fallback
+            else f"forecast:v1:{region}:{bundle.version}"
+        )
         cached = await redis.get(cache_key)
         if cached is not None:
             forecast_predictions_total.labels(region=region, cache="hit").inc()
             return ForecastResponse.model_validate_json(cached)
 
-        if region == "NEM":
-            response = await _run_nem_aggregate_forecast(db, bundle, settings)
-        else:
-            response = await _run_single_region_forecast(db, bundle, settings, region)
+        # Real inference/fallback branch (`TODO.md` Forecasting Phase 7's
+        # "OpenTelemetry Instrumentation" + "Structured Logging" -- a
+        # cache hit above never reaches here, since there's no model
+        # execution/drift-relevant work to trace or log for it; the
+        # `cache="hit"` metric label already covers that case).
+        with tracer.start_as_current_span(
+            "forecast_api.get_forecast",
+            attributes={
+                "region": region,
+                "served_by": "baseline_fallback" if is_fallback else "model",
+            },
+        ) as span:
+            inference_started = time.perf_counter()
+            if is_fallback:
+                response = await _run_baseline_fallback_forecast(
+                    db, settings, bundle, region
+                )
+            elif region == "NEM":
+                response = await _run_nem_aggregate_forecast(db, bundle, settings)
+            else:
+                response = await _run_single_region_forecast(
+                    db, bundle, settings, region, redis
+                )
+                # Logs the shortest-horizon point for later reconciliation
+                # against real demand (`service/ml/forecast_reconciliation.py`'s
+                # background sweep) -- only for a real (non-fallback) model
+                # response; there's no point reconciling a baseline forecast
+                # against itself. `p10_mw`/`p90_mw` are the *already-scaled*
+                # bounds `_run_single_region_forecast` just applied above --
+                # `adaptive_calibration.py`'s own docstring explains why it
+                # has to adapt against what was actually served, not the
+                # raw pre-scale conformal width.
+                if response.points:
+                    await record_served_forecast(
+                        redis,
+                        model_name=settings.mlflow_registry_model_name,
+                        region=region,
+                        target_ts=response.points[0].ts,
+                        p50_mw=response.points[0].p50,
+                        p10_mw=response.points[0].p10,
+                        p90_mw=response.points[0].p90,
+                    )
+            inference_duration = time.perf_counter() - inference_started
+
+            span.set_attribute("model_version", response.model)
+            span.set_attribute("forecast_horizon", response.horizon)
+            span.set_attribute("inference_duration", inference_duration)
+            log.info(
+                "forecast.served",
+                region=region,
+                model_version=response.model,
+                forecast_horizon=response.horizon,
+                inference_duration=inference_duration,
+                served_by=response.served_by,
+            )
 
         await redis.set(
             cache_key, response.model_dump_json(), ex=settings.forecast_cache_ttl_seconds

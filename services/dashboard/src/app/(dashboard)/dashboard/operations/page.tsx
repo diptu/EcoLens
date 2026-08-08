@@ -3,15 +3,16 @@
  *
  * Real data where it exists, honest placeholders where it doesn't:
  *   forecast-api /v1/readyz, data-pipeline /v1/readyz, ingestion
- *     /v1/readyz (added 2026-08-07), IAM / + /db_health (lib/health.ts)
+ *     /v1/readyz (added 2026-08-07), warehouse /v1/readyz (added
+ *     alongside the training-code migration follow-up pass), IAM /
+ *     + /db_health (lib/health.ts)
  *   GET /v1/model (lib/emissions.ts, forecast-api)
- *   GET /v1/data-sources/public (lib/data-sources.ts, data-pipeline) —
- *     real per-source health/schedule, replaces the old static
+ *   GET /v1/data-sources (lib/data-sources.ts, ingestion) — real
+ *     per-source health/schedule, replaces the old static
  *     `PIPELINE_CATALOG` (real source names, but no live status) now
- *     that a public, unauthenticated mirror of `GET /v1/data-sources`
- *     exists (added specifically to unblock this and the Data Sources
- *     page — see that endpoint's own docstring in data-pipeline's
- *     `api/v1/datasources/routes.py`).
+ *     that a deliberately open (no auth) `GET /v1/data-sources` exists
+ *     on `services/ingestion` — see that endpoint's own docstring in
+ *     `api/v1/datasources/routes.py`.
  */
 "use client";
 

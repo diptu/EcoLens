@@ -35,6 +35,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any, ParamSpec, TypeVar
 
 import pandas as pd
+from opentelemetry.trace import Status, StatusCode
 from sqlalchemy import text
 
 from app.core.config import get_settings
@@ -43,12 +44,14 @@ from app.core.metrics import (
     circuit_breaker_state as circuit_breaker_state_gauge,
 )
 from app.core.metrics import (
+    anomaly_flags_total,
     ingest_duration_seconds,
     ingest_failures_total,
     ingest_rows_total,
     ingest_runs_total,
     latest_ingest_ts,
 )
+from app.core.tracing import get_tracer
 from app.db.rabbitmq import publish_landed_event
 from app.db.redis import get_breaker
 from app.db.session import get_session
@@ -59,6 +62,7 @@ P = ParamSpec("P")
 T = TypeVar("T")
 
 log = get_logger(__name__)
+tracer = get_tracer()
 
 _CIRCUIT_STATE_VALUE = {"closed": 0, "half_open": 1, "open": 2}
 
@@ -214,117 +218,152 @@ def standard_run(
         @functools.wraps(fetch_fn)
         @timed(source)
         async def wrapper(*args: P.args, **kwargs: P.kwargs) -> int:
-            run_id = await _log_run_start(
-                source, triggered_by, window_start, window_end
-            )
-            breaker = get_breaker(source)
-            try:
-                if bypass_breaker:
-                    df = await fetch_fn(*args, **kwargs)
-                else:
-                    df = await breaker.call(fetch_fn, *args, **kwargs)
+            # Stays open through `publish_landed_event` below -- that's
+            # deliberate, not incidental: `db.rabbitmq.publish_landed_event`
+            # injects *this* span's context into the AMQP message headers
+            # (`TODO.md` Observability Phase 1's "Distributed Trace
+            # Propagation"), which is what lets `services/waerehouse`'s
+            # consumer link its own `sync_landed_event` span to this run
+            # as a real cross-service trace, not just two unrelated spans
+            # that happen to run near each other in time.
+            with tracer.start_as_current_span(
+                "ingestion.standard_run",
+                attributes={
+                    "source": source,
+                    "table": table,
+                    "triggered_by": triggered_by,
+                },
+            ) as span:
+                run_id = await _log_run_start(
+                    source, triggered_by, window_start, window_end
+                )
+                span.set_attribute("run_id", str(run_id))
+                breaker = get_breaker(source)
+                try:
+                    if bypass_breaker:
+                        df = await fetch_fn(*args, **kwargs)
+                    else:
+                        df = await breaker.call(fetch_fn, *args, **kwargs)
 
-                anomalies = detect_anomalies(df, source)
-                if not anomalies.empty:
-                    await record_anomalies(run_id, source, table, anomalies)
-                    log.warning(
-                        "ingest.anomalies_flagged",
-                        source=source,
-                        run_id=str(run_id),
-                        count=len(anomalies),
+                    anomalies = detect_anomalies(df, source)
+                    if not anomalies.empty:
+                        await record_anomalies(run_id, source, table, anomalies)
+                        anomaly_flags_total.labels(source=source).inc(len(anomalies))
+                        span.set_attribute("anomalies_flagged", len(anomalies))
+                        log.warning(
+                            "ingest.anomalies_flagged",
+                            source=source,
+                            run_id=str(run_id),
+                            count=len(anomalies),
+                        )
+
+                    duckdb_path, rows_staged = stage_dataframe(df, table, str(run_id))
+                    span.set_attribute("rows_staged", rows_staged)
+
+                    if rows_staged == 0:
+                        # Nothing fetched -> nothing to stage or sync. This is
+                        # the one case that's immediately terminal, same as
+                        # data-pipeline's own no-op-empty-fetch handling.
+                        await _log_run_finish(
+                            run_id,
+                            status="success",
+                            rows_landed=0,
+                            rows_loaded=0,
+                            circuit_state=await _read_breaker_state(source, breaker),
+                        )
+                        ingest_runs_total.labels(source=source, outcome="success").inc()
+                        log.info(
+                            "ingest.run_succeeded",
+                            source=source,
+                            run_id=str(run_id),
+                            rows=0,
+                        )
+                        return 0
+
+                    # Uploads the same local file `stage_dataframe` just wrote
+                    # to object storage (`services/ingestion/TODO.md` Phase 2,
+                    # "Integrate Cloudflare R2 Staging") -- `duckdb_path` stays
+                    # in the payload too (Phase 2's "Bridge Legacy Handoffs":
+                    # whichever service still runs `pipeline.warehouse_sync`'s
+                    # consumer reads the shared-volume local path unmodified
+                    # during the transition), `object_storage_key`/`_bucket`
+                    # are the forward path for once that consumer is updated
+                    # to read object storage instead.
+                    object_storage_key = await upload_staged_file(
+                        duckdb_path, table, str(run_id)
                     )
-
-                duckdb_path, rows_staged = stage_dataframe(df, table, str(run_id))
-
-                if rows_staged == 0:
-                    # Nothing fetched -> nothing to stage or sync. This is
-                    # the one case that's immediately terminal, same as
-                    # data-pipeline's own no-op-empty-fetch handling.
+                    # Phase 4's "Execute Shadow Runs": `triggered_by="shadow"`
+                    # publishes to the shadow queue instead of the real one,
+                    # so a shadow run does everything else for real (fetch,
+                    # anomaly-scan, stage, `meta._ingest_log` row) but never
+                    # reaches the real consumer -- no double-load of `raw.*`
+                    # from two independent fetches of the same window.
+                    landing_queue = (
+                        get_settings().rabbitmq_landing_queue_shadow
+                        if triggered_by == "shadow"
+                        else None
+                    )
+                    await publish_landed_event(
+                        {
+                            "run_id": str(run_id),
+                            "source": source,
+                            "table": table,
+                            "schema": "raw",
+                            "duckdb_path": duckdb_path,
+                            "object_storage_key": object_storage_key,
+                            "object_storage_bucket": get_settings().object_storage_bucket,
+                            "rows": rows_staged,
+                            # Same values already written to `meta._ingest_log.
+                            # window_start`/`_end` above (`_log_run_start`) --
+                            # `None`/`None` for a plain scheduled/manual run
+                            # (no real range, honestly absent rather than
+                            # defaulted to something fabricated), real ISO
+                            # timestamps for a backfill run (`registry.
+                            # run_source`'s own docstring has the full
+                            # "why this used to always be NULL" story). Added
+                            # so a consumer doesn't have to cross-reference
+                            # `meta._ingest_log` by `run_id` just to learn the
+                            # timestamp range a landed event actually covers.
+                            "window_start": window_start,
+                            "window_end": window_end,
+                        },
+                        queue_name=landing_queue,
+                    )
                     await _log_run_finish(
                         run_id,
-                        status="success",
-                        rows_landed=0,
-                        rows_loaded=0,
+                        status="staged",
+                        rows_landed=rows_staged,
                         circuit_state=await _read_breaker_state(source, breaker),
                     )
+                    ingest_rows_total.labels(source=source).inc(rows_staged)
                     ingest_runs_total.labels(source=source, outcome="success").inc()
+                    latest_ingest_ts.labels(source=source).set(time.time())
                     log.info(
-                        "ingest.run_succeeded",
+                        "ingest.run_staged",
                         source=source,
                         run_id=str(run_id),
-                        rows=0,
+                        rows=rows_staged,
+                        duckdb_path=duckdb_path,
                     )
-                    return 0
-
-                # Uploads the same local file `stage_dataframe` just wrote
-                # to object storage (`services/ingestion/TODO.md` Phase 2,
-                # "Integrate Cloudflare R2 Staging") -- `duckdb_path` stays
-                # in the payload too (Phase 2's "Bridge Legacy Handoffs":
-                # whichever service still runs `pipeline.warehouse_sync`'s
-                # consumer reads the shared-volume local path unmodified
-                # during the transition), `object_storage_key`/`_bucket`
-                # are the forward path for once that consumer is updated
-                # to read object storage instead.
-                object_storage_key = await upload_staged_file(
-                    duckdb_path, table, str(run_id)
-                )
-                # Phase 4's "Execute Shadow Runs": `triggered_by="shadow"`
-                # publishes to the shadow queue instead of the real one,
-                # so a shadow run does everything else for real (fetch,
-                # anomaly-scan, stage, `meta._ingest_log` row) but never
-                # reaches the real consumer -- no double-load of `raw.*`
-                # from two independent fetches of the same window.
-                landing_queue = (
-                    get_settings().rabbitmq_landing_queue_shadow
-                    if triggered_by == "shadow"
-                    else None
-                )
-                await publish_landed_event(
-                    {
-                        "run_id": str(run_id),
-                        "source": source,
-                        "table": table,
-                        "schema": "raw",
-                        "duckdb_path": duckdb_path,
-                        "object_storage_key": object_storage_key,
-                        "object_storage_bucket": get_settings().object_storage_bucket,
-                        "rows": rows_staged,
-                    },
-                    queue_name=landing_queue,
-                )
-                await _log_run_finish(
-                    run_id,
-                    status="staged",
-                    rows_landed=rows_staged,
-                    circuit_state=await _read_breaker_state(source, breaker),
-                )
-                ingest_rows_total.labels(source=source).inc(rows_staged)
-                ingest_runs_total.labels(source=source, outcome="success").inc()
-                latest_ingest_ts.labels(source=source).set(time.time())
-                log.info(
-                    "ingest.run_staged",
-                    source=source,
-                    run_id=str(run_id),
-                    rows=rows_staged,
-                    duckdb_path=duckdb_path,
-                )
-                return rows_staged
-            except Exception as e:
-                ingest_failures_total.labels(source=source).inc()
-                ingest_runs_total.labels(source=source, outcome="failure").inc()
-                await _log_run_finish(
-                    run_id,
-                    status="failed",
-                    error_message=str(e)[:500],
-                    circuit_state=await _read_breaker_state(source, breaker),
-                )
-                log.error(
-                    "ingest.run_failed",
-                    source=source,
-                    run_id=str(run_id),
-                    error=str(e),
-                )
-                raise
+                    return rows_staged
+                except Exception as e:
+                    span.record_exception(e)
+                    span.set_status(Status(StatusCode.ERROR, str(e)))
+                    ingest_failures_total.labels(source=source).inc()
+                    ingest_runs_total.labels(source=source, outcome="failure").inc()
+                    await _log_run_finish(
+                        run_id,
+                        status="failed",
+                        error_message=str(e)[:500],
+                        circuit_state=await _read_breaker_state(source, breaker),
+                    )
+                    log.error(
+                        "ingest.run_failed",
+                        source=source,
+                        run_id=str(run_id),
+                        error=str(e),
+                    )
+                    raise
 
         return wrapper
 

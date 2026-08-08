@@ -104,3 +104,134 @@ class PublicRunsListResponse(AppBaseModel):
     data: list[PublicRunOut]
     next_cursor: str | None = None
     has_more: bool
+
+
+# ── GET /v1/ingestion/public/failed ─────────────────────────────────────
+
+
+class PublicFailedRunError(AppBaseModel):
+    """Same shape as data-pipeline's `FailedRunError`, `message` redacted
+    the same way (`_redact_public_error_message` — see this module's own
+    docstring)."""
+
+    code: str | None = None
+    message: str
+    http_status: int | None = None
+    retryable: bool
+
+
+class PublicFailedRunOut(AppBaseModel):
+    """One `meta._ingest_log` row with `status='failed'`. `retry_count`/
+    `next_retry_at`/`in_dlq` are honestly `0`/`None`/`False` — no
+    automated retry engine exists in this codebase either (same
+    honest-null convention data-pipeline's own identical fields use, not
+    an ingestion-specific gap)."""
+
+    run_id: str
+    pipeline_id: str
+    source_id: str
+    status: str = "failed"
+    started_at: datetime
+    finished_at: datetime | None = None
+    duration_ms: int | None = None
+    error: PublicFailedRunError
+    retry_count: int = 0
+    next_retry_at: datetime | None = None
+    in_dlq: bool = False
+    can_retry_now: bool
+
+
+class PublicFailedRunsMeta(AppBaseModel):
+    total_failed_24h: int
+    total_failed_7d: int
+    as_of: datetime
+
+
+class PublicFailedRunsListResponse(AppBaseModel):
+    meta: PublicFailedRunsMeta
+    data: list[PublicFailedRunOut]
+    next_cursor: str | None = None
+    has_more: bool
+
+
+# ── GET /v1/ingestion/public/retry-queue ────────────────────────────────
+
+
+class PublicRetryQueueLastError(AppBaseModel):
+    code: str | None = None
+    message: str
+
+
+class PublicRetryQueueItem(AppBaseModel):
+    """One `meta._ingest_log` row with `status='sync_failed'` — same
+    "no automated backoff engine, honest manual-only" contract as
+    data-pipeline's identical `RetryQueueItem` (see that schema's own
+    docstring)."""
+
+    queue_id: str
+    run_id: str
+    pipeline_id: str
+    source_id: str
+    queued_at: datetime
+    next_retry_at: datetime | None = None
+    retry_count: int = 0
+    max_retries: int | None = None
+    last_error: PublicRetryQueueLastError
+    backoff_strategy: str = "manual"
+    backoff_base_seconds: int | None = None
+
+
+class PublicRetryQueueMeta(AppBaseModel):
+    queue_size: int
+    oldest_queued_at: datetime | None = None
+    as_of: datetime
+
+
+class PublicRetryQueueListResponse(AppBaseModel):
+    meta: PublicRetryQueueMeta
+    data: list[PublicRetryQueueItem]
+
+
+# ── GET /v1/ingestion/public/scheduler ──────────────────────────────────
+
+
+class PublicSchedulerStatus(AppBaseModel):
+    """Simplified vs. data-pipeline's `SchedulerStatus` -- `active_workers`/
+    `total_workers` mean the same "runs execute in-process, no separate
+    worker pool" thing, but this service's real execution model is a
+    genuine Celery worker + beat pair (`app.celery_app`), not FastAPI
+    `BackgroundTasks`/a GitHub Actions runner -- `active_workers` reports
+    whether *this request* could reach a live worker (best-effort, not a
+    worker registry), not a fabricated pool size. `prefect_version`/
+    `prefect_api_url` are always `None`, same reason and same fields
+    data-pipeline's identical `SchedulerStatus` keeps: no service in
+    this platform actually talks to Prefect."""
+
+    status: str = "healthy"
+    as_of: datetime
+    active_workers: int
+    total_workers: int
+    queue_depth: int
+    prefect_version: str | None = None
+    prefect_api_url: str | None = None
+
+
+class PublicUpcomingRun(AppBaseModel):
+    pipeline_id: str
+    source_id: str
+    scheduled_at: datetime
+    trigger: str = "schedule"
+
+
+class PublicRecentRunSummary(AppBaseModel):
+    run_id: str
+    pipeline_id: str
+    status: str
+    finished_at: datetime | None = None
+    duration_ms: int | None = None
+
+
+class PublicSchedulerResponse(AppBaseModel):
+    scheduler: PublicSchedulerStatus
+    upcoming_runs: list[PublicUpcomingRun]
+    recent_runs: list[PublicRecentRunSummary]

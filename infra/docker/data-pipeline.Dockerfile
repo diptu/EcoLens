@@ -1,6 +1,6 @@
 # infra/docker/data-pipeline.Dockerfile
 #
-# One image, three roles, picked via docker-compose's `command:` override
+# One image, two roles, picked via docker-compose's `command:` override
 # (or a one-off `docker compose exec data-pipeline ecolens-pipeline ...`):
 #   - `serve`  — the FastAPI app (`/v1/ingest`, `/v1/dbt`, `/v1/data-sources`,
 #                 ECO-D49; TODO.md's Ingestion section)
@@ -8,8 +8,17 @@
 #                a no-op once `Settings.warehouse_sync_consumer_enabled` is
 #                flipped off (services/waerehouse/TODO.md Phase 4's cutover
 #                switch)
-#   - anything else — `ingest {source}` / `dbt {subcommand}` / `train-worker`
-#     / `health`
+#   - anything else — `ingest {source}` / `dbt {subcommand}` / `health`
+#
+# `train-worker` moved off this image onto `forecast-api`'s as part of the
+# training-code migration (`docker-compose.yml`'s `train-worker` service
+# comment has the full story) -- `ecolens-pipeline train-worker`/
+# `app.service.training_worker` still exist in this package too, just no
+# longer wired into any docker-compose service; kept only because the
+# eventual full `data-pipeline` decommission is a separate, still-gated
+# step (real end-to-end verification against live production data isn't
+# possible in this environment -- no `DATABASE_URL`/`.env` exists
+# anywhere), not because this image still runs it.
 #
 # Build context is the repo root (docker-compose.yml's `context: .`), but
 # this is now its own independent `uv` project -- not a member of the root

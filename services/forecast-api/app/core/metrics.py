@@ -55,6 +55,42 @@ forecast_prediction_latency_seconds = Histogram(
     ["region"],
     registry=REGISTRY,
 )
+# `TODO.md` Observability Phase 1's "Custom Metrics Instrumentation" --
+# "no drift-score or P10/P50/P90 prediction-error-rate metric exists
+# anywhere" was called out explicitly. Set (not observed -- one drift
+# check produces one current answer, not a distribution) by `ml/
+# divergence.py`'s `check_drift` every time an incremental fine-tune
+# actually runs one; stays at its last value between runs, which is the
+# right semantics for "how far has the currently-deployed incremental
+# path drifted from its last full retrain" (there's no "this instant"
+# reading between checks the way there is for prediction latency).
+forecast_drift_score = Gauge(
+    "ecolens_forecast_drift_score",
+    "ml/divergence.py's relative L2 weight-norm drift of the latest "
+    "incremental fine-tune from its last full retrain, by model name.",
+    ["model_name"],
+    registry=REGISTRY,
+)
+# The other half of that same gap: a real P10/P50/P90 prediction-error
+# distribution. Observed by `ml/forecast_reconciliation.py`'s
+# `reconcile_pending_forecasts` once per reconciled forecast (real
+# demand landed, compared against what was actually served) -- the same
+# `error_pct` value that already decides `ForecastCircuitBreaker`
+# success/failure, exposed as its own distribution rather than only the
+# breaker's binary pass/fail view of it.
+forecast_prediction_error_pct = Histogram(
+    "ecolens_forecast_prediction_error_pct",
+    "Reconciled forecast error, in percent of real demand, by model "
+    "name and region.",
+    ["model_name", "region"],
+    # Matches this metric's real range: usually single digits (README.md's
+    # own eval numbers), `_DEFAULT_ERROR_THRESHOLD_PCT`'s 15% is the
+    # breaker's own trip point, and anything past 50% is already a
+    # wildly-wrong prediction worth its own top bucket rather than more
+    # resolution nobody needs up there.
+    buckets=(1, 2, 5, 10, 15, 25, 50, float("inf")),
+    registry=REGISTRY,
+)
 
 
 def metrics_as_text() -> bytes:

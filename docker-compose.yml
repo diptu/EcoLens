@@ -43,8 +43,14 @@ services:
     ports:
       - "5672:5672"    # AMQP
       - "15672:15672"  # management UI
+      # `rabbitmq_prometheus` (enabled via the mounted `enabled_plugins`
+      # below) -- real queue-depth/DLQ metrics for `services/observility`
+      # to scrape (`TODO.md` Observability Phase 5's "Pipeline Health
+      # Alarms" DLQ/queue-depth gap: no service exported one before this).
+      - "15692:15692"
     volumes:
       - rabbitmqdata:/var/lib/rabbitmq
+      - ./infra/docker/rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 5s
@@ -377,20 +383,25 @@ services:
 
   # ── Training-trigger consumer (TODO.md's Event-Driven Pipeline Trigger
   # for Online/Incremental Model Training) ─────────────────────────────────
-  # Same image as data-pipeline/warehouse-sync above, `command:
-  # train-worker` is the only difference — consumes the
-  # `forecasting.training.trigger` queue `pipeline.flows.daily_demand`
-  # publishes to after a successful dbt build, running a warm-started
-  # incremental fine-tune (`ml.incremental`) per event. `mlflow` is a real
-  # dependency here (unlike warehouse-sync, which never touches MLflow),
-  # since every incremental run reads/writes the model registry.
+  # **Training-code migration (this change)**: moved off `data-pipeline`'s
+  # image onto `forecast-api`'s -- `ml/train.py`, MLflow, and the warehouse
+  # connection all live there now (this service's own README.md documents
+  # the cutover; the old "forecast-api never trains" service-boundary rule
+  # is retired). `services/waerehouse`'s `POST /v1/dbt/build` publishes the
+  # `forecasting.training.trigger` events this consumes (moved from
+  # `pipeline.flows.daily_demand`, which owned `dbt build` before
+  # `waerehouse` did); `forecast-api`'s Dockerfile has no `ENTRYPOINT`
+  # (just a `CMD` running uvicorn), so this fully overrides `command:`
+  # with the CLI invocation rather than relying on an entrypoint+subcommand
+  # split the way `data-pipeline`'s image still uses for `worker`/
+  # `train-worker`.
   #
   # `deploy.resources.limits` below is item 5's "Dedicated compute/
   # hardware isolation" point, at the scale this repo's plain `docker
   # compose up` (no Kubernetes/swarm) actually runs at: bounding this
   # service's CPU/memory keeps a training run from starving `api`
-  # (forecast-api, the live inference path) or `data-pipeline` (the
-  # admin API) on the same host. Compose V2 applies `deploy.resources.
+  # (forecast-api's own live inference path, same image, separate
+  # container) on the same host. Compose V2 applies `deploy.resources.
   # limits` for plain `compose up`, not only `docker stack deploy` under
   # swarm — real node-pool-level isolation (a separate Kubernetes worker
   # pool with its own hardware) is still out of scope here, same
@@ -398,9 +409,9 @@ services:
   train-worker:
     build:
       context: .
-      dockerfile: infra/docker/data-pipeline.Dockerfile
+      dockerfile: infra/docker/forecast-api.Dockerfile
     <<: *common-env
-    command: train-worker
+    command: ["ecolens-forecast", "train-worker"]
     deploy:
       resources:
         limits:

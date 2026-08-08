@@ -1,9 +1,15 @@
 # infra/docker/forecast-api.Dockerfile
 #
-# Serves the trained demand-forecast model `data-pipeline` registers in
-# MLflow, plus derived emissions/footprint reads from the Postgres
-# warehouse `data-pipeline`'s dbt project builds. Never trains (README.md
-# § Microservices service-boundary rule).
+# Serves the trained demand-forecast model, plus derived emissions/
+# footprint reads from the Postgres warehouse `services/waerehouse`'s dbt
+# project builds. Also trains/tunes/evaluates/prunes models as of the
+# data-pipeline training migration (this service's own README.md
+# documents the cutover) -- the old "forecast-api never trains" service-
+# boundary rule is retired. This one image serves two docker-compose
+# roles, picked via `command:`: `api` (default `CMD`, the FastAPI app)
+# and `train-worker` (`command: ["ecolens-forecast", "train-worker"]`,
+# the RabbitMQ training-trigger consumer -- see that service's own
+# comment in `docker-compose.yml`).
 #
 # Build context is the repo root (docker-compose.yml's `context: .`), but
 # forecast-api is its own independent `uv` project now -- not a member of

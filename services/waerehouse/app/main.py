@@ -21,6 +21,7 @@ from app.core.config import get_settings
 from app.core.errors import ApiError, api_error_handler
 from app.core.logging import configure_logging, get_logger
 from app.core.middleware import RequestIdMiddleware
+from app.core.tracing import configure_tracing
 from app.db.rabbitmq import close_rabbitmq
 from app.db.session import dispose, get_engine
 
@@ -30,6 +31,7 @@ logger = get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging()
+    configure_tracing()
     get_engine()  # eagerly build the connection pool rather than on first request
 
     logger.info("warehouse_api_startup")

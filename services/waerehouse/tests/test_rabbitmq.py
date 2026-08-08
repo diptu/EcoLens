@@ -41,7 +41,7 @@ class _FakeQueue:
     def iterator(self):
         return _FakeQueueIterator(self._messages)
 
-    async def bind(self, exchange):
+    async def bind(self, exchange, routing_key=None):
         pass
 
 
@@ -64,9 +64,10 @@ class _FakeQueueIterator:
 
 
 class _FakeMessage:
-    def __init__(self, body, timestamp=None):
+    def __init__(self, body, timestamp=None, headers=None):
         self.body = body
         self.timestamp = timestamp
+        self.headers = headers
         self.acked = False
 
     async def ack(self):
@@ -80,7 +81,7 @@ class _FakeChannel:
         self.declared_exchanges: dict[str, _FakeExchange] = {}
         self.qos: int | None = None
 
-    async def declare_queue(self, name, durable=True):
+    async def declare_queue(self, name, durable=True, arguments=None):
         self.declared_queues.append(name)
         return _FakeQueue(name, self._messages)
 
@@ -146,6 +147,67 @@ async def test_consume_landed_events_declares_the_dlx_topology(monkeypatch):
     assert "ecolens.landing.dlx" in channel.declared_exchanges
     assert "ecolens.landing.dlq" in channel.declared_queues
     assert "ecolens.landing" in channel.declared_queues
+
+
+async def test_consume_landed_events_links_the_handler_to_the_publishers_span(
+    monkeypatch,
+):
+    """`TODO.md` Observability Phase 1's "Distributed Trace Propagation"
+    -- a message carrying `services/ingestion`'s real W3C `traceparent`
+    header must make that trace *current* for the duration of the
+    `handler(payload)` call, so `sync_landed_event`'s own span parents
+    onto it instead of starting an unrelated trace."""
+    from opentelemetry import trace
+    from opentelemetry.propagate import inject
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("test")
+
+    headers: dict = {}
+    with tracer.start_as_current_span("ingestion.standard_run") as publisher_span:
+        expected_trace_id = publisher_span.get_span_context().trace_id
+        inject(headers)
+
+    message = _FakeMessage(
+        json.dumps({"run_id": "1", "source": "bom"}).encode(), headers=headers
+    )
+    _wire(monkeypatch, [message])
+
+    seen_trace_ids = []
+
+    async def handler(payload):
+        seen_trace_ids.append(trace.get_current_span().get_span_context().trace_id)
+
+    await rabbitmq_client.consume_landed_events(handler)
+
+    assert seen_trace_ids == [expected_trace_id]
+
+
+async def test_consume_landed_events_tolerates_a_message_with_no_headers(monkeypatch):
+    """A message published before this existed, or with tracing disabled
+    on the publisher (`headers=None`, not an empty dict) -- extraction
+    must not raise, and the handler still runs and acks normally."""
+    message = _FakeMessage(
+        json.dumps({"run_id": "1", "source": "bom"}).encode(), headers=None
+    )
+    _wire(monkeypatch, [message])
+
+    seen = []
+
+    async def handler(payload):
+        seen.append(payload)
+
+    await rabbitmq_client.consume_landed_events(handler)
+
+    assert seen == [{"run_id": "1", "source": "bom"}]
+    assert message.acked is True
 
 
 async def test_a_failing_handler_publishes_to_the_dlq_and_still_acks(monkeypatch):
@@ -314,3 +376,34 @@ async def test_run_consumer_forever_exits_cleanly_on_sigterm(monkeypatch):
     await sender
 
     assert connection.is_closed is True
+
+
+class TestPublishTrainingTriggerEvent:
+    """`publish_training_trigger_event` -- the publish-only half of the
+    training-trigger topology (`forecast-api`'s `training_worker`
+    consumes what this publishes)."""
+
+    async def test_publishes_to_the_training_exchange_with_the_routing_key(
+        self, monkeypatch
+    ):
+        connection = _wire(monkeypatch, [])
+        payload = {"event": "warehouse.transform.completed", "architecture": "lstm"}
+
+        await rabbitmq_client.publish_training_trigger_event(payload)
+
+        channel = connection.channel_obj
+        exchange = channel.declared_exchanges["forecasting.training"]
+        assert len(exchange.published) == 1
+        body, routing_key, _headers = exchange.published[0]
+        assert json.loads(body) == payload
+        assert routing_key == "training.trigger"
+
+    async def test_declares_the_training_dlx_topology(self, monkeypatch):
+        connection = _wire(monkeypatch, [])
+
+        await rabbitmq_client.publish_training_trigger_event({"architecture": "lstm"})
+
+        channel = connection.channel_obj
+        assert "forecasting.training.dlx" in channel.declared_exchanges
+        assert "forecasting.training.trigger.dlq" in channel.declared_queues
+        assert "forecasting.training.trigger" in channel.declared_queues

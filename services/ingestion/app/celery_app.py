@@ -33,6 +33,7 @@ from celery.schedules import crontab
 from celery.signals import worker_process_init, worker_process_shutdown
 
 from app.core.config import get_settings
+from app.core.tracing import configure_tracing
 
 _settings = get_settings()
 
@@ -69,6 +70,12 @@ def _init_worker_event_loop(**_kwargs: object) -> None:
     global _worker_loop
     _worker_loop = asyncio.new_event_loop()
     asyncio.set_event_loop(_worker_loop)
+    # Configured fresh in *this* forked child, never inherited from the
+    # parent `worker` process -- see `cli.py`'s `main()` group callback
+    # for why tracing is deliberately never configured before Celery's
+    # prefork pool forks (a live gRPC exporter channel/thread doesn't
+    # survive `fork()` safely).
+    configure_tracing()
 
 
 @worker_process_shutdown.connect

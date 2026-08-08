@@ -4,15 +4,12 @@
 # through this collector on their way to Tempo. No metrics/logs pipeline
 # is configured here for that reason, not an oversight.
 #
-# KNOWN GAP (see TODO.md): none of the four business services
-# (data-pipeline, ingestion, warehouse, forecast-api) have any
-# OpenTelemetry SDK instrumentation today (confirmed: no `opentelemetry-*`
-# application dependency in any of their pyproject.toml files). This
-# collector and Tempo behind it are both ready to receive traces the
-# moment a service adds OTel instrumentation and points its exporter at
-# `otel-collector:4317` (grpc) or `:4318` (http) -- until then, the
-# Tempo datasource in Grafana will simply have nothing to show. That's
-# expected, not a bug in this config.
+# 2026-08-08: all 3 current business services (ingestion, warehouse,
+# forecast-api -- data-pipeline no longer exists) now have real OTel SDK
+# instrumentation and point their exporters at this collector when
+# `Settings.otel_traces_enabled=True` (opt-in, `False` by default). This
+# collector and Tempo behind it were always ready to receive traces;
+# that's no longer a gap on their end.
 
 receivers:
   otlp:
@@ -23,6 +20,22 @@ receivers:
         endpoint: 0.0.0.0:4318
 
 processors:
+  # Must run first in the pipeline (OTel Collector's own documented best
+  # practice) -- protects this container against unbounded memory growth
+  # from a real burst (e.g. a service's batch exporter flushing a large
+  # backlog after tracing was toggled on, or `docker-compose.yml`'s
+  # `otel-collector` momentarily losing its connection to `tempo`). Soft
+  # limit at 80% of `limit_mib` (`spike_limit_mib`) starts refusing new
+  # data early -- shedding load gracefully instead of only acting once
+  # already at the hard ceiling. 256/64 MiB matches this collector's
+  # traces-only, single-small-deployment scope (no metrics/logs pipeline
+  # here) -- generous for real trace volume from 3 services, nowhere
+  # near what would need a container-level `mem_limit` bump to justify
+  # raising it.
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+    spike_limit_mib: 64
   # Batches spans before forwarding -- README's "Avoiding Observability
   # Spam" > Traces: "The OTel Collector should batch and buffer
   # telemetry before forwarding it."
@@ -67,5 +80,5 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [batch]
+      processors: [memory_limiter, batch]
       exporters: [otlp/tempo, debug]

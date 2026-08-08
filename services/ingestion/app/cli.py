@@ -39,6 +39,7 @@ import click
 from app import __version__
 from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
+from app.core.tracing import configure_tracing
 from app.service.pipeline.backfill import (
     BACKFILLABLE_SOURCES,
     DEFAULT_LOOKBACK_MINUTES,
@@ -51,9 +52,24 @@ log = get_logger(__name__)
 
 @click.group()
 @click.version_option(__version__, prog_name="ecolens-ingestion")
-def main() -> None:
+@click.pass_context
+def main(ctx: click.Context) -> None:
     """ecoLens ingestion service CLI."""
     configure_logging()
+    # `worker`'s Celery prefork pool forks child processes from this one
+    # (`celery_app.start(["worker", ...])` runs the worker in-process, not
+    # via a fresh `exec`) -- configuring tracing here first would mean
+    # forking with a live gRPC exporter channel/background export thread
+    # already open, which doesn't survive `fork()` safely (the same class
+    # of bug `celery_app.py`'s own `_worker_loop` docstring already found
+    # and fixed for asyncio event loops). `celery_app.py`'s
+    # `worker_process_init` handler configures tracing fresh in each
+    # forked child instead. Every other command (including `beat`, a
+    # single long-running scheduler process, never a prefork pool) is one
+    # process for its whole lifetime, so configuring here is correct for
+    # them.
+    if ctx.invoked_subcommand != "worker":
+        configure_tracing()
 
 
 # ── ingest ───────────────────────────────────────────────────────────────

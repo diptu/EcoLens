@@ -29,3 +29,10 @@ class ForecastResponse(AppBaseModel):
     horizon: str
     interval: str
     points: list[ForecastPoint]
+    #: `"model"` (the normal path) or `"baseline_fallback"` -- set to the
+    #: latter when this region's forecast-quality circuit breaker
+    #: (`service/ml/forecast_breaker.py`) was open at request time and a
+    #: seasonal-naive baseline was served instead of the real model.
+    #: Defaults to `"model"` so existing callers that don't care about
+    #: this field see no change in shape.
+    served_by: Literal["model", "baseline_fallback"] = "model"

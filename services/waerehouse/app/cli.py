@@ -23,6 +23,7 @@ import click
 from app import __version__
 from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
+from app.core.tracing import configure_tracing
 
 log = get_logger(__name__)
 
@@ -32,6 +33,7 @@ log = get_logger(__name__)
 def main() -> None:
     """ecoLens warehouse service CLI."""
     configure_logging()
+    configure_tracing()
 
 
 # ── consume ──────────────────────────────────────────────────────────────

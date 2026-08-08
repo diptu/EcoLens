@@ -1,23 +1,37 @@
 [project]
 name = "forecast-api"
 version = "0.1.0"
-description = "ecoLens forecast-api — serves the trained demand-forecast model and derived emissions/footprint reads. Never trains; only loads what data-pipeline registers in MLflow (see README.md's service-boundary rules)."
+description = "ecoLens forecast-api — serves the trained demand-forecast model and derived emissions/footprint reads. Also trains/tunes/evaluates/prunes models as of the data-pipeline training migration (this service's own README.md documents the cutover) — the old \"never trains\" service-boundary rule is retired, not just stale documentation left behind."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "aio-pika>=9.5",
     "asyncpg>=0.30.0",
+    "click>=8.4.2",
     "fastapi[standard]>=0.139.2",
     "gunicorn>=26.0.0",
+    "joblib>=1.4",
     "mlflow>=2.17",
+    "numpy>=2.0",
+    "opentelemetry-api>=1.27",
+    "opentelemetry-sdk>=1.27",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.27",
+    "optuna>=4.9.0",
+    "pandas>=2.0",
     "prometheus-client>=0.20",
     "pydantic-settings>=2.0",
     "redis>=5.0",
     "scikit-learn>=1.9.0",
+    "scipy>=1.18.0",
     "sqlalchemy[asyncio]>=2.0.36",
     "structlog>=24.0",
+    "timesfm[torch]>=2.0",
     "torch>=2.13.0",
     "uvicorn>=0.51.0",
 ]
+
+[project.scripts]
+ecolens-forecast = "app.cli:main"
 
 [dependency-groups]
 dev = [
@@ -61,7 +75,9 @@ module = "tests.*"
 ignore_missing_imports = true
 
 # No type stubs published for these — matches the root workspace's prior
-# ignore list for this service.
+# ignore list for this service, extended with data-pipeline's own
+# equivalents (`optuna`/`timesfm`/`scipy`/`croniter`) now that this
+# service trains too.
 [[tool.mypy.overrides]]
-module = ["pandas.*", "sklearn.*", "joblib.*", "mlflow.*"]
+module = ["pandas.*", "sklearn.*", "joblib.*", "mlflow.*", "optuna.*", "timesfm.*", "scipy.*"]
 ignore_missing_imports = true

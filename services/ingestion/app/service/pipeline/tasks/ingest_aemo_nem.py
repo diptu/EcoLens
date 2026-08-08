@@ -95,14 +95,17 @@ async def _try_live_api(lookback_minutes: int) -> pd.DataFrame | None:
     """Try AEMO's NEM dispatch endpoint. Returns None if it fails."""
     import httpx
 
+    from app.service.pipeline.http_retry import DEFAULT_LIMITS
+
     settings = get_settings()
     # AEMO's current data API surface. Real endpoint may differ; this
     # is a placeholder that returns None on failure so the cached
-    # fallback path kicks in.
+    # fallback path kicks in. No retry here -- any failure should fall
+    # through to the cache immediately, not delay it with backoff.
     url = "https://www.aemo.com.au/aemo/data/api/REPORT/NEMDispatchData/PUBLISH"
     try:
         async with httpx.AsyncClient(
-            timeout=settings.aemo_request_timeout_seconds
+            timeout=settings.aemo_request_timeout_seconds, limits=DEFAULT_LIMITS
         ) as client:
             r = await client.get(
                 url, params={"interval": "5min", "lookback": lookback_minutes}
@@ -218,15 +221,25 @@ async def _fetch_historical_range(start: datetime, end: datetime) -> pd.DataFram
     """
     import httpx
 
+    from app.service.pipeline.http_retry import DEFAULT_LIMITS, fetch_with_retry
+
     frames: list[pd.DataFrame] = []
     day = start.date()
     end_date = end.date()
     async with httpx.AsyncClient(
-        timeout=60, headers={"User-Agent": "Mozilla/5.0"}
+        timeout=60, headers={"User-Agent": "Mozilla/5.0"}, limits=DEFAULT_LIMITS
     ) as client:
         while day <= end_date:
             try:
-                day_df = await _fetch_archive_day(client, day)
+                async def _fetch(d: date = day) -> pd.DataFrame:
+                    return await _fetch_archive_day(client, d)
+
+                day_df = await fetch_with_retry(
+                    _fetch,
+                    source="aemo_nem",
+                    log_event="aemo_nem.archive_day_retry",
+                    day=str(day),
+                )
                 if not day_df.empty:
                     frames.append(day_df)
                 log.info("aemo_nem.archive_day_fetched", day=str(day), rows=len(day_df))

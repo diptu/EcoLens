@@ -1,7 +1,7 @@
 [project]
 name = "ingestion"
 version = "0.1.0"
-description = "ecoLens ingestion — standalone extraction of data-pipeline's ingestion half (services/ingestion/TODO.md). Fetches from external providers, flags anomalies, stages in DuckDB, publishes a landed event. Never writes raw.*/runs dbt — that stays warehouse's job (see docs/data/ingestion.md's service-boundary note)."
+description = "ecoLens ingestion — fetches from external providers, flags anomalies, stages in DuckDB, publishes a landed event. Never writes raw.*/runs dbt — that stays services/waerehouse's job (see docs/data/ingestion.md's service-boundary note)."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -17,6 +17,9 @@ dependencies = [
     "httpx>=0.28",
     "joblib>=1.4",
     "openelectricity>=0.11.3",
+    "opentelemetry-api>=1.27",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.27",
+    "opentelemetry-sdk>=1.27",
     "pandas>=2.0",
     "prometheus-client>=0.20",
     "pydantic-settings>=2.0",

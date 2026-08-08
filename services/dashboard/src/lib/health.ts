@@ -1,19 +1,20 @@
 /**
- * Cross-service health client — the 4 real, differently-shaped health
+ * Cross-service health client — the 5 real, differently-shaped health
  * endpoints this platform actually has:
  *
  *   - forecast-api:  GET /v1/readyz  -> { ready, database, redis, model }
  *   - data-pipeline: GET /v1/readyz  -> { status, components: [{name,healthy,detail}] }
  *   - ingestion:     GET /v1/readyz  -> { status, components: [{name,healthy,detail}] }
+ *   - warehouse:     GET /v1/readyz  -> { status, components: [{name,healthy,detail}] }
  *   - IAM:           GET /           -> { server, service, version }  (liveness only)
  *                    GET /db_health  -> { database: "healthy" } | 500 w/ error detail
  *
- * No single endpoint reports whole-platform health and there's no 5th
+ * No single endpoint reports whole-platform health and there's no 6th
  * aggregator service — this file does the client-side multi-fetch +
  * normalization instead (confirmed cheaper than building one; see root
  * TODO.md's "Cross-service health aggregation" note). IAM's shape is
  * the odd one out (no unified readyz), so it's normalized here to the
- * same `ServiceHealth`/`ComponentHealth` shape the other three already
+ * same `ServiceHealth`/`ComponentHealth` shape the other four already
  * return natively.
  *
  * `ingestion` added 2026-08-07 (`services/ingestion/TODO.md`'s
@@ -27,6 +28,15 @@
  * signal anywhere in this dashboard, because nothing here even knew
  * this service existed.
  *
+ * `warehouse` added alongside the training-code migration follow-up
+ * pass — `services/waerehouse`'s `/v1/readyz` was live and real (dbt
+ * build route, dbt-warehouse-sync consumer) but had never been added
+ * here, so a dead `waerehouse` container was invisible on this page the
+ * same way a dead ingestion worker used to be. Same `{status,
+ * components}` shape, two checks (Postgres, RabbitMQ) — no Redis, this
+ * service has no circuit-breaker/rate-limit state to keep (confirmed by
+ * reading `app/api/v1/health/routes.py` there directly).
+ *
  * `latencyMs` is a real single-sample round-trip time for *this*
  * check (measured client-side with `performance.now()`), not a
  * fabricated historical p95 — label it as such wherever it's shown.
@@ -37,6 +47,7 @@ import {
   FORECAST_API_URL,
   IAM_BASE_URL,
   INGESTION_API_URL,
+  WAREHOUSE_API_URL,
 } from "./env";
 
 export type ComponentHealth = {
@@ -46,7 +57,7 @@ export type ComponentHealth = {
 };
 
 export type ServiceHealth = {
-  service: "forecast-api" | "data-pipeline" | "ingestion" | "iam";
+  service: "forecast-api" | "data-pipeline" | "ingestion" | "warehouse" | "iam";
   /** Could we get any response at all (vs. a network-level failure). */
   reachable: boolean;
   /** Overall readiness; `null` when unreachable (not "unhealthy"). */
@@ -151,6 +162,31 @@ export async function fetchIngestionHealth(): Promise<ServiceHealth> {
   };
 }
 
+/** Same response shape as `fetchIngestionHealth`/`fetchDataPipelineHealth`
+ * — `services/waerehouse`'s `/v1/readyz` returns the identical `{status,
+ * components}` shape (confirmed by reading its route directly). */
+export async function fetchWarehouseHealth(): Promise<ServiceHealth> {
+  const r = await timedFetchJson(`${WAREHOUSE_API_URL}/readyz`);
+  if (!r || r.body == null) {
+    return { service: "warehouse", reachable: false, ready: null, components: [], latencyMs: null };
+  }
+  const b = r.body as {
+    status?: string;
+    components?: { name: string; healthy: boolean; detail?: string | null }[];
+  };
+  return {
+    service: "warehouse",
+    reachable: true,
+    ready: b.status === "ready",
+    components: (b.components ?? []).map((c) => ({
+      name: c.name,
+      healthy: Boolean(c.healthy),
+      detail: c.detail ?? null,
+    })),
+    latencyMs: r.latencyMs,
+  };
+}
+
 export async function fetchIamHealth(): Promise<ServiceHealth> {
   const start = performance.now();
   const [root, db] = await Promise.all([
@@ -182,6 +218,7 @@ export async function fetchAllServicesHealth(): Promise<ServiceHealth[]> {
     fetchForecastApiHealth(),
     fetchDataPipelineHealth(),
     fetchIngestionHealth(),
+    fetchWarehouseHealth(),
     fetchIamHealth(),
   ]);
 }

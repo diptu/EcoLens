@@ -44,6 +44,8 @@ from typing import Any
 
 import aio_pika
 from aio_pika.abc import AbstractRobustConnection
+from opentelemetry import context as otel_context
+from opentelemetry.propagate import extract
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
@@ -127,6 +129,20 @@ async def consume_landed_events(
     One bad message must never stop the rest of the queue from being
     consumed — the `try`/`except` wraps each message individually, same
     reasoning `data-pipeline`'s identical consumer documents.
+
+    `extract(message.headers)`/`otel_context.attach` (`TODO.md`
+    Observability Phase 1's "Distributed Trace Propagation"): a real
+    W3C `traceparent` header, written by `services/ingestion`'s
+    `db.rabbitmq.publish_landed_event` from *its* own `ingestion.
+    standard_run` span, becomes the *current* context for the duration
+    of this one `handler(payload)` call -- so `consumers.landed_events.
+    sync_landed_event`'s own `tracer.start_as_current_span(...)`
+    automatically parents onto it, giving a real two-service linked
+    trace instead of two spans that just happen to run near each other
+    in time. A message with no header (tracing disabled on the
+    publisher, or a message from before this existed) extracts to an
+    empty context -- `sync_landed_event` still starts its own span, just
+    unparented, same as it always did before this existed.
     """
     settings = get_settings()
     connection = await get_rabbitmq_connection()
@@ -144,7 +160,12 @@ async def consume_landed_events(
                 )
             try:
                 payload = json.loads(message.body)
-                await handler(payload)
+                ctx = extract(dict(message.headers or {}))
+                token = otel_context.attach(ctx)
+                try:
+                    await handler(payload)
+                finally:
+                    otel_context.detach(token)
                 await message.ack()
             except Exception as exc:  # noqa: BLE001 - one bad message must not kill the consumer
                 source = None
@@ -161,6 +182,68 @@ async def consume_landed_events(
                 )
                 await _publish_to_dlq(channel, dlx, message.body, str(exc))
                 await message.ack()
+
+
+async def _declare_training_trigger_topology(
+    channel: aio_pika.abc.AbstractChannel,
+) -> aio_pika.abc.AbstractExchange:
+    """Declares (idempotently) the training-trigger exchange/DLX/DLQ and
+    binds them -- publish-side only here (this service never consumes
+    its own training-trigger events; `forecast-api`'s `training_worker`
+    does). Ported from data-pipeline's identical
+    `_declare_training_trigger_topology`, same topology/names so either
+    side connecting first is fine. Returns the exchange to publish to.
+    """
+    settings = get_settings()
+    dlx = await channel.declare_exchange(
+        settings.rabbitmq_training_dlx, aio_pika.ExchangeType.FANOUT, durable=True
+    )
+    dlq = await channel.declare_queue(
+        settings.rabbitmq_training_trigger_dlq, durable=True
+    )
+    await dlq.bind(dlx)
+
+    exchange = await channel.declare_exchange(
+        settings.rabbitmq_training_exchange, aio_pika.ExchangeType.TOPIC, durable=True
+    )
+    queue = await channel.declare_queue(
+        settings.rabbitmq_training_trigger_queue,
+        durable=True,
+        arguments={"x-dead-letter-exchange": settings.rabbitmq_training_dlx},
+    )
+    await queue.bind(exchange, routing_key=settings.rabbitmq_training_routing_key)
+    return exchange
+
+
+async def publish_training_trigger_event(payload: dict[str, Any]) -> None:
+    """Publish a "warehouse transform completed, incremental training
+    may run" event -- `payload` becomes the JSON message body
+    `forecast-api`'s `training_worker.handle_training_trigger` receives
+    on the consumer side. Ported from data-pipeline's identical
+    function; the real work (building the payload) moved to
+    `app.service.training_trigger.publish_training_trigger`, this is
+    just the wire step.
+
+    Persistent delivery mode + a durable queue: a message survives a
+    RabbitMQ restart between publish and consume, same durability
+    rationale ingestion's `publish_landed_event` documents for its own
+    queue.
+    """
+    settings = get_settings()
+    connection = await get_rabbitmq_connection()
+    channel = await connection.channel()
+    try:
+        exchange = await _declare_training_trigger_topology(channel)
+        await exchange.publish(
+            aio_pika.Message(
+                body=json.dumps(payload).encode(),
+                delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                content_type="application/json",
+            ),
+            routing_key=settings.rabbitmq_training_routing_key,
+        )
+    finally:
+        await channel.close()
 
 
 async def run_consumer_forever(

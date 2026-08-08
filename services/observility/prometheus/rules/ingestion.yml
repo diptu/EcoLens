@@ -133,10 +133,7 @@ groups:
             for this source is currently being skipped rather than
             retried.
 
-      # No alert here for "warehouse-sync consumer is backlogged/down" --
-      # that would need a gauge of open `status='staged'` runs or
-      # RabbitMQ queue depth, neither of which is exported as a metric
-      # anywhere yet. Carried forward from the prior stack's own
-      # (infra/prometheus/recording_rules.yml) backlog note -- see
-      # TODO.md's Known Gaps section rather than shipping a weak proxy
-      # alert for it.
+      # "warehouse-sync consumer is backlogged/down" -- now covered by
+      # `prometheus/rules/rabbitmq.yml`'s `RabbitMQQueueDepthHigh`
+      # (real RabbitMQ queue depth via `rabbitmq_prometheus`), not
+      # duplicated here.

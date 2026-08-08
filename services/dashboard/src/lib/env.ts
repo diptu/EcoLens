@@ -20,13 +20,27 @@
  * Celery-based rewrite of `data-pipeline`'s ingestion half,
  * `services/ingestion/TODO.md`) runs its own FastAPI app on port 8003
  * (`docker-compose.yml`'s `ingestion:` service, confirmed real
- * `/v1/healthz` healthcheck there) but had no entry here at all until
- * now — this dashboard had zero way to reach it, which is exactly why
- * nothing here noticed when its worker/beat processes silently died
- * (see `TODO.md`'s "Frontend integration" section). Additive only:
- * still reads exclusively from `DATA_PIPELINE_API_URL` for every actual
- * data-serving page — this just makes the service reachable for health
- * monitoring, not a cutover.
+ * `/v1/healthz` healthcheck there).
+ *
+ * `WAREHOUSE_API_URL` added alongside the Pipeline Operations tab's
+ * cutover off `data-pipeline` — `services/waerehouse` runs its own
+ * FastAPI control plane on port 8004 (`docker-compose.yml`'s
+ * `warehouse:` service).
+ *
+ * **Cutover (this change)**: `lib/ingestion.ts`'s pipeline-listing/run/
+ * backfill functions now read from `INGESTION_API_URL`
+ * (`GET /v1/ingestion/public/pipelines`, `POST /v1/data-sources/{id}/
+ * run`, etc. — real, unauthenticated equivalents already existed in
+ * `services/ingestion`, confirmed against its own source before
+ * switching) and the dbt-build trigger now reads from
+ * `WAREHOUSE_API_URL` (`POST /v1/dbt/build`, newly added there — dbt
+ * always belonged to the warehouse service, not data-pipeline).
+ * `DATA_PIPELINE_API_URL` is kept below and still used for everything
+ * this pass didn't touch: ML training/model-registry routes (Model
+ * Operations tab — training hasn't moved services, a separate,
+ * deliberately out-of-scope migration) and the 3 ingestion-page
+ * endpoints (`public/failed`/`public/retry-queue`/`public/scheduler`)
+ * `services/ingestion` doesn't have equivalents for yet.
  */
 
 export const IAM_API_URL =
@@ -40,6 +54,9 @@ export const DATA_PIPELINE_API_URL =
 
 export const INGESTION_API_URL =
   process.env.NEXT_PUBLIC_INGESTION_API_URL ?? "http://localhost:8003/v1";
+
+export const WAREHOUSE_API_URL =
+  process.env.NEXT_PUBLIC_WAREHOUSE_API_URL ?? "http://localhost:8004/v1";
 
 /** IAM's health routes (`/`, `/db_health`) live at the app root, not
  * under `/api/v1` like every other IAM route this dashboard calls. */

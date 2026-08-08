@@ -151,3 +151,72 @@ async def test_publish_landed_event_honours_a_queue_name_override(monkeypatch):
     assert channel.declared_queues == ["ecolens.landing.shadow"]
     _, routing_key = channel.default_exchange.published[0]
     assert routing_key == "ecolens.landing.shadow"
+
+
+class _FakeExchangeWithHeaders(_FakeExchange):
+    """Same as `_FakeExchange`, plus captures the message's `headers` --
+    `_FakeExchange` itself only ever asserted on `.body`/routing key, so
+    the base class didn't need this until the distributed-tracing
+    propagation tests below."""
+
+    def __init__(self):
+        super().__init__()
+        self.published_headers: list[dict] = []
+
+    async def publish(self, message, routing_key):
+        await super().publish(message, routing_key)
+        self.published_headers.append(message.headers)
+
+
+async def test_publish_landed_event_injects_the_current_span_into_headers(monkeypatch):
+    """`TODO.md` Observability Phase 1's "Distributed Trace Propagation"
+    -- a real active span at publish time (`pipeline.tasks._common.
+    standard_run`'s `ingestion.standard_run` span, in production) must
+    end up as a real W3C `traceparent` header on the published message,
+    so `services/waerehouse`'s consumer can link its own span to it."""
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("test")
+
+    fake_connection = _FakePublishConnection()
+    fake_connection.channel_obj.default_exchange = _FakeExchangeWithHeaders()
+
+    async def fake_get_connection():
+        return fake_connection
+
+    monkeypatch.setattr(rabbitmq_client, "get_rabbitmq_connection", fake_get_connection)
+
+    with tracer.start_as_current_span("ingestion.standard_run") as span:
+        expected_trace_id = format(span.get_span_context().trace_id, "032x")
+        await rabbitmq_client.publish_landed_event({"run_id": "abc", "source": "bom"})
+
+    headers = fake_connection.channel_obj.default_exchange.published_headers[0]
+    assert "traceparent" in headers
+    assert expected_trace_id in headers["traceparent"]
+
+
+async def test_publish_landed_event_writes_no_traceparent_without_an_active_span(
+    monkeypatch,
+):
+    """The real no-op case -- tracing disabled (the default) or no
+    current span. `inject` must not raise, and must leave `headers`
+    empty rather than write a garbage/placeholder header."""
+    fake_connection = _FakePublishConnection()
+    fake_connection.channel_obj.default_exchange = _FakeExchangeWithHeaders()
+
+    async def fake_get_connection():
+        return fake_connection
+
+    monkeypatch.setattr(rabbitmq_client, "get_rabbitmq_connection", fake_get_connection)
+
+    await rabbitmq_client.publish_landed_event({"run_id": "abc", "source": "bom"})
+
+    headers = fake_connection.channel_obj.default_exchange.published_headers[0]
+    assert "traceparent" not in headers

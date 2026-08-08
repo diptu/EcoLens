@@ -2,27 +2,34 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.service.ml.energy_registry import EnergyModelRegistry
 from app.service.ml.registry import ModelRegistry
 from app.core import logging as logging_module
 
 
 @pytest.fixture(autouse=True)
 def _no_real_mlflow_calls(monkeypatch):
-    """The app's lifespan calls `ModelRegistry.refresh()` on startup and
-    keeps polling in the background (`ml/registry.py`) -- a real network
-    call to whatever `MLFLOW_TRACKING_URI` resolves to (its own default
-    fallback if unset). Router tests don't want that: it's slow/flaky
-    depending on the test machine's network state (a connection attempt
-    to an unreachable host can hang for a long time under retry/backoff,
-    not fail fast), and every test that needs a *loaded* bundle already
-    overrides `get_model_registry` directly (see `test_model_endpoint.py`/
+    """The app's lifespan calls `ModelRegistry.refresh()` *and*
+    `EnergyModelRegistry.refresh()` on startup and keeps polling both in
+    the background (`ml/registry.py`, `ml/energy_registry.py`) -- real
+    network calls to whatever `MLFLOW_TRACKING_URI` resolves to (its own
+    default fallback if unset). Router tests don't want that: it's
+    slow/flaky depending on the test machine's network state (a
+    connection attempt to an unreachable host can hang for a long time
+    under retry/backoff, not fail fast), and every test that needs a
+    *loaded* bundle already overrides `get_model_registry`/
+    `get_energy_model_registry` directly (see `test_model_endpoint.py`/
     `test_forecast.py`). Route MLflow entirely out of the picture for the
-    ones that don't."""
+    ones that don't -- both registries, not just the first one (a real
+    gap found live: `EnergyModelRegistry` was added after this fixture
+    and silently wasn't covered by it, hanging every `client`-fixture
+    test on a real MLflow call until this was fixed)."""
 
     async def _fake_refresh(self):
         return False
 
     monkeypatch.setattr(ModelRegistry, "refresh", _fake_refresh)
+    monkeypatch.setattr(EnergyModelRegistry, "refresh", _fake_refresh)
 
 
 @pytest.fixture

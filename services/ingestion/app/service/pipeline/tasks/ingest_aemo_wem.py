@@ -94,12 +94,13 @@ async def _try_live_api(lookback_minutes: int) -> pd.DataFrame | None:
     import httpx
 
     from app.core.config import get_settings
+    from app.service.pipeline.http_retry import DEFAULT_LIMITS
 
     settings = get_settings()
     url = "https://data.wa.aemo.com.au/datafiles/balancing-summary/balancing-summary-30min.csv"
     try:
         async with httpx.AsyncClient(
-            timeout=settings.aemo_request_timeout_seconds
+            timeout=settings.aemo_request_timeout_seconds, limits=DEFAULT_LIMITS
         ) as client:
             r = await client.get(url)
             r.raise_for_status()
@@ -182,13 +183,23 @@ async def _fetch_historical_range(start: datetime, end: datetime) -> pd.DataFram
     range."""
     import httpx
 
+    from app.service.pipeline.http_retry import DEFAULT_LIMITS, fetch_with_retry
+
     frames: list[pd.DataFrame] = []
     day = start.date()
     end_date = end.date()
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=30, limits=DEFAULT_LIMITS) as client:
         while day <= end_date:
             try:
-                day_df = await _fetch_wem_day(client, day)
+                async def _fetch(d: date = day) -> pd.DataFrame:
+                    return await _fetch_wem_day(client, d)
+
+                day_df = await fetch_with_retry(
+                    _fetch,
+                    source="aemo_wem",
+                    log_event="aemo_wem.archive_day_retry",
+                    day=str(day),
+                )
                 if not day_df.empty:
                     frames.append(day_df)
                 log.info("aemo_wem.archive_day_fetched", day=str(day), rows=len(day_df))

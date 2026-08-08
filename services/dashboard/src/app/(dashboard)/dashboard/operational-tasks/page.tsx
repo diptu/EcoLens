@@ -6,20 +6,23 @@
  * with tabbed filters, Model Training & Tuning form, Recent
  * Training Runs, Scheduled Operations, and System Commands.
  *
- * Pipeline Operations is wired to real data-pipeline data (see
- * `todo-operational-tasks.md` for the full per-section plan): the same
- * `GET /v1/ingestion/public/pipelines` this session's Operations page
- * and Ingestion Pipeline page already use — real 6-pipeline inventory
- * (OpenElectricity, AEMO NEM, AEMO WEM, BoM, AEMO Public Holidays, dbt
- * warehouse build), not the old mock's 5 fictional vendors (ENTSO-E,
- * Open-Meteo, EIA, "Carbon Intensity API", ICE).
+ * Pipeline Operations lists the real 6-pipeline inventory (OpenElectricity,
+ * AEMO NEM, AEMO WEM, BoM, AEMO Public Holidays, dbt warehouse build) from
+ * the static `PIPELINE_CATALOG` (`lib/ingestion.ts`), not the old mock's
+ * 5 fictional vendors (ENTSO-E, Open-Meteo, EIA, "Carbon Intensity API",
+ * ICE) -- see `todo-operational-tasks.md` for the full per-section plan.
  *
- * Per-row "Run now" is real too: `triggerIngestionRun()`
- * (`POST /v1/data-sources/{id}/run`) — deliberately open, no auth
- * required (this platform has no sign-in at all; see `lib/ingestion.ts`'s
- * module docstring). The dbt warehouse-build "pipeline" (`source_id:
- * null`) still can't be triggered this way — that's a
- * `POST /v1/dbt/{subcommand}` call, a different, not-yet-bridged route.
+ * **Cutover**: per-row actions now talk to `services/ingestion` and
+ * `services/waerehouse` instead of `data-pipeline` (`lib/ingestion.ts`'s
+ * own module docstring has the full detail on what moved, including
+ * the dbt endpoint's real, Postgres-backed concurrent-build lock).
+ *
+ * Per-row "Run now" is real: `triggerIngestionRun()`
+ * (`POST /v1/data-sources/{id}/run`, `services/ingestion`) — deliberately
+ * open, no auth required (this platform has no sign-in at all; see
+ * `lib/ingestion.ts`'s module docstring). The dbt warehouse-build
+ * "pipeline" (`source_id: null`) can't be triggered this way — it uses
+ * its own `triggerDbtBuild()` (`POST /v1/dbt/build`, `services/waerehouse`).
  *
  * AEMO NEM/WEM and BoM additionally get a "Backfill" action
  * (`triggerBackfill()`, `POST /v1/data-sources/{id}/backfill`) with a
@@ -32,10 +35,17 @@
  * ERA5 archive rather than BoM's own API (which has no date-range query
  * at all) — see `ingest_bom.py`'s module docstring for why.
  *
- * The other 7 sections (KPI row, Model Operations, Active Tasks, Model
- * Training & Tuning, Recent Training Runs, Scheduled Operations, System
- * Commands) are still the old mock; see `todo-operational-tasks.md` for
- * what's real/fake in each.
+ * **2026-08-08 follow-up pass**: KPI row, Active Tasks (`ingestion`-typed
+ * rows), and Scheduled Operations are now real too -- derived from
+ * `fetchPublicPipelines()`/this page's own live pipeline-poll state/
+ * `modelInfo`, not `getOperationalKpis()`/`getActiveTasks()`/
+ * `getScheduledOps()`'s mocks (full reasoning in `services/ingestion/
+ * TODO.md`'s Operational Tasks section). System Commands got 2 of its
+ * 6 buttons wired to real calls (`triggerDbtBuild`/`fetchAllServicesHealth`
+ * — see `executeCommand`'s own docstring for why the other 4 stay
+ * disabled rather than fabricated). Active Tasks' other 5 task types
+ * (data_quality/feature_build/forecast/report/anomaly) still have no
+ * "task in flight" concept anywhere in any service and stay mock.
  */
 "use client";
 
@@ -63,12 +73,9 @@ import { Card } from "@/components/dashboard/card";
 import { cn } from "@/lib/utils";
 import {
   getActiveTasks,
-  getOperationalKpis,
-  getScheduledOps,
   getSystemCommands,
   type ActiveTask,
   type OperationalKpi,
-  type ScheduledOp,
   type SystemCommand,
   type TaskStatus,
   type TaskType,
@@ -80,6 +87,7 @@ import {
   type ModelInfo,
   type ModelVersion,
 } from "@/lib/emissions";
+import { fetchAllServicesHealth } from "@/lib/health";
 import {
   PIPELINE_CATALOG,
   triggerTraining,
@@ -90,14 +98,18 @@ import {
   pollBackfillSummary,
   fetchBackfillStatus,
   triggerDbtBuild,
+  pollLatestDbtBuild,
+  fetchPublicPipelines,
   monthToRange,
   dayToRange,
   formatRelativeTime,
+  formatTimeUntil,
   TriggerIngestionError,
   type RunStatus,
   type TrainingRunLog,
   type BackfillTrigger,
   type BackfillProgress,
+  type LivePipeline,
 } from "@/lib/ingestion";
 
 // ────────────────────────────────────────────────────────────────────
@@ -234,7 +246,20 @@ const TASK_TAB_LABELS: Array<{ value: TaskStatus | "all"; label: string }> = [
   { value: "failed",    label: "Failed"    },
 ];
 
-type RowState = { status: RowStatus; records?: number | null; error?: string };
+/** `runId`/`startedAt`/`triggeredBy` come straight off the real
+ * `PublicRun` `pollLatestRun`'s callback hands back -- carried here (not
+ * just `status`/`records`) so the Active Tasks card below can synthesize
+ * real `ingestion`-typed rows for whichever pipelines are actually
+ * in flight right now, instead of only ever showing the mock's fake
+ * ones (see `pipelineActiveTasks` below). */
+type RowState = {
+  status: RowStatus;
+  records?: number | null;
+  error?: string;
+  runId?: string;
+  startedAt?: string;
+  triggeredBy?: string;
+};
 
 type TrainStatus =
   | { state: "idle" }
@@ -249,7 +274,7 @@ type BackfillState =
   | { state: "error"; message: string };
 
 export default function OperationalTasksPage() {
-  const kpis = useMemo(() => getOperationalKpis(), []);
+  const [pipelines, setPipelines] = useState<LivePipeline[] | null>(null);
   const [pipelineRows, setPipelineRows] = useState<Record<string, RowState>>({});
   const cancelFns = useRef<Record<string, () => void>>({});
   const [backfillModal, setBackfillModal] = useState<{ sourceId: string; label: string } | null>(null);
@@ -260,6 +285,9 @@ export default function OperationalTasksPage() {
   const [modelVersionsLoaded, setModelVersionsLoaded] = useState(false);
   const [trainStatus, setTrainStatus] = useState<TrainStatus>({ state: "idle" });
   const [trainingRuns, setTrainingRuns] = useState<TrainingRunLog[] | null>(null);
+  const [commandStatus, setCommandStatus] = useState<
+    Record<string, { state: "running" | "success" | "error"; message: string }>
+  >({});
 
   useEffect(() => {
     let cancelled = false;
@@ -273,12 +301,69 @@ export default function OperationalTasksPage() {
     };
   }, []);
 
-  // The `model_training`-typed rows are real (`meta._training_log`,
-  // Model Operations TODO.md Phase 4); the other 6 task types
-  // (ingestion, data_quality, feature_build, forecast, report, anomaly)
-  // stay mock -- nothing else logs "a task is in flight" anywhere yet.
+  // Backs the Scheduled Operations card (real cron/next-run/last-run per
+  // pipeline) and the KPI row's "Ingestion Pipelines"/"Last Ingestion"
+  // numbers below -- `fetchPublicPipelines()` already composes
+  // ingestion's 5 real sources + a synthesized dbt-warehouse row from
+  // `services/waerehouse`, it just had no caller on this page before.
+  useEffect(() => {
+    let cancelled = false;
+    fetchPublicPipelines()
+      .then((r) => {
+        if (!cancelled) setPipelines(r.data);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // `type: "ingestion"`/`"transform"` rows synthesized from this same
+  // page's own live `pollLatestRun`/`pollLatestDbtBuild`/
+  // `pollBackfillSummary` subscriptions (`pipelineRows`) -- real "is
+  // this pipeline in flight right now" state this page was already
+  // tracking for the Pipeline Operations card, just not previously
+  // surfaced into Active Tasks (`services/ingestion/TODO.md`'s
+  // Operational Tasks section). The dbt-warehouse row gets its own
+  // `"transform"` type, not folded into `"ingestion"` (`services/
+  // waerehouse/TODO.md`'s own note on that earlier mislabeling -- it's
+  // a dbt build, not a fetch). Only non-idle, non-terminal rows count
+  // as "active" -- a `success`/`failed` row isn't a task in flight
+  // anymore, same terminal-status set `pollLatestRun`'s own
+  // `TERMINAL_RUN_STATUSES` uses.
+  const pipelineActiveTasks = useMemo((): ActiveTask[] => {
+    return PIPELINE_CATALOG.filter((p) => p.triggerable)
+      .map((p): ActiveTask | null => {
+        const rowKey = p.sourceId ?? p.id;
+        const row = pipelineRows[rowKey];
+        if (!row) return null;
+        if (row.status !== "queued" && row.status !== "running" && row.status !== "staged") {
+          return null;
+        }
+        const status: TaskStatus = row.status === "queued" ? "queued" : "running";
+        return {
+          id: row.runId ?? rowKey,
+          type: p.sourceId ? "ingestion" : "transform",
+          target: p.label,
+          triggered_by: row.triggeredBy ?? "dashboard",
+          started_at: row.startedAt ? formatRelativeTime(row.startedAt) : "just now",
+          status,
+          progress: status === "queued" ? 10 : 60,
+        };
+      })
+      .filter((t): t is ActiveTask => t !== null);
+  }, [pipelineRows]);
+
+  // The `model_training`/`ingestion`/`transform`-typed rows are real
+  // (`meta._training_log` + this page's own live pipeline/dbt-build
+  // polling); the remaining 4 task types (data_quality, feature_build,
+  // forecast, report, anomaly) stay mock -- nothing else logs "a task
+  // is in flight" anywhere yet (`services/ingestion/TODO.md`'s own
+  // note).
   const allTasks = useMemo(() => {
-    const mockTasks = getActiveTasks().filter((t) => t.type !== "model_training");
+    const mockTasks = getActiveTasks().filter(
+      (t) => t.type !== "model_training" && t.type !== "ingestion" && t.type !== "transform",
+    );
     const realTrainingTasks: ActiveTask[] = (trainingRuns ?? []).map((r) => ({
       id: r.id,
       type: "model_training",
@@ -288,9 +373,8 @@ export default function OperationalTasksPage() {
       status: r.status === "running" ? "running" : r.status === "success" ? "completed" : "failed",
       progress: r.status === "running" ? 50 : 100,
     }));
-    return [...realTrainingTasks, ...mockTasks];
-  }, [trainingRuns]);
-  const scheduled = useMemo(() => getScheduledOps(), []);
+    return [...realTrainingTasks, ...pipelineActiveTasks, ...mockTasks];
+  }, [trainingRuns, pipelineActiveTasks]);
   const commands = useMemo(() => getSystemCommands(), []);
 
   const [tab, setTab] = useState<TaskStatus | "all">("all");
@@ -314,7 +398,26 @@ export default function OperationalTasksPage() {
     let cancelled = false;
 
     PIPELINE_CATALOG.forEach((p) => {
-      if (!p.sourceId) return;
+      if (!p.sourceId) {
+        // dbt-warehouse row -- polls `GET /v1/dbt/build/runs` for its
+        // live status instead of a per-source run, so a build triggered
+        // from a *different* browser tab/session is visible here too,
+        // not just self-triggered ones (`services/waerehouse/TODO.md`'s
+        // own note on this gap).
+        cancelFns.current[p.id] = pollLatestDbtBuild((latest) => {
+          if (!latest) return;
+          setPipelineRows((prev) => ({
+            ...prev,
+            [p.id]: {
+              status: latest.status,
+              runId: latest.id,
+              startedAt: latest.started_at,
+              triggeredBy: latest.trigger,
+            },
+          }));
+        });
+        return;
+      }
       const sourceId = p.sourceId;
 
       cancelFns.current[sourceId] = pollLatestRun(sourceId, (latest) => {
@@ -324,6 +427,9 @@ export default function OperationalTasksPage() {
           [sourceId]: {
             status: latest.status,
             records: latest.records_inserted ?? latest.records_fetched,
+            runId: latest.id,
+            startedAt: latest.started_at,
+            triggeredBy: latest.trigger,
           },
         }));
       });
@@ -439,6 +545,9 @@ export default function OperationalTasksPage() {
             [sourceId]: {
               status: latest.status,
               records: latest.records_inserted ?? latest.records_fetched,
+              runId: latest.id,
+              startedAt: latest.started_at,
+              triggeredBy: latest.trigger,
             },
           }));
         });
@@ -516,6 +625,56 @@ export default function OperationalTasksPage() {
       });
   }
 
+  // Of `getSystemCommands()`'s 6 buttons, only these two map onto a real,
+  // safe, already-existing backend call -- see `services/ingestion/
+  // TODO.md`'s "System Commands" item for why the other 4 don't:
+  // "Rebuild Features" needs a local `master.duckdb` this service's own
+  // script explicitly refuses to build from cloud credentials on demand
+  // (dev/data-science tooling, not a production capability); "Clear
+  // Cache"/"Vacuum Database" are real but destructive-adjacent
+  // admin-only operations against live infra with no defined-safe scope
+  // yet; "Reindex Search" has no search-index concept anywhere in this
+  // codebase to map onto at all.
+  function executeCommand(id: string) {
+    if (id === "c2") {
+      setCommandStatus((prev) => ({ ...prev, [id]: { state: "running", message: "Building…" } }));
+      triggerDbtBuild()
+        .then((result) => {
+          setCommandStatus((prev) => ({
+            ...prev,
+            [id]: result.exit_code === 0
+              ? { state: "success", message: "Materialized views refreshed." }
+              : { state: "error", message: `dbt build exited ${result.exit_code}.` },
+          }));
+        })
+        .catch((err) => {
+          const message = err instanceof TriggerIngestionError ? err.message : "dbt build failed";
+          setCommandStatus((prev) => ({ ...prev, [id]: { state: "error", message } }));
+        });
+      return;
+    }
+    if (id === "c6") {
+      setCommandStatus((prev) => ({ ...prev, [id]: { state: "running", message: "Checking…" } }));
+      fetchAllServicesHealth()
+        .then((results) => {
+          const unhealthy = results.filter((r) => !r.reachable || r.ready === false);
+          const message = unhealthy.length === 0
+            ? `All ${results.length} services healthy.`
+            : `${unhealthy.length}/${results.length} service(s) unhealthy: ${unhealthy.map((r) => r.service).join(", ")}.`;
+          setCommandStatus((prev) => ({
+            ...prev,
+            [id]: { state: unhealthy.length === 0 ? "success" : "error", message },
+          }));
+        })
+        .catch(() => {
+          setCommandStatus((prev) => ({
+            ...prev,
+            [id]: { state: "error", message: "Diagnostics check failed to run." },
+          }));
+        });
+    }
+  }
+
   const taskCounts = useMemo(() => ({
     all:       allTasks.length,
     running:   allTasks.filter((t) => t.status === "running").length,
@@ -523,6 +682,84 @@ export default function OperationalTasksPage() {
     completed: allTasks.filter((t) => t.status === "completed").length,
     failed:    allTasks.filter((t) => t.status === "failed").length,
   }), [allTasks]);
+
+  // Replaces `getOperationalKpis()`'s 6 hardcoded numbers -- 4 of the 6
+  // are now derived from data this page already fetches for real
+  // (`pipelines`/`allTasks`/`modelInfo`); "Next Retrain" and "System
+  // Load" have no real backend anywhere in this platform (no fixed
+  // retrain cron -- only the per-dbt-build training-trigger event -- and
+  // no host-level metrics endpoint on any service), so those two stay
+  // honest placeholders rather than fabricated numbers (`services/
+  // ingestion/TODO.md`'s Operational Tasks section has the full
+  // per-KPI reasoning).
+  const kpis = useMemo((): OperationalKpi[] => {
+    const total = pipelines?.length ?? null;
+    const activeCount = pipelines?.filter((p) => p.schedule.enabled).length ?? null;
+    const pausedCount = total != null && activeCount != null ? total - activeCount : null;
+    const lastRunAt = (pipelines ?? [])
+      .map((p) => p.last_run_at)
+      .filter((v): v is string => v != null)
+      .sort()
+      .at(-1);
+    const modelStatusLabel =
+      modelInfo == null
+        ? "—"
+        : modelInfo.status === "loaded"
+          ? "Healthy"
+          : "Not loaded";
+    const modelStatusSub =
+      modelInfo?.status === "loaded"
+        ? `v${modelInfo.version ?? "?"} in ${modelInfo.stage ?? "an unknown stage"}`
+        : "No model trained + promoted yet";
+    return [
+      {
+        label: "Ingestion Pipelines",
+        value: total ?? "—",
+        sub: total == null ? "Loading…" : `${activeCount} Active · ${pausedCount} Paused`,
+        icon: "Play",
+        tone: "ok",
+      },
+      {
+        label: "Active Tasks",
+        value: taskCounts.all,
+        sub: `${taskCounts.running} Running · ${taskCounts.queued} Queued`,
+        icon: "ListTodo",
+        tone: "ok",
+      },
+      {
+        label: "Last Ingestion",
+        value: lastRunAt ? formatRelativeTime(lastRunAt) : "—",
+        sub: lastRunAt ?? "No pipeline has run yet",
+        icon: "Database",
+        tone: "neutral",
+      },
+      {
+        label: "Model Status",
+        value: modelStatusLabel,
+        sub: modelStatusSub,
+        icon: "Cpu",
+        tone: modelInfo?.status === "loaded" ? "ok" : "neutral",
+      },
+      {
+        label: "Next Retrain",
+        value: "—",
+        sub: "Event-driven only, no fixed cron",
+        icon: "Calendar",
+        tone: "neutral",
+      },
+      {
+        label: "System Load",
+        value: "—",
+        sub: "No host-metrics endpoint exists yet",
+        icon: "Activity",
+        tone: "neutral",
+      },
+    ];
+  }, [pipelines, taskCounts, modelInfo]);
+
+  const dbtRowStatus = pipelineRows["pipe-dbt-warehouse"]?.status;
+  const dbtBuildBusy =
+    dbtRowStatus === "queued" || dbtRowStatus === "running" || dbtRowStatus === "staged";
 
   const tasks = useMemo(() => {
     if (tab === "all") return allTasks;
@@ -654,7 +891,7 @@ export default function OperationalTasksPage() {
           <div className="mb-3">
             <h2 className="text-base font-semibold text-white">Model Training &amp; Tuning</h2>
             <p className="text-xs text-white/50">
-              Publishes a real training-trigger event to data-pipeline's train-worker --
+              Publishes a real training-trigger event to forecast-api's train-worker --
               only the incremental fine-tune path exists (see the Model Registry page's
               Train tab for the still-unbuilt full-retrain path).
             </p>
@@ -725,7 +962,7 @@ export default function OperationalTasksPage() {
             <h2 className="text-base font-semibold text-white">Scheduled Operations</h2>
             <p className="text-xs text-white/50">Manage cron schedules for automated operations.</p>
           </div>
-          <ScheduledTable rows={scheduled} />
+          <ScheduledTable rows={pipelines ?? []} loaded={pipelines !== null} />
           <button className="mt-3 inline-flex w-full items-center justify-center gap-1 text-xs text-emerald-100 hover:underline">
             View all schedules <ChevronDown className="h-3 w-3" />
           </button>
@@ -737,7 +974,22 @@ export default function OperationalTasksPage() {
             <p className="text-xs text-white/50">Execute system level commands.</p>
           </div>
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-            {commands.map((c) => <CommandCard key={c.id} c={c} />)}
+            {commands.map((c) => (
+              <CommandCard
+                key={c.id}
+                c={c}
+                status={commandStatus[c.id]}
+                onExecute={c.id === "c2" || c.id === "c6" ? () => executeCommand(c.id) : undefined}
+                // "Refresh Materialized Views" (c2) shares the dbt-build
+                // row's own live-polled state -- a build already in
+                // flight (self- or externally-triggered, observed via
+                // `pollLatestDbtBuild`) disables this button proactively
+                // too, not just the Pipeline Operations table's own
+                // "Run now" (`services/waerehouse/TODO.md`'s own note
+                // on this gap).
+                busy={c.id === "c2" && dbtBuildBusy}
+              />
+            ))}
           </div>
         </Card>
       </div>
@@ -1029,7 +1281,7 @@ function BackfillModal({
  * not an error). Metrics are rendered generically from whatever keys
  * `info.metrics` actually has -- real training only ever logs
  * `test_mape`/`test_coverage_raw`/`test_coverage_calibrated` (see
- * `data-pipeline/app/service/ml/train.py`), not the old mock's
+ * `forecast-api/app/service/ml/train.py`), not the old mock's
  * fabricated MAPE+RMSE pair. */
 function ModelInfoTable({ info, loaded }: { info: ModelInfo | null; loaded: boolean }) {
   if (!loaded) {
@@ -1112,13 +1364,28 @@ function ActiveTasksTable({ rows }: { rows: ActiveTask[] }) {
   );
 }
 
-function ScheduledTable({ rows }: { rows: ScheduledOp[] }) {
+/** Real per-pipeline schedule data from `fetchPublicPipelines()`
+ * (`services/ingestion` + a synthesized `services/waerehouse` dbt row)
+ * -- replaces the old `getScheduledOps()` mock's 5 hardcoded cron rows
+ * with 2025 dates. "Edit"/"More" stay decorative (no `onClick`) since
+ * there's no real schedule-mutation endpoint on either service to wire
+ * them to -- same "no silently fabricated success" convention the rest
+ * of this page follows. */
+function ScheduledTable({ rows, loaded }: { rows: LivePipeline[]; loaded: boolean }) {
+  if (!loaded) {
+    return <p className="py-6 text-center text-xs text-white/40">Loading schedules…</p>;
+  }
+  if (rows.length === 0) {
+    return (
+      <p className="py-6 text-center text-xs text-white/40">No pipeline schedules available.</p>
+    );
+  }
   return (
     <table className="w-full text-left text-sm">
       <thead className="border-b border-white/5 text-[11px] uppercase tracking-wide text-white/40">
         <tr>
           <th className="py-2">Schedule Name</th>
-          <th className="py-2">Task Type</th>
+          <th className="py-2">Type</th>
           <th className="py-2">Cron Expression</th>
           <th className="py-2">Next Run</th>
           <th className="py-2">Last Run</th>
@@ -1127,35 +1394,33 @@ function ScheduledTable({ rows }: { rows: ScheduledOp[] }) {
         </tr>
       </thead>
       <tbody className="divide-y divide-white/5">
-        {rows.map((s) => (
-          <tr key={s.id} className="text-white/85">
-            <td className="py-2 pr-2">{s.name}</td>
-            <td className="py-2 pr-2 text-white/60">{s.type.replace("_", " ")}</td>
+        {rows.map((p) => (
+          <tr key={p.id} className="text-white/85">
+            <td className="py-2 pr-2">{p.name}</td>
+            <td className="py-2 pr-2 text-white/60">{p.source_id ? "ingestion" : "transform"}</td>
             <td className="py-2 pr-2">
-              <code className="rounded bg-black/30 px-1 py-0.5 font-mono text-[11px] text-emerald-100">{s.cron}</code>
+              <code className="rounded bg-black/30 px-1 py-0.5 font-mono text-[11px] text-emerald-100">{p.schedule.cron}</code>
             </td>
-            <td className="py-2 pr-2 text-white/60">{s.next_run}</td>
-            <td className="py-2 pr-2 text-white/60">{s.last_run}</td>
+            <td className="py-2 pr-2 text-white/60">{p.next_run_at ? formatTimeUntil(p.next_run_at) : "—"}</td>
+            <td className="py-2 pr-2 text-white/60">{formatRelativeTime(p.last_run_at)}</td>
             <td className="py-2 pr-2">
               <span className={cn("rounded-md border px-2 py-0.5 text-[11px] font-medium",
-                s.status === "active"
+                p.schedule.enabled
                   ? "border-emerald-200/40 bg-emerald-200/10 text-emerald-100"
                   : "border-white/10 bg-white/5 text-white/60"
               )}>
-                {s.status.charAt(0).toUpperCase() + s.status.slice(1)}
+                {p.schedule.enabled ? "Active" : "Paused"}
               </span>
             </td>
             <td className="py-2 text-right">
               <div className="inline-flex items-center gap-1">
-                <button className="rounded p-1 text-white/50 hover:bg-white/5 hover:text-white" title="Info">
+                <a
+                  href="/dashboard/ingestion/"
+                  className="rounded p-1 text-white/50 hover:bg-white/5 hover:text-white"
+                  title="View details on the Ingestion Pipeline page"
+                >
                   <Activity className="h-3.5 w-3.5" />
-                </button>
-                <button className="rounded p-1 text-white/50 hover:bg-white/5 hover:text-white" title="Edit">
-                  <Search className="h-3.5 w-3.5" />
-                </button>
-                <button className="rounded p-1 text-white/50 hover:bg-white/5 hover:text-white" title="More">
-                  ⋯
-                </button>
+                </a>
               </div>
             </td>
           </tr>
@@ -1169,7 +1434,7 @@ function ScheduledTable({ rows }: { rows: ScheduledOp[] }) {
  * (Model Operations TODO.md Phase 1) -- metrics are rendered generically
  * from whatever keys are actually present (`test_mape`/
  * `test_coverage_raw`/`test_coverage_calibrated`, see
- * `data-pipeline/app/service/ml/train.py`), not the old mock's
+ * `forecast-api/app/service/ml/train.py`), not the old mock's
  * fabricated MAPE+RMSE pair. */
 function TrainingRunsList({ versions, loaded }: { versions: ModelVersion[] | null; loaded: boolean }) {
   if (!loaded) {
@@ -1215,7 +1480,28 @@ function TrainingRunsList({ versions, loaded }: { versions: ModelVersion[] | nul
   );
 }
 
-function CommandCard({ c }: { c: SystemCommand }) {
+/** `onExecute` is only ever set for the 2 commands that map onto a real
+ * backend call (`executeCommand`'s own docstring has the full reasoning
+ * for why the other 4 don't) -- those without it render disabled with
+ * an explanatory tooltip instead of a decorative, always-enabled button
+ * that does nothing when clicked (same "no silently fabricated success"
+ * convention the rest of this page follows). */
+function CommandCard({
+  c,
+  status,
+  onExecute,
+  busy = false,
+}: {
+  c: SystemCommand;
+  status?: { state: "running" | "success" | "error"; message: string };
+  onExecute?: () => void;
+  /** True when the real backend state this command acts on is already
+   * in flight from somewhere else (e.g. a dbt build someone else
+   * triggered) -- disables proactively, same as `PipelineTable`'s own
+   * "Run now" already does from the same underlying state. */
+  busy?: boolean;
+}) {
+  const running = status?.state === "running" || busy;
   return (
     <div className="rounded-md border border-white/10 bg-white/[0.02] p-3">
       <div className="mb-1 flex items-center gap-2">
@@ -1224,15 +1510,34 @@ function CommandCard({ c }: { c: SystemCommand }) {
       </div>
       <p className="mb-2 text-[11px] text-white/50">{c.description}</p>
       <button
+        onClick={onExecute}
+        disabled={!onExecute || running}
+        title={
+          !onExecute
+            ? "No backend endpoint exists for this command yet"
+            : busy
+              ? "A build triggered elsewhere is already in progress"
+              : undefined
+        }
         className={cn(
           "inline-flex w-full items-center justify-center gap-2 rounded-md border px-3 py-1.5 text-xs font-medium",
-          c.destructive
-            ? "border-rose-300/40 bg-rose-300/10 text-rose-200 hover:bg-rose-300/15"
-            : "border-emerald-200/40 bg-emerald-200/10 text-emerald-100 hover:bg-emerald-200/15",
+          !onExecute
+            ? "cursor-not-allowed border-white/10 bg-white/[0.02] text-white/30"
+            : running
+              ? "cursor-not-allowed border-white/10 bg-white/5 text-white/40"
+              : c.destructive
+                ? "border-rose-300/40 bg-rose-300/10 text-rose-200 hover:bg-rose-300/15"
+                : "border-emerald-200/40 bg-emerald-200/10 text-emerald-100 hover:bg-emerald-200/15",
         )}
       >
-        <Play className="h-3 w-3" /> Execute
+        {running ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
+        {running ? "Running…" : "Execute"}
       </button>
+      {status && status.state !== "running" && (
+        <p className={cn("mt-1.5 text-[11px]", status.state === "success" ? "text-emerald-200" : "text-rose-300")}>
+          {status.message}
+        </p>
+      )}
     </div>
   );
 }

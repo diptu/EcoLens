@@ -43,7 +43,8 @@ export type TaskType =
   | "feature_build"
   | "forecast"
   | "report"
-  | "anomaly";
+  | "anomaly"
+  | "transform";
 export type TaskStatus = "running" | "queued" | "completed" | "failed";
 
 export interface AdminKpi {

@@ -117,8 +117,44 @@ async def test_non_empty_fetch_stages_publishes_and_logs_staged(
         == f"staging/bom_observations-{staged['run_id']}.duckdb"
     )
     assert published["object_storage_bucket"]
+    assert published["window_start"] is None
+    assert published["window_end"] is None
     assert publish_kwargs["queue_name"] is None  # not a shadow run
     assert _statuses(executed_log) == ["staged"]
+
+
+async def test_published_event_carries_the_real_window_for_a_backfill_run(
+    monkeypatch,
+):
+    """`registry.run_source`'s own docstring covers the real bug this
+    guards against: `window_start`/`window_end` used to only reach
+    `meta._ingest_log`, never the published event itself, even for a
+    real backfill run with a genuine date range."""
+
+    def fake_stage_dataframe(df, table, run_id):
+        return f"/fake/{table}-{run_id}.duckdb", len(df)
+
+    published = {}
+
+    async def fake_publish(payload, **kwargs):
+        published.update(payload)
+
+    monkeypatch.setattr(_common, "stage_dataframe", fake_stage_dataframe)
+    monkeypatch.setattr(_common, "publish_landed_event", fake_publish)
+
+    @_common.standard_run(
+        "bom",
+        "bom_observations",
+        window_start="2026-01-01T00:00:00+00:00",
+        window_end="2026-01-02T00:00:00+00:00",
+    )
+    async def fetch(**kwargs):
+        return pd.DataFrame({"temp_c": [20, 21, 22]})
+
+    await fetch()
+
+    assert published["window_start"] == "2026-01-01T00:00:00+00:00"
+    assert published["window_end"] == "2026-01-02T00:00:00+00:00"
 
 
 async def test_empty_fetch_is_immediately_success_and_does_not_publish(

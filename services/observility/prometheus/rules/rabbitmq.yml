@@ -1,0 +1,65 @@
+# RabbitMQ alerts -- shared infra between `services/ingestion`
+# (publishes `ecolens.landing`) and `services/waerehouse` (consumes it,
+# owns its own DLQ `ecolens.landing.dlq`) plus `services/forecast-api`'s
+# separate training-trigger topology (`forecasting.training.trigger`/
+# `forecasting.training.trigger.dlq`). Closes the exact gap
+# `prometheus/rules/ingestion.yml`'s own header used to flag: "No alert
+# here for 'warehouse-sync consumer is backlogged/down'... RabbitMQ
+# queue depth [is not] exported as a metric anywhere yet."
+#
+# Metrics come from `rabbitmq_prometheus` (the `rabbitmq-queues` scrape
+# job, `prometheus.yml.template`) -- `rabbitmq_detailed_queue_messages`/
+# `_messages_ready`, labeled by `queue`/`vhost`. Queue names are the
+# real, hardcoded defaults each service's own `Settings` uses
+# (`rabbitmq_landing_queue`/`_dlq`, `rabbitmq_training_trigger_queue`/
+# `_dlq`) -- if an operator overrides those via env vars, update the
+# `queue=~"..."` patterns below to match.
+
+groups:
+  - name: ecolens_rabbitmq_alerts
+    rules:
+      # Any message sitting in a DLQ means something already failed and
+      # was set aside for a human -- unlike a queue backlog, there's no
+      # "it'll drain on its own" case here (nothing ever consumes a DLQ
+      # automatically, by design; see `services/waerehouse/app/db/
+      # rabbitmq.py`'s own module docstring). `for: 5m` gives a same-
+      # cycle transient (e.g. one message landing right as a deploy
+      # restarts a consumer) a chance to not page immediately, without
+      # letting a real failure sit unnoticed for long.
+      - alert: RabbitMQDeadLetterQueueNotEmpty
+        expr: rabbitmq_detailed_queue_messages{queue=~".*\\.dlq$"} > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.queue }} has {{ $value }} dead-lettered message(s)"
+          description: >
+            {{ $labels.queue }} is not empty -- at least one message
+            failed processing and was set aside for manual inspection/
+            replay rather than being silently retried forever. Check
+            the consumer's own error logs (`warehouse.consume_failed`/
+            `training_worker`'s equivalent) for why.
+
+      # "the warehouse-sync consumer is backlogged/down" -- the real
+      # signal this ingestion.yml's own header comment used to say
+      # didn't exist yet. Threshold is deliberately not "> 0" (a queue
+      # briefly holding a handful of in-flight messages during normal
+      # operation is not backlogged) -- 50 messages sustained for 10m is
+      # a real accumulation a healthy, running consumer would have
+      # already drained (`consumers.landed_events.sync_landed_event`
+      # processes one at a time, `prefetch_count=1`, but each sync is
+      # normally a sub-second Postgres bulk load).
+      - alert: RabbitMQQueueDepthHigh
+        expr: >
+          rabbitmq_detailed_queue_messages{queue=~"ecolens\\.landing|forecasting\\.training\\.trigger"} > 50
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.queue }} has {{ $value }} messages queued"
+          description: >
+            {{ $labels.queue }}'s depth has stayed above 50 for 10
+            minutes -- its consumer (`services/waerehouse`'s landed-
+            events consumer, or `services/forecast-api`'s
+            `train-worker`) is either down or falling behind real
+            publish volume.

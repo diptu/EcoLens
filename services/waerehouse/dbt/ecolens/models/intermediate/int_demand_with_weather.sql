@@ -15,6 +15,38 @@
 -- all four -- the original version above only carried what README's short
 -- example used.
 --
+-- coal_mw/gas_mw/wind_mw/solar_mw/other_mw (added for the multi-task
+-- forecast model's generation head, `services/forecast-api/notebooks/
+-- lstm.ipynb`'s `EnergyForecastLSTM` -- 4 named buckets + 1 catch-all,
+-- not the full dim_energy_mix taxonomy, a deliberate scope decision).
+-- `stg_openelectricity_mix` already has `coal_mw`/`gas_mw`/`wind_mw` as
+-- single columns (raw ingestion already collapsed OE's fine-grained
+-- fueltechs, e.g. coal_black/coal_brown, gas_ccgt/gas_ocgt/gas_steam/
+-- gas_recip/gas_wcmg, into these during `_pivot_long_to_wide`) -- only
+-- solar (utility + rooftop) and "other" (hydro + biomass + distillate +
+-- pumped_hydro + battery_discharge -- everything real generation that
+-- isn't one of the 4 named buckets) need summing here. Matters for
+-- regions like SA1 (zero coal) and TAS1 (~100% hydro, per services/
+-- ingestion/TODO.md's live-verified per-region averages) -- without an
+-- "other" catch-all, reconciling generation to demand would silently
+-- smear their real hydro/storage share across coal/gas/wind/solar,
+-- which don't represent it. `battery_charge_mw` (negative, load not
+-- generation) is deliberately excluded from "other".
+-- Same nullability contract as total_renewable_mw immediately below:
+-- null only when total_generation_mw itself is null (no mix data for
+-- that row at all), 0-substituted per missing individual fuel reading
+-- otherwise -- not a fabricated 0 when the whole row has no data.
+--
+-- wind_gust_kmh/wind_direction_deg (added alongside the generation
+-- buckets above): `stg_bom_observations` already carries these (thin
+-- passthrough), just not previously selected here. Added because the
+-- multi-task model's real, executed feature selection (`services/
+-- ingestion/scripts/select_features.py`'s output,
+-- `data/training/selected_features.json`) found both genuinely
+-- important -- dropping them silently instead of adding the 2 columns
+-- would mean ignoring a real, data-driven finding for engineering
+-- convenience.
+--
 -- Ephemeral (dbt_project.yml) -- inlined into fct_energy_demand, never
 -- materialized on its own.
 --
@@ -36,11 +68,42 @@ with demand as (
 ),
 
 weather as (
-    select * from {{ ref('stg_bom_observations') }}
+    select
+        ts,
+        region,
+        temp_c,
+        apparent_temp_c,
+        humidity_pct,
+        wind_speed_kmh,
+        wind_gust_kmh,
+        wind_direction_deg,
+        cloud_oktas
+    from {{ ref('stg_bom_observations') }}
 ),
 
 generation as (
-    select ts, region, total_generation_mw, total_renewable_mw, renewable_mw_source
+    select
+        ts,
+        region,
+        total_generation_mw,
+        total_renewable_mw,
+        renewable_mw_source,
+        coal_mw,
+        gas_mw,
+        wind_mw,
+        case
+            when total_generation_mw is null then null
+            else coalesce(solar_utility_mw, 0) + coalesce(solar_rooftop_mw, 0)
+        end as solar_mw,
+        case
+            when total_generation_mw is null then null
+            else
+                coalesce(hydro_mw, 0)
+                + coalesce(biomass_mw, 0)
+                + coalesce(distillate_mw, 0)
+                + coalesce(pumped_hydro_mw, 0)
+                + coalesce(battery_discharge_mw, 0)
+        end as other_mw
     from {{ ref('stg_openelectricity_mix') }}
 )
 
@@ -58,10 +121,17 @@ select
     -- provider's own reported figure -- previously only visible by
     -- querying raw_staging.stg_openelectricity_mix directly.
     g.renewable_mw_source,
+    g.coal_mw,
+    g.gas_mw,
+    g.wind_mw,
+    g.solar_mw,
+    g.other_mw,
     w.temp_c,
     w.apparent_temp_c,
     w.humidity_pct,
     w.wind_speed_kmh,
+    w.wind_gust_kmh,
+    w.wind_direction_deg,
     w.cloud_oktas,
     extract(hour from d.ts) as hour,
     extract(dow from d.ts) as dow,
@@ -72,14 +142,29 @@ select
     ) as roll_7d
 from demand d
 left join lateral (
-    select w2.temp_c, w2.apparent_temp_c, w2.humidity_pct, w2.wind_speed_kmh, w2.cloud_oktas
+    select
+        w2.temp_c,
+        w2.apparent_temp_c,
+        w2.humidity_pct,
+        w2.wind_speed_kmh,
+        w2.wind_gust_kmh,
+        w2.wind_direction_deg,
+        w2.cloud_oktas
     from weather w2
     where w2.region = d.region and w2.ts <= d.ts
     order by w2.ts desc
     limit 1
 ) w on true
 left join lateral (
-    select g2.total_generation_mw, g2.total_renewable_mw, g2.renewable_mw_source
+    select
+        g2.total_generation_mw,
+        g2.total_renewable_mw,
+        g2.renewable_mw_source,
+        g2.coal_mw,
+        g2.gas_mw,
+        g2.wind_mw,
+        g2.solar_mw,
+        g2.other_mw
     from generation g2
     where g2.region = d.region and g2.ts <= d.ts
     order by g2.ts desc

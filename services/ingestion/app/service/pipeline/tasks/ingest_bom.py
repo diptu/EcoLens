@@ -83,17 +83,29 @@ async def _try_live_api(lookback_minutes: int) -> pd.DataFrame | None:
     """Try BoM's public JSON endpoint. Returns None if it fails."""
     import httpx
 
+    from app.service.pipeline.http_retry import DEFAULT_LIMITS, fetch_with_retry
+
     settings = get_settings()
     rows: list[dict] = []
     async with httpx.AsyncClient(
         timeout=settings.bom_request_timeout_seconds,
         headers={"User-Agent": _BOM_USER_AGENT},
+        limits=DEFAULT_LIMITS,
     ) as client:
         for region, station_id in settings.bom_stations.items():
             url = f"http://www.bom.gov.au/fwo/{station_id}/observations.json"
             try:
-                r = await client.get(url)
-                r.raise_for_status()
+                async def _get(u: str = url) -> httpx.Response:
+                    resp = await client.get(u)
+                    resp.raise_for_status()
+                    return resp
+
+                r = await fetch_with_retry(
+                    _get,
+                    source="bom",
+                    log_event="bom.live_fetch_retry",
+                    station=station_id,
+                )
                 payload = r.json()
                 for obs in payload.get("observations", {}).get("data", []):
                     rows.append(

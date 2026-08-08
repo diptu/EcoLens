@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import base64
 import math
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -27,13 +28,25 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.models.datasources import CATALOG
 from app.schemas.ingest.public import (
+    PublicFailedRunError,
+    PublicFailedRunOut,
+    PublicFailedRunsListResponse,
+    PublicFailedRunsMeta,
     PublicPipelineOut,
     PublicPipelineSchedule,
     PublicPipelinesListResponse,
     PublicPipelinesMeta,
+    PublicRecentRunSummary,
+    PublicRetryQueueItem,
+    PublicRetryQueueLastError,
+    PublicRetryQueueListResponse,
+    PublicRetryQueueMeta,
     PublicRunOut,
     PublicRunsListResponse,
     PublicRunsMeta,
+    PublicSchedulerResponse,
+    PublicSchedulerStatus,
+    PublicUpcomingRun,
 )
 
 # The real cadence `app.celery_app`'s Beat schedule dispatches at for
@@ -43,8 +56,47 @@ _BEAT_CRON = "*/30 * * * *"
 _BEAT_TIMEZONE = "UTC"
 
 _STATS_WINDOW_24H = timedelta(hours=24)
+_STATS_WINDOW_7D = timedelta(days=7)
 
 _SOURCE_TO_CATALOG_ID = {entry.ingest_source: entry.id for entry in CATALOG}
+
+# Ported from data-pipeline's `service.datasources.monitoring._classify_error`/
+# `service.pipelines._NON_RETRYABLE_ERROR_CODES`/`_SECRET_LIKE_PATTERN` --
+# pure, source-agnostic heuristics over `meta._ingest_log.error_message`
+# free text, identical regardless of which service wrote the row (same
+# shared table, same `str(exc)[:500]` truncation convention both
+# services' `_common.py`-equivalent uses).
+_NON_RETRYABLE_ERROR_CODES = {"missing_credentials", "schema_mismatch"}
+
+_SECRET_LIKE_PATTERN = re.compile(
+    r"(?i)\b(api[_-]?key|token|secret|password|authorization)\b\s*[:=]\s*\S+"
+)
+
+
+def _classify_error(message: str) -> str | None:
+    """Best-effort keyword match, not an exact classification -- a
+    message that matches no keyword isn't counted under any code
+    (undercounting, not mis-bucketing)."""
+    lowered = message.lower()
+    if any(k in lowered for k in ("credential", "api key", "unauthorized", "401")):
+        return "missing_credentials"
+    if any(k in lowered for k in ("timeout", "timed out")):
+        return "timeout"
+    if any(k in lowered for k in ("rate limit", "429", "too many requests")):
+        return "rate_limited"
+    if any(k in lowered for k in ("schema", "keyerror", "column")):
+        return "schema_mismatch"
+    return None
+
+
+def _redact_public_error_message(message: str) -> str:
+    """Defense-in-depth for the unauthenticated public endpoints --
+    `oe`'s ingestion goes through OpenElectricity's official SDK with a
+    real API key; whether that SDK's exceptions ever echo it back isn't
+    something this codebase can verify without auditing that dependency,
+    so redact anything that looks like a credential rather than assume
+    every message is safe to expose."""
+    return _SECRET_LIKE_PATTERN.sub(lambda m: f"{m.group(1)}: [redacted]", message)
 
 
 def _percentile(values: list[float], pct: float) -> int | None:
@@ -248,4 +300,229 @@ async def list_runs_public(
         data=[_row_to_public_run_out(dict(row)) for row in rows],
         next_cursor=next_cursor,
         has_more=has_more,
+    )
+
+
+# `error_message` is deliberately excluded from `_RUN_COLUMNS` above (see
+# `PublicRunOut`'s own docstring) -- these two endpoints exist
+# specifically to surface it (redacted), so they need their own,
+# wider column list.
+_FAILURE_RUN_COLUMNS = "l.id, l.source, l.status, l.started_at, l.finished_at, l.error_message"
+_FAILURE_RUN_FROM = "FROM meta._ingest_log l"
+
+
+async def list_failed_public(
+    db: AsyncSession, *, limit: int, cursor: str | None
+) -> PublicFailedRunsListResponse:
+    """`GET /v1/ingestion/public/failed` -- ported from data-pipeline's
+    `service.pipelines.list_failed_public` (same query shape, same
+    `_classify_error`/redaction), scoped to this service's own 5
+    sources via `_SOURCE_TO_CATALOG_ID`."""
+    now = datetime.now(UTC)
+
+    offset = 0
+    if cursor:
+        try:
+            offset = int(base64.urlsafe_b64decode(cursor.encode()).decode())
+        except Exception:
+            offset = 0
+
+    counts_result = await db.execute(
+        text(
+            "SELECT "
+            "count(*) FILTER (WHERE started_at >= :since_24h) AS failed_24h, "
+            "count(*) FILTER (WHERE started_at >= :since_7d) AS failed_7d "
+            "FROM meta._ingest_log WHERE status = 'failed'"
+        ),
+        {"since_24h": now - _STATS_WINDOW_24H, "since_7d": now - _STATS_WINDOW_7D},
+    )
+    counts = counts_result.mappings().one()
+
+    total_result = await db.execute(
+        text("SELECT count(*) FROM meta._ingest_log WHERE status = 'failed'")
+    )
+    total = int(total_result.scalar() or 0)
+
+    rows_result = await db.execute(
+        text(
+            f"SELECT {_FAILURE_RUN_COLUMNS} {_FAILURE_RUN_FROM} WHERE l.status = 'failed' "
+            "ORDER BY l.started_at DESC LIMIT :limit OFFSET :offset"
+        ),
+        {"limit": limit, "offset": offset},
+    )
+    rows = rows_result.mappings().all()
+
+    data: list[PublicFailedRunOut] = []
+    for row in rows:
+        message = _redact_public_error_message(
+            row["error_message"] or "no error message recorded"
+        )
+        code = _classify_error(message)
+        retryable = code not in _NON_RETRYABLE_ERROR_CODES
+        duration_ms = None
+        if row["finished_at"] is not None:
+            duration_ms = round((row["finished_at"] - row["started_at"]).total_seconds() * 1000)
+        pipeline_id = _SOURCE_TO_CATALOG_ID.get(row["source"], row["source"])
+        data.append(
+            PublicFailedRunOut(
+                run_id=str(row["id"]),
+                pipeline_id=pipeline_id,
+                source_id=pipeline_id,
+                started_at=row["started_at"],
+                finished_at=row["finished_at"],
+                duration_ms=duration_ms,
+                error=PublicFailedRunError(
+                    code=code, message=message, http_status=None, retryable=retryable
+                ),
+                can_retry_now=retryable,
+            )
+        )
+
+    has_more = offset + limit < total
+    next_cursor = (
+        base64.urlsafe_b64encode(str(offset + limit).encode()).decode() if has_more else None
+    )
+
+    return PublicFailedRunsListResponse(
+        meta=PublicFailedRunsMeta(
+            total_failed_24h=int(counts["failed_24h"]),
+            total_failed_7d=int(counts["failed_7d"]),
+            as_of=now,
+        ),
+        data=data,
+        next_cursor=next_cursor,
+        has_more=has_more,
+    )
+
+
+async def list_retry_queue_public(db: AsyncSession, *, limit: int) -> PublicRetryQueueListResponse:
+    """`GET /v1/ingestion/public/retry-queue` -- `meta._ingest_log` rows
+    with `status='sync_failed'` (fetched fine, warehouse-sync load
+    failed). Same "no automated backoff engine" honest-null contract as
+    data-pipeline's identical endpoint."""
+    now = datetime.now(UTC)
+
+    rows_result = await db.execute(
+        text(
+            f"SELECT {_FAILURE_RUN_COLUMNS} {_FAILURE_RUN_FROM} WHERE l.status = 'sync_failed' "
+            "ORDER BY l.finished_at ASC NULLS LAST LIMIT :limit"
+        ),
+        {"limit": limit},
+    )
+    rows = rows_result.mappings().all()
+
+    size_result = await db.execute(
+        text(
+            "SELECT count(*) AS cnt, min(finished_at) AS oldest "
+            "FROM meta._ingest_log WHERE status = 'sync_failed'"
+        )
+    )
+    size_row = size_result.mappings().one()
+
+    data: list[PublicRetryQueueItem] = []
+    for row in rows:
+        message = _redact_public_error_message(
+            row["error_message"] or "no error message recorded"
+        )
+        pipeline_id = _SOURCE_TO_CATALOG_ID.get(row["source"], row["source"])
+        data.append(
+            PublicRetryQueueItem(
+                queue_id=f"rq-{row['id']}",
+                run_id=str(row["id"]),
+                pipeline_id=pipeline_id,
+                source_id=pipeline_id,
+                queued_at=row["finished_at"] or row["started_at"],
+                last_error=PublicRetryQueueLastError(code=_classify_error(message), message=message),
+            )
+        )
+
+    return PublicRetryQueueListResponse(
+        meta=PublicRetryQueueMeta(
+            queue_size=int(size_row["cnt"]),
+            oldest_queued_at=size_row["oldest"],
+            as_of=now,
+        ),
+        data=data,
+    )
+
+
+async def get_scheduler_status_public(db: AsyncSession) -> PublicSchedulerResponse:
+    """`GET /v1/ingestion/public/scheduler` -- simplified vs. data-
+    pipeline's equivalent (no `meta.pipelines` pause state, no dbt
+    pipeline, no Prefect concept -- this service genuinely has none of
+    those, see `PublicSchedulerStatus`'s own docstring). `queue_depth`
+    reads the same shared `meta._ingest_log` data-pipeline's identical
+    endpoint does -- real global queue depth regardless of which
+    service's runs are actually in flight, not scoped to this service's
+    own triggers only.
+
+    No Redis cache (unlike data-pipeline's `SCHEDULER_CACHE_KEY`-cached
+    version) -- same reasoning `list_pipelines_public`'s own module
+    docstring gives: no real traffic yet to justify the extra moving
+    part.
+    """
+    now = datetime.now(UTC)
+    next_run_at = _next_run_at(now)
+
+    depth_result = await db.execute(
+        text("SELECT count(*) FROM meta._ingest_log WHERE status IN ('running', 'staged')")
+    )
+    queue_depth = int(depth_result.scalar() or 0)
+
+    # A scheduled ("schedule"-triggered) run in roughly the last Beat
+    # interval is real evidence the worker+beat pair is actually alive --
+    # not a live Celery broker inspect call (real, but a slower/less
+    # reliable thing to do inline in an HTTP request), a derived signal
+    # from data already being queried elsewhere in this module.
+    recent_schedule_result = await db.execute(
+        text(
+            "SELECT count(*) FROM meta._ingest_log "
+            "WHERE triggered_by = 'schedule' AND started_at >= :since"
+        ),
+        {"since": now - timedelta(minutes=40)},
+    )
+    worker_alive = int(recent_schedule_result.scalar() or 0) > 0
+
+    upcoming = [
+        PublicUpcomingRun(
+            pipeline_id=entry.id,
+            source_id=entry.id,
+            scheduled_at=next_run_at,
+        )
+        for entry in CATALOG
+    ]
+
+    sources = [entry.ingest_source for entry in CATALOG]
+    recent_result = await db.execute(
+        text(
+            "SELECT id, source, status, started_at, finished_at "
+            "FROM meta._ingest_log WHERE source = ANY(:sources) "
+            "ORDER BY started_at DESC LIMIT 10"
+        ),
+        {"sources": sources},
+    )
+    recent_runs = [
+        PublicRecentRunSummary(
+            run_id=str(row["id"]),
+            pipeline_id=_SOURCE_TO_CATALOG_ID.get(row["source"], row["source"]),
+            status=row["status"],
+            finished_at=row["finished_at"],
+            duration_ms=(
+                round((row["finished_at"] - row["started_at"]).total_seconds() * 1000)
+                if row["finished_at"] is not None
+                else None
+            ),
+        )
+        for row in recent_result.mappings().all()
+    ]
+
+    return PublicSchedulerResponse(
+        scheduler=PublicSchedulerStatus(
+            as_of=now,
+            active_workers=1 if worker_alive else 0,
+            total_workers=1,
+            queue_depth=queue_depth,
+        ),
+        upcoming_runs=upcoming,
+        recent_runs=recent_runs,
     )

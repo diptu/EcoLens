@@ -1,27 +1,34 @@
 /**
- * data-pipeline client — data-sources catalog domain.
+ * Data-sources catalog domain client.
  *
- * Talks to `GET /v1/data-sources/public`
- * (`services/data-pipeline/app/api/v1/datasources/routes.py`) — the
- * unauthenticated mirror of the admin-gated `GET /v1/data-sources`,
- * added specifically so this dashboard (which has no way to hold a
- * bearer token for data-pipeline's own separate auth domain, see that
- * route's own docstring) can show real source health/schedule/last-run
- * data instead of the fictional 9-source catalog `lib/dashboards.ts`'s
- * old `getDataSources()` mock used to render here.
+ * **Cutover**: talks to `services/ingestion`'s `GET /v1/data-sources`
+ * (`app/api/v1/datasources/routes.py`) now, not data-pipeline's
+ * `GET /v1/data-sources/public`. Field-for-field identical response
+ * shape (confirmed by reading `app/schemas/datasources/entities.py`'s
+ * `DataSourceOut` directly — id/name/category/description/url/license/
+ * auth/schedule/health/last_run/regions/metadata/version/created_at/
+ * updated_at, all present) — ingestion's version is a superset in
+ * `meta` only (adds `healthy_count`/`degraded_count`/`failing_count`/
+ * `paused_count`/`next_refresh_at`, all unused here, harmless). No
+ * `/public` URL segment on ingestion's side because the whole router is
+ * already deliberately open (no auth at all, see that route's own
+ * docstring) — there's no separate admin-gated variant to mirror the
+ * way data-pipeline had one.
  *
- * Read-only. `PATCH /v1/data-sources/{id}` (schedule edits,
- * enable/disable) requires `admin` role and stays out of scope here —
- * there's no real auth flow for this dashboard to hold that token, so
- * the page shows those controls as disabled rather than faking a
- * mutation that never reaches the backend (same "no silently fabricated
- * success" convention `models/page.tsx`'s Train tab already follows).
+ * Read-only here. `PATCH /v1/data-sources/{id}` (schedule edits,
+ * enable/disable) stays out of scope — there's no real auth flow for
+ * this dashboard to hold a token for, so the page shows those controls
+ * as disabled rather than faking a mutation that never reaches the
+ * backend (same "no silently fabricated success" convention
+ * `models/page.tsx`'s Train tab already follows) — true regardless of
+ * which service owns the route, ingestion's PATCH is open too but this
+ * dashboard still has no real edit flow built for it.
  * `POST .../run` and `.../backfill` ARE real here — both are
  * deliberately open routes, already used by `ingestion.ts`'s
  * `triggerIngestionRun`/`triggerBackfill`, reused directly rather than
  * duplicated.
  */
-import { DATA_PIPELINE_API_URL } from "./env";
+import { INGESTION_API_URL } from "./env";
 
 export type DataSourceCategory = "grid" | "weather" | "carbon" | "fuel" | "custom";
 export type DataSourceHealthStatus = "healthy" | "degraded" | "failing" | "paused";
@@ -92,16 +99,16 @@ export type DataSourcesList = {
   has_more: boolean;
 };
 
-/** Live call to `GET /v1/data-sources/public`. No auth, no mock
+/** Live call to `GET /v1/data-sources` (ingestion). No auth, no mock
  * fallback on failure -- an honest empty list beats silently
  * reintroducing the old fictional catalog (same policy as the Carbon
  * Intelligence / Ingestion Pipeline pages once they were wired to real
  * data). `limit=200` -- the real catalog is 5 sources today, well under
  * any pagination boundary, so a single request always gets everything. */
 export async function fetchPublicDataSources(): Promise<DataSourcesList> {
-  const res = await fetch(`${DATA_PIPELINE_API_URL}/data-sources/public?limit=200`);
+  const res = await fetch(`${INGESTION_API_URL}/data-sources?limit=200`);
   if (!res.ok) {
-    throw new Error(`GET /v1/data-sources/public failed: ${res.status}`);
+    throw new Error(`GET /v1/data-sources failed: ${res.status}`);
   }
   return res.json();
 }

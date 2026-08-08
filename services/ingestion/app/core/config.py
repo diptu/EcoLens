@@ -165,6 +165,18 @@ class Settings(BaseSettings):
     # of just multiple runners of one.
     hostname: str = Field(default_factory=socket.gethostname)
 
+    # `TODO.md` Observability Phase 1's "OpenTelemetry Core SDK
+    # Integration" -- same real-no-op-when-disabled pattern
+    # `services/waerehouse`/`services/forecast-api`'s identical settings
+    # use; exports to `services/observility`'s already-configured
+    # Collector when enabled, never straight to Tempo.
+    otel_traces_enabled: bool = False
+    otel_exporter_otlp_endpoint: str = "http://localhost:4317"
+    # Bound as a static field on every log line (`core/logging.py`) --
+    # matches `services/observility/prometheus/prometheus.yml.template`'s
+    # own hardcoded `external_labels.environment: development` default.
+    environment: str = "development"
+
     @property
     def database_url(self) -> str:
         """`postgresql+asyncpg://` DSN for SQLAlchemy's async engine.

@@ -1,41 +1,74 @@
 /**
- * data-pipeline client — ingestion/pipelines domain.
+ * Ingestion/pipelines domain client.
  *
- * Talks to the real, currently-live `/v1/ingestion/*` + `/v1/data-sources/*`
- * routes (`services/data-pipeline/app/api/v1/{pipelines,datasources}/routes.py`)
- * — verified directly against a running instance, not assumed from source
- * reading alone (earlier versions of this file guessed at a contract that
- * didn't exist yet; that's no longer true, confirmed via the live OpenAPI
- * schema and an actual triggered run).
+ * **Cutover (this change)**: the per-row actions the Pipeline Operations
+ * tab (`operational-tasks/page.tsx`) actually calls —
+ * `triggerIngestionRun`/`fetchBackfillStatus`/`triggerBackfill` — now
+ * talk to `services/ingestion`'s real `/v1/data-sources/*` routes
+ * instead of `data-pipeline`'s. Confirmed field-for-field identical
+ * request/response shapes before switching (`RunTriggerResponse`/
+ * `BackfillTriggerResponse`/`BackfillStatusResponse`, same header
+ * contract — `Idempotency-Key`/`X-Reason` — both services were built to
+ * the same convention). `triggerDbtBuild` now talks to
+ * `services/waerehouse`'s new `POST /v1/dbt/build` (dbt always belonged
+ * to the warehouse service, not data-pipeline; this endpoint didn't
+ * exist anywhere in `waerehouse` until now). Concurrent-build
+ * protection is real too — an atomic `INSERT ... WHERE NOT EXISTS`
+ * against `meta._dbt_build_log` itself (no Redis dependency in
+ * `waerehouse`, so this is a Postgres-native lock instead of data-
+ * pipeline's Redis one, same 30-minute stale-lock safeguard), live-
+ * verified end to end against a real Postgres container (acquire →
+ * second concurrent trigger blocked with 409 `dbt_build_in_progress` →
+ * release → re-acquire).
  *
- * Read endpoints use the unauthenticated `/public/*` mirrors — genuinely
- * public projections (see each one's own docstring in pipelines/routes.py),
- * not a stripped-down summary.
+ * **Full cutover (follow-up pass)**: every remaining `/public/*` read
+ * — `fetchPublicPipelines` (composed from `services/ingestion` + a
+ * synthesized dbt row from `services/waerehouse`, since ingestion has
+ * no 6th dbt pipeline and warehouse has no `stage`/`status`/
+ * `depends_on` concept — see that function's own docstring),
+ * `fetchPublicRuns`, `fetchPublicFailedRuns`, `fetchPublicRetryQueue`,
+ * `fetchPublicScheduler` — now talk to `services/ingestion` too. All
+ * confirmed field-compatible before switching (same schema names/
+ * shapes, ported deliberately, not just similarly-shaped by
+ * coincidence). One real, intentional gap in ingestion's `scheduler`
+ * response vs. data-pipeline's: no `meta.pipelines` pause state or dbt
+ * pipeline exist there, so `upcoming_runs`/`active_workers` are honest,
+ * simplified equivalents, not byte-identical (see `PublicSchedulerStatus`'s
+ * own docstring in `services/ingestion`).
  *
- * `triggerIngestionRun` (`POST /v1/data-sources/{id}/run`) is deliberately
- * open too — no bearer token required. Triggering a pipeline run isn't a
- * privileged action in this platform's current scope; the backend's
- * `require_roles("admin")` gate on this route was removed for exactly this
- * reason (see that route's own comment).
+ * **Full cutover, training (follow-up pass)**: `triggerTraining`/
+ * `fetchTrainingRuns` (Model Operations tab, this same page) now talk to
+ * `services/forecast-api` — the training-code migration moved
+ * `ml/train.py`, MLflow, the warehouse connection, and the RabbitMQ
+ * training-trigger consumer (`train-worker`) there too, so the manual
+ * trigger and its own consumer are colocated in the same service now.
+ * `DATA_PIPELINE_API_URL` is no longer imported by this file as a
+ * result — every function here now talks to `services/ingestion`,
+ * `services/waerehouse`, or `services/forecast-api`.
  */
 
-import { DATA_PIPELINE_API_URL } from "./env";
+import { FORECAST_API_URL, INGESTION_API_URL, WAREHOUSE_API_URL } from "./env";
 
 export type PipelineStage = "extract" | "transform";
 export type LivePipelineStatus = "active" | "paused";
 
-/** Shape of data-pipeline's `PipelineOut`. */
+/** Union of data-pipeline's `PipelineOut` shape and `services/ingestion`'s
+ * genuinely narrower `PublicPipelineOut` (`stage`/`status`/`depends_on`
+ * absent there — no dbt pipeline, no pause/resume mechanism at all; see
+ * that schema's own docstring). Optional, not defaulted/fabricated —
+ * `derivePipelineHealth` below already treats a missing `status` as
+ * "never paused" rather than crashing or guessing. */
 export type LivePipeline = {
   id: string;
   name: string;
   source_id: string | null;
-  stage: PipelineStage;
-  status: LivePipelineStatus;
+  stage?: PipelineStage;
+  status?: LivePipelineStatus;
   schedule: { cron: string; timezone: string; enabled: boolean };
-  depends_on: string[];
+  depends_on?: string[];
   last_run_at: string | null;
   next_run_at: string | null;
-  run_count_24h: number;
+  run_count_24h: number | null;
   success_rate_24h: number | null;
   p95_duration_ms_24h: number | null;
 };
@@ -46,12 +79,141 @@ export type PipelinesList = {
   data: LivePipeline[];
 };
 
-export async function fetchPublicPipelines(): Promise<PipelinesList> {
-  const res = await fetch(`${DATA_PIPELINE_API_URL}/ingestion/public/pipelines`);
-  if (!res.ok) {
-    throw new Error(`GET /v1/ingestion/public/pipelines failed: ${res.status}`);
+/** Shape of `services/waerehouse`'s `DbtBuildRunOut` -- one
+ * `meta._dbt_build_log` row, backing both `GET /v1/dbt/build/last` and
+ * `GET /v1/dbt/build/runs`. */
+export type DbtBuildRun = {
+  id: string;
+  subcommand: string;
+  target: string;
+  trigger: string;
+  triggered_by: string;
+  status: "running" | "success" | "failed";
+  started_at: string;
+  finished_at: string | null;
+  exit_code: number | null;
+  error: string | null;
+};
+
+/** Live call to `GET /v1/dbt/build/runs` (`services/waerehouse`) -- real
+ * build history, newest first. `[]` both when no build has ever run (a
+ * real, expected state) and on a network/HTTP failure (this is a
+ * best-effort enrichment for the pipeline list, not something that
+ * should fail the whole list over). */
+async function fetchDbtBuildRuns(limit = 20): Promise<DbtBuildRun[]> {
+  try {
+    const res = await fetch(`${WAREHOUSE_API_URL}/dbt/build/runs?limit=${limit}`);
+    if (!res.ok) return [];
+    const body: { data: DbtBuildRun[] } = await res.json();
+    return body.data;
+  } catch {
+    return [];
   }
-  return res.json();
+}
+
+/** Real, unauthenticated equivalents now live on two different services
+ * — `services/ingestion`'s `GET /v1/ingestion/public/pipelines` (the 5
+ * real ingestion sources) has no 6th dbt-warehouse row (dbt isn't its
+ * job) and no `stage`/`status`/`depends_on` fields (no dbt pipeline, no
+ * pause mechanism, see `LivePipeline`'s own docstring). This function
+ * composes both real sources into one response shaped like data-
+ * pipeline's original 6-pipeline catalog, rather than silently dropping
+ * the dbt row or fabricating fields neither service actually has.
+ *
+ * `run_count_24h`/`success_rate_24h`/`p95_duration_ms_24h` for the
+ * synthesized dbt row are now real 24h aggregates computed from
+ * `GET /v1/dbt/build/runs` (added alongside this function --
+ * `services/waerehouse/TODO.md`'s own note on the previous 0%/100%
+ * single-build proxy this replaces), the same computation shape
+ * ingestion's own sources already get server-side. A `"running"` row
+ * counts toward `run_count_24h` but is excluded from the success-rate/
+ * duration math until it finishes (same reasoning ingestion's own
+ * aggregate can't be exactly reproduced client-side either -- an
+ * in-flight run has no `finished_at` yet). */
+export async function fetchPublicPipelines(): Promise<PipelinesList> {
+  const [ingestionRes, runs] = await Promise.all([
+    fetch(`${INGESTION_API_URL}/ingestion/public/pipelines`),
+    fetchDbtBuildRuns(),
+  ]);
+  if (!ingestionRes.ok) {
+    throw new Error(`GET /v1/ingestion/public/pipelines failed: ${ingestionRes.status}`);
+  }
+  const ingestion: PipelinesList = await ingestionRes.json();
+
+  const sources: LivePipeline[] = ingestion.data.map((p) => ({ ...p, stage: "extract" }));
+
+  const latest = runs[0] ?? null;
+  const cutoff24h = Date.now() - 24 * 60 * 60 * 1000;
+  const runs24h = runs.filter((r) => new Date(r.started_at).getTime() >= cutoff24h);
+  const finished24h = runs24h.filter((r) => r.finished_at != null);
+  const succeeded24h = finished24h.filter((r) => r.status === "success").length;
+  const durationsMs = finished24h
+    .map((r) => new Date(r.finished_at as string).getTime() - new Date(r.started_at).getTime())
+    .sort((a, b) => a - b);
+  const p95Index = durationsMs.length > 0 ? Math.ceil(durationsMs.length * 0.95) - 1 : -1;
+
+  const dbtRow: LivePipeline = {
+    id: "pipe-dbt-warehouse",
+    name: "dbt Warehouse Build",
+    source_id: null,
+    stage: "transform",
+    // No real recurring schedule to report -- `services/waerehouse` has
+    // no auto-rebuild cron, this is manual-trigger-only (`triggerDbtBuild`).
+    schedule: { cron: "manual", timezone: "UTC", enabled: true },
+    depends_on: sources.map((s) => s.id),
+    last_run_at: latest?.started_at ?? null,
+    next_run_at: null,
+    run_count_24h: runs24h.length > 0 ? runs24h.length : null,
+    success_rate_24h: finished24h.length > 0
+      ? Math.round((succeeded24h / finished24h.length) * 1000) / 10
+      : null,
+    p95_duration_ms_24h: p95Index >= 0 ? durationsMs[p95Index] : null,
+  };
+
+  const data = [...sources, dbtRow];
+  const active = data.filter((p) => p.status !== "paused").length;
+  return {
+    meta: { total: data.length, active, paused: data.length - active, as_of: ingestion.meta.as_of },
+    data,
+  };
+}
+
+/** Polls `GET /v1/dbt/build/runs` for the dbt-warehouse row's live
+ * status, same shape as `pollLatestRun` -- until this exists, a build
+ * triggered from a *different* browser tab/session (or, eventually, a
+ * real schedule) was invisible on `dashboard/operational-tasks/page.tsx`
+ * until a manual page refresh, since that page only ever fetched the
+ * dbt row once, on load (`services/waerehouse/TODO.md`'s own note on
+ * this gap). Reads the single latest run rather than the full list --
+ * cheaper for "is a build in flight right now", same reasoning
+ * `GET /v1/dbt/build/last` already existed for. */
+export function pollLatestDbtBuild(
+  onUpdate: (run: DbtBuildRun | null) => void,
+  intervalMs = 3000,
+  timeoutMs = 300_000,
+): () => void {
+  let cancelled = false;
+  const deadline = Date.now() + timeoutMs;
+  const tick = async () => {
+    try {
+      const runs = await fetchDbtBuildRuns(1);
+      if (cancelled) return;
+      const run = runs[0] ?? null;
+      onUpdate(run);
+      const terminal = run != null && run.status !== "running";
+      if (!terminal && Date.now() < deadline) {
+        setTimeout(tick, intervalMs);
+      }
+    } catch {
+      // A transient poll failure isn't fatal -- just stop polling
+      // silently rather than flipping the UI to an error state over one
+      // dropped request.
+    }
+  };
+  void tick();
+  return () => {
+    cancelled = true;
+  };
 }
 
 /** Static — mirrors `data-pipeline`'s own `app/models/datasources.py`
@@ -196,7 +358,7 @@ export type PublicRunsList = {
 export async function fetchPublicRuns(limit = 12, sourceId?: string): Promise<PublicRunsList> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (sourceId) params.set("source_id", sourceId);
-  const res = await fetch(`${DATA_PIPELINE_API_URL}/ingestion/public/runs?${params}`);
+  const res = await fetch(`${INGESTION_API_URL}/ingestion/public/runs?${params}`);
   if (!res.ok) {
     throw new Error(`GET /v1/ingestion/public/runs failed: ${res.status}`);
   }
@@ -263,7 +425,7 @@ export async function triggerIngestionRun(
   };
   if (opts?.reason) headers["X-Reason"] = opts.reason;
 
-  const res = await fetch(`${DATA_PIPELINE_API_URL}/data-sources/${sourceId}/run`, {
+  const res = await fetch(`${INGESTION_API_URL}/data-sources/${sourceId}/run`, {
     method: "POST",
     headers,
     body: JSON.stringify({ force: opts?.force ?? false, deduplicate: true }),
@@ -349,7 +511,7 @@ export type BackfillStatus = {
  * "Idle" on every page load. No auth required, same reasoning as
  * `triggerBackfill`. */
 export async function fetchBackfillStatus(sourceId: string): Promise<BackfillStatus> {
-  const res = await fetch(`${DATA_PIPELINE_API_URL}/data-sources/${sourceId}/backfill/status`);
+  const res = await fetch(`${INGESTION_API_URL}/data-sources/${sourceId}/backfill/status`);
   if (!res.ok) {
     throw new Error(`GET /v1/data-sources/${sourceId}/backfill/status failed: ${res.status}`);
   }
@@ -367,7 +529,7 @@ export async function triggerBackfill(
   start: string,
   end: string,
 ): Promise<BackfillTrigger> {
-  const res = await fetch(`${DATA_PIPELINE_API_URL}/data-sources/${sourceId}/backfill`, {
+  const res = await fetch(`${INGESTION_API_URL}/data-sources/${sourceId}/backfill`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -385,43 +547,45 @@ export async function triggerBackfill(
 }
 
 // ────────────────────────────────────────────────────────────────────
-// Manually rebuilding the warehouse — POST /v1/ingestion/dbt-warehouse/build
+// Manually rebuilding the warehouse — POST /v1/dbt/build (services/waerehouse)
 // ────────────────────────────────────────────────────────────────────
 
-/** Shape of data-pipeline's `DbtRunResponse`. Unlike `RunTrigger`/
- * `BackfillTrigger`, this isn't a 202-queued shape — `dbt build` runs
- * synchronously within the request (offloaded via `asyncio.to_thread` so
- * it doesn't block the server's event loop, but the HTTP call itself
- * waits for the real exit code), since a build here typically finishes
- * in well under a minute. Give the trigger button its own busy state for
- * that duration, not `BackfillProgress`'s polling shape. */
+/** Shape of `services/waerehouse`'s `DbtRunResponse` (previously
+ * data-pipeline's — dbt always belonged to the warehouse service, this
+ * is real work moved to its actual owner, not a reshaped response).
+ * Unlike `RunTrigger`/`BackfillTrigger`, this isn't a 202-queued shape —
+ * `dbt build` runs synchronously within the request (offloaded via
+ * `asyncio.to_thread` so it doesn't block the server's event loop, but
+ * the HTTP call itself waits for the real exit code), since a build
+ * here typically finishes in well under a minute. Give the trigger
+ * button its own busy state for that duration, not `BackfillProgress`'s
+ * polling shape. */
 export type DbtBuildTrigger = {
   subcommand: string;
   target: string;
   exit_code: number;
 };
 
-/** Live call to `POST /v1/ingestion/dbt-warehouse/build` — the manual
- * escape hatch for TODO.md's backfill-section gap (a dashboard-triggered
- * backfill lands raw rows but never refreshes `raw_marts.*` on its own).
- * No auth required — deliberately open, same reasoning as
- * `triggerIngestionRun`/`triggerBackfill` (see this endpoint's own
- * comment in `pipelines/routes.py`). Distinct from the general-purpose,
- * admin-gated `/v1/dbt/{subcommand}` — this is a fixed, no-args `build`
- * only.
+/** Live call to `POST /v1/dbt/build` (`services/waerehouse`) — the
+ * manual escape hatch for a dashboard-triggered backfill landing raw
+ * rows but never refreshing `raw_marts.*` on its own. No auth required
+ * — deliberately open, same reasoning as
+ * `triggerIngestionRun`/`triggerBackfill`.
  *
- * A 409 means another build (from a concurrent manual trigger or a
- * backfill's auto-rebuild) is already running — surfaced via
- * `TriggerIngestionError.code === "dbt_build_in_progress"`, not silently
- * retried; the caller decides whether to tell the operator to wait. */
+ * A 409 means another build is already running — surfaced via
+ * `TriggerIngestionError.code === "dbt_build_in_progress"`, same code
+ * data-pipeline's old Redis-locked version used, now backed by a
+ * Postgres-native lock in `waerehouse` instead (no Redis dependency
+ * there) — not silently retried; the caller decides whether to tell
+ * the operator to wait. */
 export async function triggerDbtBuild(): Promise<DbtBuildTrigger> {
-  const res = await fetch(`${DATA_PIPELINE_API_URL}/ingestion/dbt-warehouse/build`, {
+  const res = await fetch(`${WAREHOUSE_API_URL}/dbt/build`, {
     method: "POST",
   });
   if (!res.ok) {
     const body = await res.json().catch(() => null);
     const message: string =
-      body?.error?.message ?? `POST /v1/ingestion/dbt-warehouse/build failed: ${res.status}`;
+      body?.error?.message ?? `POST /v1/dbt/build failed: ${res.status}`;
     throw new TriggerIngestionError(message, res.status, body?.error?.code ?? null);
   }
   return res.json();
@@ -431,12 +595,16 @@ export async function triggerDbtBuild(): Promise<DbtBuildTrigger> {
 // Manually triggering training — POST /v1/model/train
 // ────────────────────────────────────────────────────────────────────
 
-/** Shape of data-pipeline's `TrainTriggerResponse`. Unlike `RunTrigger`/
- * `BackfillTrigger`, there's no id to poll here -- the actual work runs
- * in a separate, independently-running consumer process (`train-worker`)
- * this trigger call never talks to directly. Poll forecast-api's
- * `GET /v1/model/versions` for a new version to appear instead (see
- * `fetchModelVersions()` in `lib/emissions.ts`). */
+/** Shape of forecast-api's `TrainTriggerResponse` (moved there from
+ * data-pipeline as part of the training-code migration -- forecast-api
+ * now owns `ml/train.py`, MLflow, and the warehouse connection, so the
+ * manual trigger + the consumer that acts on it live in the same
+ * service). Unlike `RunTrigger`/`BackfillTrigger`, there's no id to poll
+ * here -- the actual work runs in a separate, independently-running
+ * consumer process (`train-worker`) this trigger call never talks to
+ * directly. Poll forecast-api's `GET /v1/model/versions` for a new
+ * version to appear instead (see `fetchModelVersions()` in
+ * `lib/emissions.ts`). */
 export type TrainTrigger = {
   status: "queued";
   queued_at: string;
@@ -447,18 +615,18 @@ export type TrainTrigger = {
   triggered_by: string;
 };
 
-/** Live call to `POST /v1/model/train` (data-pipeline) -- publishes the
- * same training-trigger event the automatic (dbt-build-triggered) path
- * fires, just on demand. No auth required, same reasoning as
- * `triggerIngestionRun`/`triggerBackfill`. No "already in progress"
- * guard server-side -- multiple manual triggers just queue multiple
- * fine-tune events, harmless not conflicting (see that endpoint's own
- * docstring), so this doesn't need one either. */
+/** Live call to `POST /v1/model/train` (forecast-api) -- publishes the
+ * same training-trigger event shape `services/waerehouse`'s automatic
+ * (dbt-build-triggered) path fires, just on demand. No auth required,
+ * same reasoning as `triggerIngestionRun`/`triggerBackfill`. No
+ * "already in progress" guard server-side -- multiple manual triggers
+ * just queue multiple fine-tune events, harmless not conflicting (see
+ * that endpoint's own docstring), so this doesn't need one either. */
 export async function triggerTraining(opts?: {
   regions?: string[];
   windowHours?: number;
 }): Promise<TrainTrigger> {
-  const res = await fetch(`${DATA_PIPELINE_API_URL}/model/train`, {
+  const res = await fetch(`${FORECAST_API_URL}/model/train`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -475,12 +643,12 @@ export async function triggerTraining(opts?: {
   return res.json();
 }
 
-/** Shape of data-pipeline's `TrainingRunOut` (`GET /v1/model/training-runs`)
- * -- one `meta._training_log` row. `status === "running"` is the real
- * "is a training run in flight right now" signal (Model Operations
- * TODO.md Phase 4) -- nothing logged this anywhere before that table
- * existed, so `getActiveTasks()`'s `model_training` rows were always
- * fully fictional. */
+/** Shape of forecast-api's `TrainingRunOut` (`GET /v1/model/training-runs`,
+ * moved there alongside `triggerTraining` above) -- one
+ * `meta._training_log` row. `status === "running"` is the real "is a
+ * training run in flight right now" signal -- nothing logged this
+ * anywhere before that table existed, so `getActiveTasks()`'s
+ * `model_training` rows were always fully fictional. */
 export type TrainingRunLog = {
   id: string;
   model_name: string;
@@ -501,7 +669,7 @@ export type TrainingRunsList = {
 };
 
 export async function fetchTrainingRuns(limit = 20): Promise<TrainingRunsList> {
-  const res = await fetch(`${DATA_PIPELINE_API_URL}/model/training-runs?limit=${limit}`);
+  const res = await fetch(`${FORECAST_API_URL}/model/training-runs?limit=${limit}`);
   if (!res.ok) {
     throw new Error(`GET /v1/model/training-runs failed: ${res.status}`);
   }
@@ -650,7 +818,7 @@ export type FailedRunsList = {
 };
 
 export async function fetchPublicFailedRuns(limit = 50): Promise<FailedRunsList> {
-  const res = await fetch(`${DATA_PIPELINE_API_URL}/ingestion/public/failed?limit=${limit}`);
+  const res = await fetch(`${INGESTION_API_URL}/ingestion/public/failed?limit=${limit}`);
   if (!res.ok) {
     throw new Error(`GET /v1/ingestion/public/failed failed: ${res.status}`);
   }
@@ -686,7 +854,7 @@ export type RetryQueueList = {
 };
 
 export async function fetchPublicRetryQueue(limit = 50): Promise<RetryQueueList> {
-  const res = await fetch(`${DATA_PIPELINE_API_URL}/ingestion/public/retry-queue?limit=${limit}`);
+  const res = await fetch(`${INGESTION_API_URL}/ingestion/public/retry-queue?limit=${limit}`);
   if (!res.ok) {
     throw new Error(`GET /v1/ingestion/public/retry-queue failed: ${res.status}`);
   }
@@ -737,7 +905,7 @@ export type SchedulerInfo = {
 };
 
 export async function fetchPublicScheduler(): Promise<SchedulerInfo> {
-  const res = await fetch(`${DATA_PIPELINE_API_URL}/ingestion/public/scheduler`);
+  const res = await fetch(`${INGESTION_API_URL}/ingestion/public/scheduler`);
   if (!res.ok) {
     throw new Error(`GET /v1/ingestion/public/scheduler failed: ${res.status}`);
   }

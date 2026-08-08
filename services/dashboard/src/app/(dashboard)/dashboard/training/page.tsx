@@ -147,7 +147,7 @@ export default function TrainingPage() {
           <Card>
             <div className="mb-3 flex items-center justify-between">
               <h2 className="text-base font-semibold text-white">Recent Training Runs</h2>
-              <span className="text-[11px] text-white/40">GET /v1/model/training-runs (data-pipeline)</span>
+              <span className="text-[11px] text-white/40">GET /v1/model/training-runs (forecast-api)</span>
             </div>
             {runsError ? (
               <p className="py-6 text-center text-sm text-white/40">Couldn&apos;t load training runs ({runsError}).</p>

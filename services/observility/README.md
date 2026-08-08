@@ -413,9 +413,10 @@ docker compose up -d
 Monitoring a service that's deployed on a different machine instead?
 Prometheus's scrape targets are env-driven
 (`DATA_PIPELINE_TARGET`/`INGESTION_TARGET`/`WAREHOUSE_TARGET`/
-`FORECAST_API_TARGET` in `.env.example`) — point the relevant one at a
-real `host:port` reachable from wherever this stack runs, and that
-service no longer needs to be reachable via `ecolens_default` at all.
+`FORECAST_API_TARGET`/`RABBITMQ_TARGET` in `.env.example`) — point the
+relevant one at a real `host:port` reachable from wherever this stack
+runs, and that service no longer needs to be reachable via
+`ecolens_default` at all.
 See `../../docs/runbooks/independent-service-deployment.md` for the
 full picture of what else changes once services aren't all on one
 machine (Promtail/log collection is still Docker-socket-scoped to this

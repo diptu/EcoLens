@@ -1,40 +1,39 @@
 /**
  * Data-quality client for the ecoLens dashboard.
  *
- * All four functions here hit data-pipeline's unauthenticated `/public/*`
- * mirrors under `/v1/data-quality/*` (`services/data-pipeline/app/api/v1/data_quality/routes.py`)
- * -- added specifically because the dashboard has no way to hold a
- * bearer token for that service's own separate auth domain (same
- * reasoning as `lib/data-sources.ts`'s module docstring). None of these
- * response shapes carry anything sensitive -- confirmed against each
- * schema before adding its public mirror.
+ * **Cutover**: `fetchPublicDataQualitySummary()` -- the only one of
+ * these four functions anything actually calls (Executive Dashboard's
+ * "Data Quality Score"/"Open Risks" KPIs) -- now talks to
+ * `services/ingestion`'s `GET /v1/data-quality/summary/public`
+ * (`app/api/v1/data_quality/routes.py` there), not data-pipeline's.
+ * Field-for-field identical response shape (ingestion's
+ * `PublicDataQualitySummaryResponse` is a direct port). No auth
+ * required, same reasoning as `lib/data-sources.ts`'s module docstring
+ * — none of this response carries anything sensitive.
  *
- * `fetchPublicDataQualitySummary()` backs the Executive Dashboard's
- * "Data Quality Score"/"Open Risks" KPIs. `fetchPublicIssues`/
- * `fetchPublicOutliers`/`fetchPublicSchemaReport` exist for whoever
- * wires up the Data Quality & Anomalies page next -- its current
- * `Anomaly` shape (severity/method "rule"|"ml"|"hybrid"/a single 0-1
- * ML-confidence score/12 specific `AnomalyType` values) doesn't map
- * cleanly onto these real shapes (`DataQualityIssue`'s `category`/
- * `DataQualityOutlier`'s `z_score`+`expected_range` are a genuinely
- * different taxonomy, not a relabeling of the same fields) -- adopting
- * these needs a page redesign around what the real data actually looks
- * like, not a swap-in. See TODO.md.
+ * `fetchPublicIssues`/`fetchPublicOutliers`/`fetchPublicSchemaReport`
+ * below still point at data-pipeline — they back routes nothing in this
+ * dashboard calls yet (see each function's own docstring: they exist
+ * for whoever wires up the Data Quality & Anomalies page next, which
+ * needs a page redesign first, not a swap-in). Not ported to ingestion
+ * for the same reason they were never a priority on data-pipeline
+ * either — no live consumer to migrate.
  */
-import { DATA_PIPELINE_API_URL } from "./env";
+import { DATA_PIPELINE_API_URL, INGESTION_API_URL } from "./env";
 
-/** Shape of data-pipeline's `PublicDataQualitySummaryResponse`. */
+/** Shape of ingestion's `PublicDataQualitySummaryResponse`. */
 export type PublicDataQualitySummary = {
   as_of: string;
   data_quality_score_pct: number | null;
   open_risks_high_plus: number;
 };
 
-/** Live call to `GET /v1/data-quality/summary/public` -- throws on any
- * non-2xx or network failure so callers (e.g. the Executive Dashboard
- * KPIs) can fall back to a placeholder rather than show a wrong number. */
+/** Live call to `GET /v1/data-quality/summary/public` (ingestion) --
+ * throws on any non-2xx or network failure so callers (e.g. the
+ * Executive Dashboard KPIs) can fall back to a placeholder rather than
+ * show a wrong number. */
 export async function fetchPublicDataQualitySummary(): Promise<PublicDataQualitySummary> {
-  const res = await fetch(`${DATA_PIPELINE_API_URL}/data-quality/summary/public`);
+  const res = await fetch(`${INGESTION_API_URL}/data-quality/summary/public`);
   if (!res.ok) {
     throw new Error(`GET /v1/data-quality/summary/public failed: ${res.status}`);
   }

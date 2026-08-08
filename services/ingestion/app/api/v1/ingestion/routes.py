@@ -8,18 +8,22 @@ is a synthetic trigger id, not this one — see that schema's own
 docstring) but `POST /v1/ingest/{source}` and the CLI both cause a real
 one to exist.
 
-`GET /v1/ingestion/public/{pipelines,runs}` (2026-08-07,
-`services/ingestion/TODO.md`'s "Frontend integration" section) — this
-service's own equivalent of `services/data-pipeline`'s identically-named
-routes, which is what `services/dashboard` currently calls instead
-(nothing here yet). See `app.service.public_pipelines`'s own module
+`GET /v1/ingestion/public/{pipelines,runs,failed,retry-queue,scheduler}`
+(2026-08-07/08, `services/ingestion/TODO.md`'s "Frontend integration"
+section) — this service's own equivalent of `services/data-pipeline`'s
+identically-named routes, which is what `services/dashboard` used to
+call for all of these before the cutover (`lib/ingestion.ts`'s own
+module docstring). See `app.service.public_pipelines`'s own module
 docstring for what's the same/different about the query logic, and
 `app.schemas.ingest.public`'s docstrings for what's the same/different
-about the response shape. Named `/public/*` for API-shape parity with
-data-pipeline's routes (a real client switching between the two sees
-the same path suffix) even though, unlike data-pipeline, there's no
-non-public authenticated twin here to distinguish these *from* —
-every route in this service is already open (see below).
+about the response shape (`failed`/`retry-queue` are near-identical
+ports; `scheduler` is a real, honest simplification -- no `meta.
+pipelines` pause state or dbt pipeline exist here). Named `/public/*`
+for API-shape parity with data-pipeline's routes (a real client
+switching between the two sees the same path suffix) even though,
+unlike data-pipeline, there's no non-public authenticated twin here to
+distinguish these *from* — every route in this service is already open
+(see below).
 
 Open — no auth required for now, matching every other route in this
 service's current state.
@@ -36,11 +40,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.v1.deps import get_db
 from app.schemas.ingest import (
     IngestionRunOut,
+    PublicFailedRunsListResponse,
     PublicPipelinesListResponse,
+    PublicRetryQueueListResponse,
     PublicRunsListResponse,
+    PublicSchedulerResponse,
 )
 from app.service.ingest_runs import get_ingest_run
-from app.service.public_pipelines import list_pipelines_public, list_runs_public
+from app.service.public_pipelines import (
+    get_scheduler_status_public,
+    list_failed_public,
+    list_pipelines_public,
+    list_retry_queue_public,
+    list_runs_public,
+)
 
 router = APIRouter(prefix="/v1/ingestion", tags=["ingestion"])
 
@@ -81,3 +94,27 @@ async def list_runs_public_endpoint(
         limit=limit,
         cursor=cursor,
     )
+
+
+@router.get("/public/failed", response_model=PublicFailedRunsListResponse)
+async def list_failed_public_endpoint(
+    limit: int = Query(default=50, ge=1, le=200),
+    cursor: str | None = None,
+    db: AsyncSession = Depends(get_db),
+) -> PublicFailedRunsListResponse:
+    return await list_failed_public(db, limit=limit, cursor=cursor)
+
+
+@router.get("/public/retry-queue", response_model=PublicRetryQueueListResponse)
+async def list_retry_queue_public_endpoint(
+    limit: int = Query(default=50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+) -> PublicRetryQueueListResponse:
+    return await list_retry_queue_public(db, limit=limit)
+
+
+@router.get("/public/scheduler", response_model=PublicSchedulerResponse)
+async def get_scheduler_public_endpoint(
+    db: AsyncSession = Depends(get_db),
+) -> PublicSchedulerResponse:
+    return await get_scheduler_status_public(db)

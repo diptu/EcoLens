@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import time
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -39,12 +42,25 @@ class _FakeSession:
 class _FakeRedis:
     def __init__(self):
         self.store: dict[str, str] = {}
+        self.hashes: dict[str, dict[str, str]] = {}
 
     async def get(self, key):
         return self.store.get(key)
 
     async def set(self, key, value, ex=None):
         self.store[key] = value
+
+    async def hset(self, key, field, value):
+        self.hashes.setdefault(key, {})[field] = value
+
+    async def hgetall(self, key):
+        return dict(self.hashes.get(key, {}))
+
+    async def hdel(self, key, field):
+        self.hashes.get(key, {}).pop(field, None)
+
+    async def expire(self, key, seconds):
+        pass
 
 
 class _FakeRegistry:
@@ -270,3 +286,110 @@ class TestForecastEndpoint:
 
         assert first.status_code == second.status_code == 200
         assert first.json() == second.json()
+
+    def test_records_the_shortest_horizon_point_for_reconciliation(self, client):
+        """`TODO.md` Forecasting Phase 4's fallback mechanism -- a real
+        (non-fallback) response logs its first point to Redis so
+        `service/ml/forecast_reconciliation.py`'s background sweep can
+        later compare it against real demand."""
+        bundle = _build_bundle(lookback=8, horizon=4)
+        redis = _FakeRedis()
+        app.dependency_overrides[get_model_registry] = lambda: _FakeRegistry(
+            bundle=bundle
+        )
+        app.dependency_overrides[get_db] = lambda: _FakeSession(
+            demand_rows=_synthetic_rows(40)
+        )
+        app.dependency_overrides[get_redis_client] = lambda: redis
+        try:
+            response = client.get("/v1/forecast?region=NSW1")
+        finally:
+            app.dependency_overrides.clear()
+
+        assert response.status_code == 200
+        first_point = response.json()["points"][0]
+        served_key = "forecast_served:lstm_demand:NSW1"
+        assert served_key in redis.hashes
+        (recorded,) = redis.hashes[served_key].values()
+        recorded_payload = json.loads(recorded)
+        assert recorded_payload["p50_mw"] == pytest.approx(first_point["p50"])
+
+    def test_serves_the_baseline_when_the_circuit_breaker_is_open(self, client):
+        """Same `TODO.md` item -- once the forecast-quality breaker for
+        `(model, region)` is open, `GET /v1/forecast` must serve the
+        seasonal-naive baseline instead of the real model, and say so
+        honestly via `served_by`."""
+        bundle = _build_bundle(lookback=8, horizon=4)
+        redis = _FakeRedis()
+        # Simulates an open breaker -- same key shape
+        # `ForecastCircuitBreaker`'s own `_opened_at_key` builds.
+        redis.store["forecast_circuit_breaker:lstm_demand:NSW1:opened_at"] = str(
+            time.time()
+        )
+        app.dependency_overrides[get_model_registry] = lambda: _FakeRegistry(
+            bundle=bundle
+        )
+        app.dependency_overrides[get_db] = lambda: _FakeSession(
+            demand_rows=_synthetic_rows(2500)
+        )
+        app.dependency_overrides[get_redis_client] = lambda: redis
+        try:
+            response = client.get("/v1/forecast?region=NSW1")
+        finally:
+            app.dependency_overrides.clear()
+
+        assert response.status_code == 200, response.json()
+        body = response.json()
+        assert body["served_by"] == "baseline_fallback"
+        assert body["model"] == "seasonal_naive"
+        assert len(body["points"]) == bundle.horizon
+        # A fallback response must never be logged for reconciliation --
+        # there'd be nothing meaningful to reconcile a baseline against
+        # itself for.
+        assert redis.hashes == {}
+
+    def test_applies_the_adaptive_calibration_scale_to_the_served_interval(self, client):
+        """`TODO.md` Forecasting Phase 4's "widen or tighten uncertainty
+        bounds" item -- a non-default `adaptive_calibration.py` scale
+        already stored for `(model, region)` must actually widen (or
+        narrow) what `GET /v1/forecast` serves, not just sit unused in
+        Redis."""
+        redis = _FakeRedis()
+        # One bundle (one randomly-initialized model), reused for both
+        # requests -- comparing two *separately* constructed bundles
+        # would compare two different random weight initializations, not
+        # the effect of the scale. Mutating `bundle.version` between the
+        # two calls (rather than the scale, which isn't part of the
+        # cache key at all) is what keeps the second request from
+        # hitting the first's cached response.
+        bundle = _build_bundle(lookback=8, horizon=4)
+        app.dependency_overrides[get_model_registry] = lambda: _FakeRegistry(
+            bundle=bundle
+        )
+        app.dependency_overrides[get_db] = lambda: _FakeSession(
+            demand_rows=_synthetic_rows(40)
+        )
+        app.dependency_overrides[get_redis_client] = lambda: redis
+        try:
+            bundle.version = "1"
+            unscaled_response = client.get("/v1/forecast?region=NSW1")
+
+            redis.store["forecast_calibration_scale:lstm_demand:NSW1"] = "2.0"
+            bundle.version = "2"
+            scaled_response = client.get("/v1/forecast?region=NSW1")
+        finally:
+            app.dependency_overrides.clear()
+
+        assert unscaled_response.status_code == scaled_response.status_code == 200
+        unscaled_point = unscaled_response.json()["points"][0]
+        scaled_point = scaled_response.json()["points"][0]
+        # p50 (the point estimate) is untouched by the scale -- only the
+        # interval around it widens.
+        unscaled_half_width = unscaled_point["p50"] - unscaled_point["p10"]
+        scaled_half_width = scaled_point["p50"] - scaled_point["p10"]
+        # `abs=1.0`, not a tight `rel` tolerance -- `_build_response`
+        # rounds `p10`/`p50`/`p90` to 1 decimal *independently*, so two
+        # half-widths each built from independently-rounded numbers can
+        # legitimately differ from an exact 2x relationship by a couple
+        # tenths of a MW even when the underlying scale really is applied.
+        assert scaled_half_width == pytest.approx(unscaled_half_width * 2.0, abs=1.0)

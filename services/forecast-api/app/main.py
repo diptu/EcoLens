@@ -21,7 +21,11 @@ from app.core.config import get_settings
 from app.core.errors import ApiError, cors_allow_origin, api_error_handler
 from app.core.logging import configure_logging, get_logger
 from app.core.middleware import CacheControlMiddleware
-from app.db.session import dispose, get_engine
+from app.core.tracing import configure_tracing
+from app.db.session import dispose, get_engine, get_session
+from app.db.redis import get_redis
+from app.service.ml.energy_registry import EnergyModelRegistry
+from app.service.ml.forecast_reconciliation import watch_and_reconcile
 from app.service.ml.registry import ModelRegistry
 
 logger = get_logger(__name__)
@@ -30,11 +34,22 @@ logger = get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging()
+    configure_tracing()
     get_engine()
 
     settings = get_settings()
     registry = ModelRegistry(settings.mlflow_registry_model_name)
     app.state.model_registry = registry
+
+    # Second, independent registry for the multi-task demand +
+    # generation-mix model (`ml/energy_registry.py`) -- served alongside
+    # the single-task model above, not instead of it. Same atomic-
+    # pointer-swap hot-reload pattern, same startup/shutdown handling,
+    # deliberately duplicated rather than generalising `ModelRegistry`
+    # into one that juggles two structurally different bundle shapes
+    # (see `energy_registry.py`'s own module docstring).
+    energy_registry = EnergyModelRegistry(settings.energy_forecast_model_name)
+    app.state.energy_model_registry = energy_registry
 
     # Loads whatever's in Production *before* accepting traffic (so the
     # very first request doesn't 503 with "model not loaded" just because
@@ -56,15 +71,51 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception as exc:
         logger.error("startup.initial_model_load_failed", error=str(exc))
 
+    try:
+        await asyncio.wait_for(energy_registry.refresh(), timeout=10.0)
+    except TimeoutError:
+        logger.error("startup.initial_energy_model_load_timed_out")
+    except Exception as exc:
+        logger.error("startup.initial_energy_model_load_failed", error=str(exc))
+
     watch_task = asyncio.create_task(
         registry.watch(settings.model_reload_interval_seconds)
     )
+    energy_watch_task = asyncio.create_task(
+        energy_registry.watch(settings.model_reload_interval_seconds)
+    )
 
-    logger.info("forecast_api_startup", model_loaded=registry.bundle is not None)
+    # `TODO.md` Forecasting Phase 4's fallback mechanism -- reconciles
+    # what `GET /v1/forecast` served against real demand once it lands,
+    # driving `service/ml/forecast_breaker.py`'s circuit breaker. The 6
+    # regions here match `GET /v1/regions`'s own static list (`api/v1/
+    # regions/routes.py`) -- "NEM" itself is deliberately excluded, same
+    # scope limitation the forecast route's own breaker check documents.
+    reconcile_task = asyncio.create_task(
+        watch_and_reconcile(
+            get_redis(),
+            get_session,
+            model_names_and_regions=[
+                (settings.mlflow_registry_model_name, region)
+                for region in ("NSW1", "QLD1", "VIC1", "SA1", "TAS1", "WEM")
+            ],
+            interval_seconds=settings.forecast_reconciliation_interval_seconds,
+            error_threshold_pct=settings.forecast_error_threshold_pct,
+            target_alpha=settings.conformal_alpha,
+        )
+    )
+
+    logger.info(
+        "forecast_api_startup",
+        model_loaded=registry.bundle is not None,
+        energy_model_loaded=energy_registry.bundle is not None,
+    )
     try:
         yield
     finally:
         watch_task.cancel()
+        energy_watch_task.cancel()
+        reconcile_task.cancel()
         await dispose()
         logger.info("forecast_api_shutdown")
 

@@ -55,6 +55,17 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - apk add --no-cache gettext >/dev/null && envsubst < /template/prometheus.yml.template > /config/prometheus.yml
+    # `TODO.md` Observability Phase 6's "Docker Deployment" -- real
+    # `deploy.resources` quotas across this whole stack, not just this
+    # one service (see each service below for its own number). Modest
+    # even for a one-shot `envsubst` init container -- generous headroom
+    # over what `apk add gettext` + rendering one small template
+    # actually needs, not a tuned-tight number.
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
 
   prometheus:
     image: prom/prometheus:v2.54.1
@@ -90,6 +101,14 @@ services:
         condition: service_completed_successfully
       alertmanager:
         condition: service_healthy
+    # Prometheus is this stack's heaviest steady-state consumer (holds
+    # every scraped series in memory + TSDB writes) -- the largest quota
+    # here, not a copy-pasted default.
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
 
   # Container-level CPU/memory metrics for prometheus/rules/platform.yml's
   # "High CPU / memory usage" alerts -- none of the four business
@@ -108,6 +127,11 @@ services:
     devices:
       - /dev/kmsg:/dev/kmsg
     privileged: true
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
 
   # ── Alerting ─────────────────────────────────────────────────────────────
   # alertmanager.yml.template isn't a real Alertmanager config on its own
@@ -126,6 +150,11 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - test -n "$$ALERTMANAGER_WEBHOOK_URL" || (echo "ALERTMANAGER_WEBHOOK_URL is not set -- copy .env.example to .env and fill it in" >&2 && exit 1); apk add --no-cache gettext >/dev/null && envsubst < /template/alertmanager.yml.template > /config/alertmanager.yml
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
 
   alertmanager:
     image: prom/alertmanager:v0.27.0
@@ -146,6 +175,11 @@ services:
     depends_on:
       alertmanager-config:
         condition: service_completed_successfully
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 256M
 
   # ── Logs ─────────────────────────────────────────────────────────────────
   loki:
@@ -166,6 +200,11 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
 
   # Ships every ecolens-project container's stdout JSON logs into Loki --
   # README.md's "a log collector such as Fluent Bit, Vector, or an
@@ -183,6 +222,11 @@ services:
     depends_on:
       loki:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 256M
 
   # ── Traces ───────────────────────────────────────────────────────────────
   otel-collector:
@@ -201,6 +245,17 @@ services:
     depends_on:
       tempo:
         condition: service_healthy
+    # 512M container ceiling against `otel-collector-config.yml`'s own
+    # `memory_limiter` processor (256 MiB soft/64 MiB spike, internal to
+    # the collector process) -- deliberately roughly 2x that internal
+    # figure, so the container limit is never what actually kills the
+    # process; `memory_limiter` shedding load early is meant to be the
+    # real backstop, not this.
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
 
   tempo:
     image: grafana/tempo:2.6.1
@@ -220,6 +275,11 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
 
   # ── Dashboards ───────────────────────────────────────────────────────────
   grafana:
@@ -246,6 +306,11 @@ services:
         condition: service_healthy
       tempo:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
 
 volumes:
   promdata:

@@ -82,6 +82,29 @@ circuit_breaker_state = Gauge(
     ["source"],
     registry=REGISTRY,
 )
+# `TODO.md` Observability Phase 1's "Custom Metrics Instrumentation" --
+# an anomaly-flag-rate signal was explicitly called out as missing.
+# Incremented once per flagged row (not once per run) in `pipeline.
+# tasks._common.standard_run` -- `meta.anomalies` already has the
+# per-row detail; this is the aggregate rate a Grafana panel/alert can
+# actually threshold on.
+anomaly_flags_total = Counter(
+    "ecolens_anomaly_flags_total",
+    "Rows flagged by pipeline.anomaly's hybrid detector, by source.",
+    ["source"],
+    registry=REGISTRY,
+)
+# Same gap's other half: a generic external-API-polling-latency signal.
+# Observed in `pipeline.http_retry.fetch_with_retry` around the whole
+# retry loop (including any backoff sleep) -- "how long did it actually
+# take to get a usable response from this source", not just the final
+# successful attempt in isolation.
+http_poll_duration_seconds = Histogram(
+    "ecolens_http_poll_duration_seconds",
+    "External API polling duration in seconds (including retries), by source.",
+    ["source"],
+    registry=REGISTRY,
+)
 
 
 def metrics_as_text() -> bytes:

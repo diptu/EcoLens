@@ -2,947 +2,1485 @@
 
 # 🌱 ecoLens
 
-### Near-real-time electricity demand forecasting & carbon-footprint intelligence for the Australian National Electricity Market.
+### Near-real-time electricity demand forecasting & carbon-footprint intelligence for the Australian energy grid.
 
-**3 micro-services** · **Docker-first** · **Production-grade**
+**Event-driven · Probabilistic Forecasting · Carbon Intelligence · MLOps · Observability**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Services: 3](https://img.shields.io/badge/micro--services-3-2ea44f.svg)](docs/microservices-action-plan.md)
-[![Docker](https://img.shields.io/badge/docker-compose-2496ED.svg)](docker-compose.yml)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
-[![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
-[![Type-checked: mypy](https://img.shields.io/badge/type%20checked-mypy-blue.svg)](http://mypy-lang.org/)
 [![FastAPI](https://img.shields.io/badge/API-FastAPI-009688.svg)](https://fastapi.tiangolo.com)
 [![Next.js 15](https://img.shields.io/badge/Frontend-Next.js%2015-black.svg)](https://nextjs.org)
-[![Prefect](https://img.shields.io/badge/Orchestration-Prefect-024dfd.svg)](https://prefect.io)
 [![PyTorch 2.x](https://img.shields.io/badge/ML-PyTorch%202.x-ee4c2c.svg)](https://pytorch.org)
-[![MLflow](https://img.shields.io/badge/Tracking-MLflow-0194E2.svg)](https://mlflow.org)
+[![MLflow](https://img.shields.io/badge/MLOps-MLflow-0194E2.svg)](https://mlflow.org)
 [![dbt](https://img.shields.io/badge/Transform-dbt-FF694B.svg)](https://www.getdbt.com)
-[![NeonDB](https://img.shields.io/badge/Warehouse-NeonDB%20(Postgres%2016)-336791.svg)](https://neon.tech)
+[![PostgreSQL](https://img.shields.io/badge/Warehouse-PostgreSQL%2016-336791.svg)](https://www.postgresql.org)
 [![DuckDB](https://img.shields.io/badge/Staging-DuckDB-FFF000.svg)](https://duckdb.org)
 [![RabbitMQ](https://img.shields.io/badge/Events-RabbitMQ-FF6600.svg)](https://www.rabbitmq.com)
 [![Redis 7](https://img.shields.io/badge/Cache-Redis%207-DC382D.svg)](https://redis.io)
-[![Security: bandit](https://img.shields.io/badge/security-bandit-yellow.svg)](https://github.com/PyCQA/bandit)
-[![OpenSSF](https://img.shields.io/badge/OpenSSF-Scorecard-blue.svg)](https://scorecard.dev/viewer/?uri=github.com/diptu/ecoLens)
+[![OpenTelemetry](https://img.shields.io/badge/Observability-OpenTelemetry-000000.svg)](https://opentelemetry.io)
 
-**ecoLens** turns raw AEMO and OpenElectricity data into operational carbon intelligence:
-a PyTorch-LSTM demand forecaster, an emissions engine grounded in the live NEM/WEM
-energy-mix, an end-to-end MLOps pipeline (DuckDB staging → RabbitMQ → NeonDB/Postgres
-raw → dbt marts → MLflow → FastAPI → Redis), and a real-time Next.js dashboard.
+**ecoLens** is an end-to-end energy intelligence platform that transforms near-real-time
+electricity-system data into demand forecasts, generation-mix predictions, carbon
+intelligence, and actionable operational insights.
+
+The platform combines event-driven data engineering, probabilistic time-series
+forecasting, adaptive machine learning, carbon accounting, MLOps, and centralized
+observability into a decoupled microservice architecture.
 
 [Overview](#-overview) ·
 [Architecture](#-architecture) ·
-[Quickstart](#-quickstart) ·
-[ML Pipeline](#-ml-pipeline) ·
-[API](#-api) ·
-[Frontend](#-frontend) ·
-[Deployment](#-deployment) ·
-[Contributing](#-contributing)
+[Data Pipeline](#-data-pipeline) ·
+[ML Pipeline](#-ml--forecasting) ·
+[Carbon Intelligence](#-carbon-intelligence) ·
+[Observability](#-observability) ·
+[Quickstart](#-quickstart)
 
 </div>
 
 ---
 
-## 📑 Table of contents
+## 📑 Table of Contents
 
 1. [Overview](#-overview)
-2. [Why ecoLens?](#-why-ecolens)
-3. [Key capabilities](#-key-capabilities)
+2. [What ecoLens Answers](#-what-ecolens-answers)
+3. [Key Capabilities](#-key-capabilities)
 4. [Architecture](#-architecture)
-5. [Tech stack](#-tech-stack)
-6. [Data sources](#-data-sources)
-7. [Repository layout](#-repository-layout)
-8. [Quickstart](#-quickstart)
-9. [ML pipeline](#-ml-pipeline)
-10. [API reference](#-api-reference)
-11. [Frontend](#-frontend)
-12. [Emissions model](#-emissions-model)
-13. [Observability](#-observability)
-14. [Testing](#-testing)
-15. [Deployment](#-deployment)
-16. [Performance & SLOs](#-performance--slos)
-17. [Security](#-security)
-18. [Roadmap](#-roadmap)
-19. [Contributing](#-contributing)
-
-> 📘 The full 3-service design, contracts, and rollout plan live in
-> [`docs/microservices-action-plan.md`](docs/microservices-action-plan.md).
-20. [License & attribution](#-license--attribution)
-21. [Citation](#-citation)
-22. [Maintainers](#-maintainers)
-
----
-
-## 🌍 Overview
-
-`ecoLens` is a **production-grade carbon-footprint platform** for Australian energy
-consumers, analysts, and sustainability teams. It does three things, end-to-end:
-
-1. **Forecasts short-term electricity demand** for every NEM region
-   (NSW1, QLD1, VIC1, SA1, TAS1) and the WEM (SWIS, WA) with a multivariate
-   PyTorch LSTM trained on AEMO historical dispatch data plus BoM weather covariates.
-2. **Computes operational Scope-2 emissions** by combining the forecast (or
-   live smart-meter data) with the **live NEM/WEM generation mix** sourced from
-   [OpenElectricity](https://explore.openelectricity.org.au/energy/nem/),
-   applying fuel-specific emissions intensity factors published by AEMO / DCCEEW.
-3. **Exposes both as a near-real-time service** through a FastAPI backend
-   (Redis-cached, Postgres-backed) and a Next.js 15 / TypeScript dashboard that
-   refreshes on the AEMO 5-minute dispatch cycle.
-
-The original `diptu/ecoLens` repo was a five-file FastAPI prototype. This rewrite is
-the production refactor: typed end-to-end, containerised, traced, tested, and
-deployable.
+5. [Microservices](#-microservices)
+6. [Data Pipeline](#-data-pipeline)
+7. [Event-Driven Warehousing](#-event-driven-warehousing)
+8. [Storage Architecture](#-storage-architecture)
+9. [ML & Forecasting](#-ml--forecasting)
+10. [Probabilistic Forecasting](#-probabilistic-forecasting)
+11. [Adaptive Learning](#-adaptive-learning)
+12. [Anomaly Detection](#-anomaly-detection)
+13. [Model Optimization](#-model-optimization)
+14. [Carbon Intelligence](#-carbon-intelligence)
+15. [MLOps & Model Lifecycle](#-mlops--model-lifecycle)
+16. [Observability](#-observability)
+17. [Frontend](#-frontend)
+18. [Data Sources](#-data-sources)
+19. [Technology Stack](#-technology-stack)
+20. [Repository Structure](#-repository-structure)
+21. [Quickstart](#-quickstart)
+22. [API](#-api)
+23. [Testing & Quality](#-testing--quality)
+24. [Security](#-security)
+25. [Deployment](#-deployment)
+26. [Roadmap](#-roadmap)
+27. [Contributing](#-contributing)
+28. [License & Attribution](#-license--attribution)
 
 ---
 
-## 💡 Why ecoLens?
+# 🌍 Overview
 
-| Pain point | What ecoLens does |
-| --- | --- |
-| Carbon reports are lagging and back-of-envelope | Live, dispatch-interval emissions tied to the actual energy mix |
-| No demand signal for procurement or sustainability planning | Multivariate LSTM demand forecast at 30-min / day / week horizons |
-| ML is a notebook graveyard | dbt → MLflow → FastAPI → Next.js, all CI'd, all reproducible |
-| Open data is scattered across AEMO, BoM, DCCEEW, OpenElectricity | One normalised warehouse, one canonical emissions model, one API |
-| Australians don't have a clear Scope-2 number | Region-aware, fuel-mix-aware, unit-aware kgCO₂e/kWh figure |
+**ecoLens** is an end-to-end electricity demand forecasting and carbon-footprint
+intelligence platform designed around the Australian electricity market.
 
----
+It bridges operational energy data and environmental intelligence by combining:
 
-## ✨ Key capabilities
+* Near-real-time electricity-system data ingestion
+* Automated anomaly detection
+* Event-driven data warehousing
+* Historical and real-time energy analytics
+* Probabilistic electricity demand forecasting
+* Generation-mix forecasting
+* Adaptive and incremental machine learning
+* Carbon intensity estimation
+* Future emissions estimation
+* Model lifecycle management
+* Centralized observability
+* Interactive energy and sustainability dashboards
 
-- 🔮 **Demand forecasting** — multivariate PyTorch `nn.LSTM` with
-  weather + calendar + price + lag features, supporting both
-  point forecasts and conformal prediction intervals.
-- ⚡ **Live emissions** — fuel-specific CO₂e intensity × generation, refreshed
-  every 5 min from OpenElectricity's NEM endpoint, with WEM/SWIS fallback.
-- 🧮 **Carbon footprint calculator** — user-entered kWh → kgCO₂e using the
-  regional intensity at the time of consumption (or a chosen historical window).
-- 🗄️ **Event-driven raw landing** — each fetch stages into embedded, local
-  **DuckDB** first (no MongoDB, no MinIO/S3 needed for this), then a
-  RabbitMQ event decouples ingestion from the warehouse write, which copies
-  the staged data into **NeonDB/PostgreSQL** `raw.*` as an unmodified audit
-  copy.
-- 📊 **Marts & analytics** — dbt transforms `raw.*` into curated
-  **NeonDB/PostgreSQL** marts, producing `fct_energy_demand`,
-  `fct_emissions_5min`, `fct_carbon_intensity`, `dim_energy_mix`,
-  `dim_facility` — queryable, tested, documented.
-- 🛰️ **Real-time service** — FastAPI + Redis cache (60 s TTL on read paths)
-  + Postgres (history) + Pydantic v2 schemas + OpenAPI 3.1.
-- 🖥️ **Next.js 15 dashboard** — App Router, React Server Components,
-  TanStack Query, Recharts, Tailwind, dark mode, full a11y.
-- 🔁 **End-to-end MLOps** — Prefect/Airflow DAG ingests → dbt transforms →
-  PyTorch trains → MLflow tracks/registers → model promoted via CI → served.
-- 🔐 **Hardened** — non-root containers, SBOM, signed images, secret scanning,
-  Bandit, Trivy, OpenSSF Scorecard, least-privilege IAM.
+The platform is designed to answer two fundamental questions:
 
----
+> **How much electricity will be needed over the next 24 hours?**
 
-## 🏗️ Architecture
+and
 
-ecoLens is a **3-service micro-service system** — no more, no less. Two
-user-facing services (the API and the dashboard) sit on an `edge` Docker
-network; the data-pipeline worker is on the `internal` network only and is
-never reachable from the public internet. All three share a small platform
-of infra dependencies (Postgres/NeonDB, RabbitMQ, Redis, MinIO, MLflow, observability).
-No MongoDB — `data-pipeline` stages locally in embedded, file-backed **DuckDB**
-instead (no separate database server needed for that layer).
+> **How clean will that electricity be based on the expected generation mix?**
 
-```
-                ┌────────────────────────────────────────────────────┐
-                │                       USERS                         │
-                └─────────────────────────┬──────────────────────────┘
-                                          │ HTTPS
-                                          ▼
-                            ┌──────────────────────────┐
-                            │  ③  dashboard  (Next.js) │
-                            │  :3000  • public         │
-                            │  BFF routes → forecast-api│
-                            └─────────────┬────────────┘
-                                          │ /v1/* JSON
-                                          ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                                                                         │
-│  ① forecast-api   (FastAPI)              ② data-pipeline  (Prefect)    │
-│  :8000  • public / dev-only              headless  • internal only      │
-│  • /v1/forecast, /v1/emissions,          • ingest AEMO/BoM/OE → DuckDB │
-│    /v1/footprint, /v1/healthz              (local staging)              │
-│  • loads LSTM from MLflow on boot        • DuckDB → RabbitMQ event →    │
-│  • Redis cache, Postgres read              Postgres raw.* (async sync)  │
-│                                           • dbt build (Postgres raw →    │
-│                                             marts)                      │
-│                                           • train PyTorch LSTM           │
-│                                           • register model in MLflow     │
-│                                                                         │
-└────────────┬──────────────────┬────────────────┬──────────────────┬────┘
-             │                  │                │                  │
-             ▼                  ▼                ▼                  ▼
-       ┌──────────┐       ┌──────────┐    ┌──────────┐        ┌──────────┐
-       │ rabbitmq │       │ postgres │    │  redis   │        │  minio   │
-       │ (events) │       │ (NeonDB) │    │ (cache)  │        │  (S3)    │
-       └──────────┘       └────┬─────┘    └──────────┘        └────┬─────┘
-                                │                                   │
-                                └────────────────┬──────────────────┘
-                                                 ▼
-                                           ┌──────────┐
-                                           │  mlflow  │  ← model artifacts, params, metrics
-                                           │ (track)  │  ← forecast-api watches this; pipeline writes it
-                                           └──────────┘
+Rather than treating forecasting and carbon accounting as separate problems,
+ecoLens connects them into a single analytical pipeline.
 
-  Platform infra (NOT services — no app code, no release cadence):
-    postgres (NeonDB) · rabbitmq · redis · minio · mlflow · prometheus · grafana · loki
-    (DuckDB is embedded inside data-pipeline, not a separate infra container)
+```text
+External Energy Data
+        │
+        ▼
+┌───────────────────┐
+│    Ingestion      │
+│ AEMO / BoM / OE   │
+└─────────┬─────────┘
+          │
+          ▼
+┌───────────────────┐
+│ Anomaly Detection │
+│ Rules + ML Models │
+└─────────┬─────────┘
+          │
+          ▼
+┌───────────────────┐
+│ DuckDB Staging    │
+└─────────┬─────────┘
+          │
+       RabbitMQ
+          │
+          ▼
+┌───────────────────┐
+│ PostgreSQL Raw    │
+│   raw.* schema    │
+└─────────┬─────────┘
+          │
+          ▼
+┌───────────────────┐
+│       dbt         │
+│ Transformations   │
+└─────────┬─────────┘
+          │
+          ▼
+┌────────────────────────────┐
+│ Curated Analytical Marts   │
+└────────────┬───────────────┘
+             │
+       ┌─────┴──────┐
+       ▼            ▼
+ Forecasting    Carbon Engine
+       │            │
+       └─────┬──────┘
+             ▼
+       FastAPI Services
+             │
+             ▼
+       Next.js Dashboard
 ```
 
-| # | Service | Port | Tier | Owns | Talks to |
-|---|---|---|---|---|---|
-| 1 | **`forecast-api`** | 8000 | edge | model serving, `/v1/*` contract, Redis cache, Postgres reads | `postgres`, `redis`, `mlflow` |
-| 2 | **`data-pipeline`** | — | worker | AEMO/BoM/OE ingest → DuckDB staging → RabbitMQ event → Postgres `raw.*`, dbt transforms, training, MLflow registration | `postgres`, `rabbitmq`, `redis`, `minio`, `mlflow`, external APIs |
-| 3 | **`dashboard`** | 3000 | edge | Next.js UI, BFF routes | `forecast-api` only |
-
-**Key boundary rules:**
-
-- `dashboard` never touches Postgres, Redis, RabbitMQ, or MLflow. It only calls `forecast-api`.
-- Only `data-pipeline` writes to the warehouse, and it does so in two decoupled
-  steps: each fetch lands in local DuckDB first, then a RabbitMQ event tells
-  the warehousing side of `data-pipeline` to copy that staged data into
-  Postgres `raw.*` as an unmodified audit copy — see `overview.md` for why
-  ingestion and warehousing are deliberately decoupled this way. No MongoDB
-  or MinIO/S3 dependency is involved in this path; MinIO is only used as
-  MLflow's artifact store, a separate concern. `forecast-api` never writes to
-  the warehouse — it only reads the dbt-built Postgres marts.
-- `data-pipeline` never serves HTTP user traffic. It writes to the warehouse
-  and registers the model in MLflow; `forecast-api` watches MLflow and
-  hot-reloads the model. **No direct API call between the two.**
-- The three services have **separate `pyproject.toml` / `package.json` files,
-  separate Dockerfiles, separate CI jobs, and separate image tags**.
-
-The full design rationale and rollout plan live in
-[`docs/microservices-action-plan.md`](docs/microservices-action-plan.md).
-A bigger Mermaid diagram lives in [`docs/architecture.md`](docs/architecture.md).
-
 ---
 
-## 🧰 Tech stack
+# ❓ What ecoLens Answers
 
-| Layer | Technology | Why |
-| --- | --- | --- |
-| Language | **python 3.12**, **TypeScript 5.x** | Strict typing end-to-end |
-| ML | **PyTorch 2.x**, **Optuna**, **PyTorch Lightning** | LSTM + structured training loops |
-| Data | **pandas 2**, **polars**, **numpy** | Polars for ingest, pandas for modeling |
-| Raw staging | **DuckDB** (embedded, file-backed) | Lightweight local staging before warehousing — no MongoDB, no separate DB server for this layer |
-| Events | **RabbitMQ** | Decouples ingestion from warehousing — a "new data staged" event lets the warehouse sync run independently of the ingest cadence |
-| Warehouse | **NeonDB** (managed **PostgreSQL 16**) + **TimescaleDB** where available | Serverless Postgres; `raw.*` holds the unmodified audit copy synced from DuckDB via RabbitMQ; time-series hypertables for the transformed marts |
-| Transform | **dbt-core** + **dbt-postgres** | Tested, versioned SQL models against `raw.*` in NeonDB, builds staging → intermediate → marts |
-| Tracking | **MLflow 2.x** | Experiment tracking + model registry |
-| Orchestration | **Prefect 2** (or Airflow) | Schedules ingest, DuckDB→RabbitMQ→Postgres sync, dbt, training, deploy |
-| Serving | **FastAPI**, **Uvicorn**, **Pydantic v2** | Async, OpenAPI 3.1 |
-| Cache | **Redis 7** | Forecast hot-path cache |
-| Frontend | **Next.js 15**, **React 19**, **TanStack Query**, **Recharts**, **Tailwind 4**, **shadcn/ui** | RSC + streaming |
-| Auth | **Auth.js** + OIDC (Keycloak / Auth0) | Standards-based |
-| Containers | **Docker**, **distroless** final images | Small, secure |
-| CI/CD | **GitHub Actions**, **Argo CD** (k8s) | PR checks → gitops |
-| Observability | **OpenTelemetry**, **Prometheus**, **Grafana**, **Loki** | Traces + metrics + logs |
-| Quality | **ruff**, **mypy**, **pytest**, **bandit**, **trivy** | Lint, type-check, test, scan |
+### 1. Future electricity demand
 
----
+The forecasting system estimates electricity demand over future horizons using
+historical demand, weather, calendar, market, and generation features.
 
-## 📚 Data sources
+Forecasts are represented probabilistically rather than as a single deterministic
+number.
 
-| Source | What | Licence | How we ingest |
-| --- | --- | --- | --- |
-| [AEMO WEM](https://data.wa.aemo.com.au/) | Historical SWIS demand, generation, prices | AEMO open data | Scheduled CSV pull → **DuckDB** (staging) → RabbitMQ → **Postgres `raw.*`** → dbt staging |
-| [AEMO NEM](https://aemo.com.au/energy-systems/electricity/national-electricity-market-nem/data-nem) | NEM dispatch (5-min) | AEMO open data | REST + MMS polling → **DuckDB** (staging) → RabbitMQ → **Postgres `raw.*`** → dbt staging |
-| [OpenElectricity (OpenNEM)](https://explore.openelectricity.org.au/energy/nem/) | Generation mix, emissions, price | CC BY-NC 4.0 | Official `openelectricity` Python SDK → **DuckDB** (staging) → RabbitMQ → **Postgres `raw.*`** → dbt staging |
-| [BoM](http://www.bom.gov.au/climate/data/) | Temperature, radiation | CC BY 3.0 AU | Scheduled API pull → **DuckDB** (staging) → RabbitMQ → **Postgres `raw.*`** → dbt staging |
-| [DCCEEW / NGER](https://www.dcceew.gov.au/energy/energy-data/national-greenhouse-and-energy-reporting) | Facility emissions factors | CC BY 4.0 | Seeded directly into `seeds/emissions_factors.csv` (dbt seed, not an API fetch) |
-| [Electricity Maps – AU-WA](https://app.electricitymaps.com/datasets/AU-WA) | Hourly carbon intensity, WA | ODbL | Optional enrichment → **DuckDB** (staging) → RabbitMQ → **Postgres `raw.*`** → dbt staging |
-
-Every source above except the DCCEEW/NGER seed follows the same shape: each
-fetch lands in embedded, local **DuckDB** first (no MongoDB, no separate
-database server for this layer); once staged, a RabbitMQ event decouples
-ingestion from warehousing, so the warehouse sync copies that data into a
-`raw.*` table in **NeonDB/PostgreSQL** as an unmodified audit copy —
-independently of the ingest cadence. From `raw.*`, dbt's staging →
-intermediate → marts layers take over. See `overview.md` for the full
-mechanism.
-
-> **Attribution:** Wherever we publish a derived number, the upstream source is
-> credited. See [`docs/data-sources.md`](docs/data-sources.md) for the full
-> attribution and licence registry.
-
----
-
-## 📁 Repository layout
-
-A **3-service monorepo** — each service has its own `pyproject.toml` /
-`package.json`, its own Dockerfile, and its own CI/deploy lane. Shared
-infrastructure lives at the repo root; cross-service docs live in `docs/`.
-
+```text
+P10 ───── Conservative / lower-demand scenario
+P50 ───── Expected demand
+P90 ───── High-demand scenario
 ```
+
+### 2. Future generation composition
+
+The platform analyses and forecasts the contribution of different generation
+sources such as:
+
+* Coal
+* Gas
+* Wind
+* Solar
+* Hydro
+* Batteries
+* Other generation
+
+### 3. Future carbon impact
+
+Demand forecasts are combined with generation-mix and emissions-intensity
+information to estimate:
+
+* Carbon intensity
+* Renewable contribution
+* Expected emissions
+* Carbon footprint
+* Historical vs forecast environmental impact
+
+---
+
+# ✨ Key Capabilities
+
+## ⚡ Energy Data Intelligence
+
+* AEMO NEM data ingestion
+* AEMO WEM data ingestion
+* OpenElectricity generation-mix data
+* BoM weather data
+* Multi-frequency ingestion
+* Historical backfilling
+* Near-real-time updates
+
+## 🔍 Data Quality & Anomaly Detection
+
+Hybrid anomaly detection combines:
+
+* Rule-based validation
+* Statistical checks
+* Machine-learning anomaly detection
+* Anomaly scoring
+* Human-readable explanations
+
+Anomalous observations are **flagged rather than automatically deleted**.
+
+This preserves genuine operational events while allowing downstream systems to
+distinguish between data-quality problems and real grid events.
+
+---
+
+## 🔮 Probabilistic Forecasting
+
+The forecasting system produces:
+
+* P10
+* P50
+* P90
+
+instead of a single point estimate.
+
+This allows downstream applications to reason about uncertainty and plan for
+different demand scenarios.
+
+---
+
+## 🧠 Adaptive Machine Learning
+
+ecoLens supports an adaptive forecasting architecture using specialized models
+such as:
+
+* PyTorch LSTM
+* Temporal Fusion Transformer (TFT)
+* TimesFM
+
+Models can incorporate newly observed data through online/incremental learning
+workflows to adapt to:
+
+* Changing demand patterns
+* Seasonal behaviour
+* Weather changes
+* Renewable penetration
+* Market changes
+* Concept drift
+
+---
+
+## 🛡️ Conformal Uncertainty Calibration
+
+Forecast uncertainty is continuously monitored through conformal calibration.
+
+The platform tracks whether the prediction intervals maintain their expected
+coverage.
+
+For example:
+
+```text
+Target coverage: 80%
+
+Observed coverage
+        │
+        ├── Healthy → continue
+        │
+        ├── Degrading → recalibrate
+        │
+        └── Severe → trigger model fallback/retraining workflow
+```
+
+This separates **forecast accuracy** from **forecast uncertainty quality**.
+
+---
+
+## ✂️ Model Optimization
+
+To reduce inference cost and latency, ecoLens supports structured model pruning.
+
+The optimization workflow is:
+
+```text
+Full Model
+    │
+    ▼
+Importance Analysis
+    │
+    ▼
+Structured Pruning
+    │
+    ▼
+Smaller Model
+    │
+    ▼
+Fine-Tuning
+    │
+    ▼
+Validation
+    │
+    ▼
+Production Candidate
+```
+
+The objective is to reduce unnecessary model complexity while preserving
+forecasting performance.
+
+---
+
+# 🏗️ Architecture
+
+ecoLens follows a **decoupled, event-driven microservice architecture**.
+
+```text
+                              ┌─────────────────────┐
+                              │       USERS         │
+                              └──────────┬──────────┘
+                                         │ HTTPS
+                                         ▼
+                              ┌─────────────────────┐
+                              │      Dashboard      │
+                              │      Next.js 15     │
+                              └──────────┬──────────┘
+                                         │ REST
+                                         ▼
+                              ┌─────────────────────┐
+                              │    Forecast API     │
+                              │      FastAPI        │
+                              └──────┬───────┬──────┘
+                                     │       │
+                                     ▼       ▼
+                                  Redis   PostgreSQL
+                                  Cache     Marts
+                                     ▲
+                                     │
+═════════════════════════════════════╪══════════════════════════════
+                                     │
+                          Event / Data Boundary
+                                     │
+                                     ▼
+                              ┌──────────────────┐
+                              │   Data Pipeline  │
+                              │                  │
+                              │ Celery/Prefect   │
+                              │ Ingestion        │
+                              │ Anomaly Detection│
+                              │ DuckDB           │
+                              │ dbt              │
+                              │ Training         │
+                              └────────┬─────────┘
+                                       │
+                                       │ Event
+                                       ▼
+                                  RabbitMQ
+                                       │
+                                       ▼
+                              PostgreSQL raw.*
+                                       │
+                                       ▼
+                                   dbt marts
+                                       │
+                                       ▼
+                              Forecasting / Carbon
+```
+
+### Observability is intentionally outside the business-data path
+
+```text
+          ┌───────────────────┐
+          │  Ingestion        │────┐
+          └───────────────────┘    │
+                                   │
+          ┌───────────────────┐    │
+          │  Warehouse        │────┼──► OpenTelemetry
+          └───────────────────┘    │
+                                   │
+          ┌───────────────────┐    │
+          │  Forecast         │────┘
+          └───────────────────┘
+                    │
+                    ▼
+          ┌────────────────────┐
+          │ OTel Collector     │
+          └──────┬─────┬───────┘
+                 │     │
+          ┌──────▼┐ ┌──▼────┐ ┌────────┐
+          │Prom.  │ │ Loki  │ │ Tempo  │
+          └───┬───┘ └──┬────┘ └───┬────┘
+              └────────┼───────────┘
+                       ▼
+                   Grafana
+```
+
+Telemetry is asynchronous or scrape-based and does not become a dependency in
+the critical business-data execution path.
+
+---
+
+# 🧩 Microservices
+
+ecoLens is organized around independently deployable services.
+
+| Service           | Responsibility                                                         | Communication           |
+| ----------------- | ---------------------------------------------------------------------- | ----------------------- |
+| **Ingestion**     | External API collection, validation, anomaly detection, DuckDB staging | RabbitMQ                |
+| **Warehouse**     | Raw landing, dbt transformations, analytical datasets                  | RabbitMQ + PostgreSQL   |
+| **Forecast**      | Model serving, forecasting, carbon intelligence, API                   | REST + Redis/PostgreSQL |
+| **Dashboard**     | Visualization and user experience                                      | REST                    |
+| **Observability** | Telemetry collection and monitoring                                    | OpenTelemetry           |
+
+Each business service can be developed, tested, deployed, and scaled independently.
+
+---
+
+# 📥 Data Pipeline
+
+The ingestion system operates according to the source's required polling
+frequency.
+
+```text
+Scheduler
+   │
+   ├── 5-minute sources
+   │
+   └── 30-minute sources
+          │
+          ▼
+      Celery Tasks
+          │
+          ▼
+     External APIs
+          │
+          ▼
+   Validation / Normalization
+          │
+          ▼
+   Hybrid Anomaly Detection
+          │
+          ▼
+       DuckDB
+          │
+          ▼
+   "data.staged" event
+          │
+          ▼
+      RabbitMQ
+```
+
+The ingestion service does not wait for the warehouse to finish processing.
+This keeps data collection resilient to downstream processing delays.
+
+---
+
+# 🔍 Anomaly Detection
+
+Each ingested record can be evaluated using a hybrid anomaly-detection layer.
+
+```text
+                    Incoming Record
+                           │
+              ┌────────────┴────────────┐
+              ▼                         ▼
+       Rule-based checks          ML detection
+              │                         │
+              └────────────┬────────────┘
+                           ▼
+                    Anomaly Score
+                           │
+                    Explanation
+                           │
+                           ▼
+                    Store + Flag
+```
+
+Examples include:
+
+* Missing values
+* Invalid ranges
+* Unexpected frequency
+* Sudden demand changes
+* Generation spikes
+* API response anomalies
+* Sensor-like failures
+
+The system intentionally avoids blindly removing anomalous observations because
+a large deviation may represent a genuine grid event.
+
+---
+
+# 📨 Event-Driven Warehousing
+
+After staging data in DuckDB, the ingestion service publishes a completion event
+through RabbitMQ.
+
+```text
+DuckDB
+   │
+   │ data.staged
+   ▼
+RabbitMQ
+   │
+   ▼
+Warehouse Consumer
+   │
+   ▼
+PostgreSQL raw.*
+   │
+   ▼
+dbt
+   │
+   ├── staging
+   ├── intermediate
+   └── marts
+```
+
+This creates a clear boundary between:
+
+**Data collection**
+
+and
+
+**Data processing**
+
+The warehouse therefore does not need to poll the ingestion service repeatedly,
+and ingestion does not need to wait for warehouse processing.
+
+---
+
+# 🗄️ Storage Architecture
+
+ecoLens uses a layered storage strategy.
+
+| Layer        | Technology                         | Purpose                                    |
+| ------------ | ---------------------------------- | ------------------------------------------ |
+| Staging      | **DuckDB**                         | Local high-performance ingestion staging   |
+| Raw          | **PostgreSQL**                     | Immutable historical source representation |
+| Curated      | **PostgreSQL + dbt**               | Analytics-ready datasets                   |
+| Artifacts    | **Cloudflare R2 / object storage** | Durable artifacts and files                |
+| Cache        | **Redis**                          | Low-latency serving                        |
+| ML artifacts | **MLflow + object storage**        | Models, metrics, training artifacts        |
+
+### Raw layer
+
+The `raw.*` schema stores data as close as possible to the original source
+representation.
+
+This provides:
+
+* Auditability
+* Reprocessing
+* Data lineage
+* Debugging
+* Historical reconstruction
+
+### Curated layer
+
+dbt transforms raw data into analytics-ready datasets used by:
+
+* Forecasting
+* Carbon accounting
+* Dashboards
+* Reporting
+* Monitoring
+
+---
+
+# 🧠 ML & Forecasting
+
+The forecasting system is designed as a multi-model architecture.
+
+```text
+                 Curated Energy Data
+                         │
+                         ▼
+                 Feature Engineering
+                         │
+          ┌──────────────┼──────────────┐
+          ▼              ▼              ▼
+         LSTM            TFT          TimesFM
+          │              │              │
+          └──────────────┼──────────────┘
+                         ▼
+                 Forecast Ensemble
+                         │
+                         ▼
+              Probabilistic Output
+                 P10 / P50 / P90
+```
+
+### Input features
+
+Potential forecasting features include:
+
+* Historical demand
+* Lagged demand
+* Rolling statistics
+* Weather
+* Temperature
+* Solar radiation
+* Calendar features
+* Time-of-day
+* Day-of-week
+* Holidays
+* Electricity price
+* Generation mix
+* Renewable penetration
+
+---
+
+# 📊 Probabilistic Forecasting
+
+Instead of returning:
+
+```text
+Demand = 8,420 MW
+```
+
+ecoLens produces:
+
+```text
+P10 = 7,900 MW
+P50 = 8,420 MW
+P90 = 9,150 MW
+```
+
+This provides decision-makers with a range of plausible future outcomes.
+
+The forecasting layer monitors both:
+
+### Point accuracy
+
+* MAE
+* RMSE
+* MAPE / sMAPE where appropriate
+
+### Probabilistic quality
+
+* Prediction interval coverage
+* Calibration
+* Interval width
+* Quantile loss
+
+---
+
+# 🔄 Adaptive Learning
+
+Electricity demand is non-stationary.
+
+Patterns change because of:
+
+* Weather
+* Consumer behaviour
+* Renewable generation
+* Market conditions
+* Grid infrastructure
+* Seasonal changes
+* Exceptional events
+
+ecoLens therefore supports online and incremental learning workflows.
+
+```text
+New Observations
+       │
+       ▼
+Feature Update
+       │
+       ▼
+Drift Detection
+       │
+       ├── Stable ──────────► Continue
+       │
+       ├── Moderate Drift ──► Incremental Update
+       │
+       └── Severe Drift ────► Retraining
+                                  │
+                                  ▼
+                            Model Validation
+                                  │
+                                  ▼
+                            Model Registry
+                                  │
+                                  ▼
+                            Production
+```
+
+---
+
+# 🛡️ Model Reliability
+
+Forecast reliability is monitored continuously.
+
+The platform tracks:
+
+* Rolling forecasting error
+* Prediction interval coverage
+* Feature drift
+* Concept drift
+* Model degradation
+* Calibration degradation
+
+Potential actions include:
+
+```text
+Healthy
+   │
+   ▼
+Continue serving
+
+Degraded calibration
+   │
+   ▼
+Recalibrate uncertainty
+
+Performance degradation
+   │
+   ▼
+Incremental learning
+
+Severe degradation
+   │
+   ▼
+Retrain / promote validated model
+```
+
+A validated baseline model can be retained as a fallback when the primary model
+fails production health checks.
+
+---
+
+# ✂️ Model Optimization
+
+ecoLens supports structured pruning for reducing model complexity.
+
+The optimization objective is:
+
+```text
+Lower computational cost
+        +
+Lower inference latency
+        +
+Smaller model
+        +
+Minimal accuracy degradation
+```
+
+The workflow includes:
+
+1. Train baseline
+2. Measure feature/layer importance
+3. Apply structured pruning
+4. Fine-tune
+5. Evaluate
+6. Compare against baseline
+7. Register optimized model
+8. Deploy only after validation
+
+---
+
+# 🌱 Carbon Intelligence
+
+Demand forecasting alone does not describe environmental impact.
+
+ecoLens combines:
+
+```text
+Forecast Electricity Demand
+             +
+Expected Generation Mix
+             +
+Fuel-specific Emission Factors
+             │
+             ▼
+      Carbon Intensity
+             │
+             ▼
+      Expected Emissions
+```
+
+The system can derive or consume:
+
+* Carbon intensity
+* Renewable proportion
+* Generation mix
+* Fuel-specific emission factors
+* Expected emissions
+* Historical emissions
+
+When direct renewable-energy metrics are unavailable, renewable contribution can
+be estimated from the observed generation mix.
+
+---
+
+# 🧮 Carbon Footprint
+
+For a given electricity consumption:
+
+```text
+Carbon Footprint
+
+= Electricity Consumption
+  × Carbon Intensity
+```
+
+For example:
+
+```text
+kWh × kgCO₂e/kWh = kgCO₂e
+```
+
+The calculation can use:
+
+* Current regional intensity
+* Historical intensity
+* Forecast intensity
+
+depending on the analytical use case.
+
+---
+
+# 🧪 MLOps & Model Lifecycle
+
+MLflow provides centralized experiment and model lifecycle management.
+
+```text
+Training Data
+     │
+     ▼
+Experiment
+     │
+     ├── Parameters
+     ├── Metrics
+     ├── Dataset metadata
+     └── Artifacts
+            │
+            ▼
+        MLflow
+            │
+            ▼
+      Model Validation
+            │
+            ▼
+       Model Registry
+            │
+            ▼
+       Production Model
+```
+
+Tracked information includes:
+
+* Model version
+* Training dataset
+* Hyperparameters
+* Evaluation metrics
+* Forecasting metrics
+* Calibration metrics
+* Model artifacts
+* Training metadata
+
+This enables reproducible experimentation and controlled production deployment.
+
+---
+
+# 📡 Observability
+
+ecoLens uses a dedicated observability architecture so that monitoring does not
+couple the business services together.
+
+Each service produces:
+
+* Metrics
+* Structured logs
+* Distributed traces
+
+through OpenTelemetry.
+
+```text
+┌─────────────┐
+│ Ingestion   │──┐
+└─────────────┘  │
+                 │
+┌─────────────┐  │
+│ Warehouse   │──┼──► OpenTelemetry Collector
+└─────────────┘  │             │
+                 │       ┌─────┼─────┐
+┌─────────────┐  │       ▼     ▼     ▼
+│ Forecast    │──┘    Prom.  Loki  Tempo
+└─────────────┘              │
+                             ▼
+                          Grafana
+```
+
+### System observability
+
+The platform monitors:
+
+* Service availability
+* Request latency
+* Error rates
+* CPU / memory usage
+* Queue health
+* Pipeline execution
+* Ingestion failures
+* Warehouse processing latency
+* API performance
+
+### ML observability
+
+The platform also monitors:
+
+* MAE
+* RMSE
+* Forecast bias
+* P10/P90 coverage
+* Feature drift
+* Concept drift
+* Calibration
+* Model degradation
+* Retraining indicators
+
+This creates a direct connection between **data quality → model performance →
+model lifecycle decisions**.
+
+### Non-blocking telemetry
+
+Observability is not part of the business-critical execution path.
+
+If the observability stack becomes unavailable, the core ingestion, warehouse,
+and forecasting workflows should continue operating.
+
+---
+
+# 🖥️ Frontend
+
+The frontend is built with **Next.js 15** and provides an interactive interface for:
+
+* Real-time grid conditions
+* Electricity demand
+* Demand forecasts
+* P10/P50/P90 uncertainty bands
+* Generation mix
+* Renewable contribution
+* Carbon intensity
+* Historical emissions
+* Forecast emissions
+* Model performance
+* Data quality
+* System health
+
+The frontend communicates with backend services through REST APIs rather than
+accessing databases directly.
+
+```text
+Next.js
+   │
+   │ REST
+   ▼
+Forecast API
+   │
+   ├── Redis
+   └── PostgreSQL
+```
+
+This preserves a clean boundary between presentation and data infrastructure.
+
+---
+
+# 📚 Data Sources
+
+| Source               | Data                                 |        Frequency |
+| -------------------- | ------------------------------------ | ---------------: |
+| **AEMO NEM**         | Demand, generation, prices           |            5 min |
+| **AEMO WEM**         | SWIS demand/generation               |           30 min |
+| **OpenElectricity**  | Generation mix / emissions           |   Near-real-time |
+| **BoM**              | Weather observations                 | Source-dependent |
+| **DCCEEW / NGER**    | Emission factors                     |   Reference data |
+| **Electricity Maps** | Optional carbon-intensity enrichment | Source-dependent |
+
+All external operational data follows the general ingestion path:
+
+```text
+External Source
+      ↓
+DuckDB
+      ↓
+RabbitMQ
+      ↓
+PostgreSQL raw.*
+      ↓
+dbt
+      ↓
+Curated Marts
+```
+
+---
+
+# 🧰 Technology Stack
+
+| Layer           | Technology                        |
+| --------------- | --------------------------------- |
+| Backend         | FastAPI, Python 3.12+             |
+| Async Tasks     | Celery                            |
+| Event Bus       | RabbitMQ                          |
+| Orchestration   | Prefect                           |
+| Staging         | DuckDB                            |
+| Warehouse       | PostgreSQL / NeonDB               |
+| Transformation  | dbt                               |
+| ML              | PyTorch                           |
+| Forecast Models | LSTM, TFT, TimesFM                |
+| Optimization    | Structured Pruning + Fine-tuning  |
+| Uncertainty     | Conformal Prediction              |
+| MLOps           | MLflow                            |
+| Cache           | Redis                             |
+| Object Storage  | Cloudflare R2                     |
+| Observability   | OpenTelemetry                     |
+| Metrics         | Prometheus                        |
+| Logs            | Loki                              |
+| Traces          | Tempo                             |
+| Visualization   | Grafana                           |
+| Frontend        | Next.js 15                        |
+| UI              | React, Tailwind, Recharts         |
+| Containers      | Docker                            |
+| CI/CD           | GitHub Actions                    |
+| Quality         | Ruff, Mypy, Pytest, Bandit, Trivy |
+
+---
+
+# 📁 Repository Structure
+
+The repository is organized around independently deployable services.
+
+```text
 ecoLens/
-├── README.md                          ← you are here
-├── LICENSE                            ← MIT
+│
+├── README.md
+├── LICENSE
 ├── CONTRIBUTING.md
-├── CODE_OF_CONDUCT.md
 ├── SECURITY.md
 ├── CODEOWNERS
-├── docker-compose.yml                 ← local stack (3 services + 7 infra deps)
-├── .env.example                       ← documented env vars
-├── Makefile                           ← `make help` · per-service targets
+├── docker-compose.yml
+├── .env.example
+├── Makefile
 │
-├── services/                          ← the 3 micro-services
+├── services/
 │   │
-│   ├── forecast-api/                  ① SERVICE 1 / 3   — FastAPI
-│   │   ├── pyproject.toml             (own deps: fastapi, pytorch, mlflow, redis, postgres)
-│   │   ├── uv.lock
+│   ├── ingestion/
+│   │   ├── pyproject.toml
+│   │   ├── Dockerfile
 │   │   ├── README.md
 │   │   ├── tests/
-│   │   └── app/                       ← own venv/lockfile (not a uv workspace member)
-│   │       ├── api/v1/                routers (emissions, footprint, forecast, model, regions, stream, health)
-│   │       ├── core/                  config, errors, logging
-│   │       ├── db/                    Postgres session (read-only), Redis client
-│   │       ├── models/ml.py           DemandLSTM definition (duplicated from data-pipeline)
-│   │       ├── schemas/               per-resource base/create/entities/response
-│   │       ├── service/ml/            conformal, data, features, registry (MLflow loader/hot-reload)
-│   │       └── main.py                FastAPI app factory
-│   │
-│   ├── data-pipeline/                 ② SERVICE 2 / 3   — Prefect worker
-│   │   ├── pyproject.toml             (own deps: prefect, dbt, pytorch, mlflow, oe-sdk)
-│   │   ├── uv.lock
-│   │   ├── README.md
-│   │   ├── tests/
-│   │   ├── dbt/                       dbt project (mounted into container)
-│   │   │   └── ecolens/
-│   │   │       ├── dbt_project.yml
-│   │   │       ├── models/{staging,intermediate,marts}/
-│   │   │       └── seeds/emissions_factors.csv
-│   │   ├── mlflow/projects/           MLflow Project entries for training runs
 │   │   └── app/
-│   │       ├── api/v1/                routers (auth, dbt, ingest, datasources, …)
-│   │       ├── core/                  config, security, logging, metrics, ratelimit
-│   │       ├── db/                    Postgres session, Mongo, Redis, RabbitMQ clients
-│   │       ├── models/                data-source/pipeline catalogs, LSTM model def
-│   │       ├── schemas/               per-resource base/create/entities/response
-│   │       ├── service/
-│   │       │   ├── pipeline/          ingest tasks + flows, DuckDB staging, landing
-│   │       │   ├── ml/, mlops/        training, evaluation, registry promotion
-│   │       │   ├── worker.py          warehouse-sync consumer
-│   │       │   └── training_worker.py training-trigger consumer
-│   │       ├── main.py                FastAPI app factory
-│   │       └── cli.py                 `ecolens-pipeline` console script
+│   │       ├── collectors/
+│   │       ├── anomaly/
+│   │       ├── staging/
+│   │       ├── events/
+│   │       ├── schemas/
+│   │       └── main.py
 │   │
-│   └── dashboard/                     ③ SERVICE 3 / 3   — Next.js 15 + TS
+│   ├── warehouse/
+│   │   ├── pyproject.toml
+│   │   ├── Dockerfile
+│   │   ├── README.md
+│   │   ├── tests/
+│   │   ├── dbt/
+│   │   │   └── ecolens/
+│   │   │       ├── models/
+│   │   │       │   ├── staging/
+│   │   │       │   ├── intermediate/
+│   │   │       │   └── marts/
+│   │   │       ├── seeds/
+│   │   │       └── dbt_project.yml
+│   │   └── app/
+│   │       ├── consumers/
+│   │       ├── loaders/
+│   │       └── main.py
+│   │
+│   ├── forecast/
+│   │   ├── pyproject.toml
+│   │   ├── Dockerfile
+│   │   ├── README.md
+│   │   ├── tests/
+│   │   └── app/
+│   │       ├── api/
+│   │       ├── models/
+│   │       ├── forecasting/
+│   │       ├── carbon/
+│   │       ├── registry/
+│   │       ├── calibration/
+│   │       ├── drift/
+│   │       └── main.py
+│   │
+│   └── observability/
+│       ├── README.md
+│       └── dashboards/
+│
+├── frontend/
+│   └── dashboard/
 │       ├── package.json
-│       ├── tsconfig.json
-│       ├── next.config.ts
-│       ├── tailwind.config.ts
-│       ├── public/
-│       ├── tests/                     Vitest + Playwright
-│       └── app/                       App Router
-│           ├── page.tsx               marketing
-│           ├── dashboard/
-│           ├── forecast/
-│           ├── emissions/
-│           ├── footprint/
-│           └── api/                   BFF routes (proxies to forecast-api)
+│       ├── app/
+│       ├── components/
+│       ├── lib/
+│       └── public/
 │
-├── data/                              ← gitignored; volume-mounted in dev
-│   ├── raw/
-│   ├── processed/
-│   ├── external/
-│   └── schemas/                       JSON schemas for raw payloads
-│
-├── infra/                             ← ops
-│   ├── docker/                        one Dockerfile per service
-│   │   ├── forecast-api.Dockerfile
-│   │   ├── data-pipeline.Dockerfile
-│   │   ├── dashboard.Dockerfile
-│   │   └── mlflow.Dockerfile
+├── infrastructure/
+│   ├── docker/
 │   ├── prometheus/
-│   ├── grafana/dashboards/
-│   └── k8s/                           per-service Helm charts (one per service)
-│       ├── forecast-api/
-│       ├── data-pipeline/
-│       └── dashboard/
+│   ├── grafana/
+│   ├── loki/
+│   ├── tempo/
+│   └── otel/
 │
-├── scripts/                           ← dev / ops scripts
-│   ├── seed.sh
-│   ├── promote_model.sh
-│   └── deploy.sh
-│
-├── docs/                              ← cross-service docs
+├── docs/
 │   ├── architecture.md
 │   ├── data-sources.md
-│   ├── model-card.md
-│   ├── api-reference.md
-│   ├── deployment.md
-│   ├── microservices-action-plan.md   ← the 3-service plan & rationale
-│   ├── runbooks/                      one per service
-│   └── adr/                           Architecture Decision Records
-│
-├── notebooks/                         exploratory work (shared)
-│   ├── 01_eda.ipynb
-│   ├── 02_baseline.ipynb
-│   └── 03_lstm_experiments.ipynb
+│   ├── microservices.md
+│   ├── observability.md
+│   ├── ml-lifecycle.md
+│   └── carbon-model.md
 │
 └── .github/
-    ├── workflows/
-    │   ├── ci.yml                     path-filtered, one job per service
-    │   ├── ml-pipeline.yml            dbt build + model train (scheduled)
-    │   ├── docker.yml                 build & push per-service image
-    │   ├── codeql.yml
-    │   └── release.yml                signed release
-    ├── PULL_REQUEST_TEMPLATE.md
-    └── ISSUE_TEMPLATE/
+    └── workflows/
 ```
 
 ---
 
-## ⚡ Quickstart
+# 🚀 Quickstart
 
-> Requires **python 3.12+**, **Node 20+**, **Docker 24+**, **uv**, **pnpm**.
+### Requirements
 
-### 1. Clone & configure
+* Docker
+* Docker Compose
+* Python 3.12+
+* Node.js 20+
+* Git
+
+### Clone
 
 ```bash
 git clone https://github.com/diptu/ecoLens.git
 cd ecoLens
-cp .env.example .env
-# Edit .env — at minimum: OPENELECTRICITY_API_KEY,
-# DATABASE_URL (NeonDB/Postgres — dbt's transform target)
 ```
 
-### 2. Bring up all 3 services + infra
+### Configure
 
 ```bash
-make up
+cp .env.example .env
 ```
 
-One command starts **`forecast-api` (port 8000)**, **`data-pipeline`**
-(its API on port 8001, plus a headless `warehouse-sync` consumer), and
-**`dashboard` (port 3000)** — plus the platform infra (postgres,
-rabbitmq, redis, minio, mlflow, prometheus, grafana, loki).
+Configure the required:
+
+* PostgreSQL / NeonDB credentials
+* RabbitMQ
+* Redis
+* MLflow
+* Object storage
+* External API credentials where required
+
+### Start infrastructure
+
+```bash
+docker compose up -d
+```
+
+### Start services
+
+```bash
+docker compose up ingestion warehouse forecast dashboard
+```
+
+### Access locally
 
 ```text
-  data-pipeline  → http://localhost:8001    (OpenAPI: /docs)
-  forecast-api   → http://localhost:8002    (OpenAPI: /docs)
-  ingest         → http://localhost:8003    (OpenAPI: /docs)
-  warehouse      → http://localhost:8004    (OpenAPI: /docs)
-  observility    → http://localhost:8005    (OpenAPI: /docs)
-
-
-
-
-
-  warehouse-sync → running headless          (logs: make logs-warehouse-sync)
-  dashboard      → http://localhost:3000
-  mlflow         → http://localhost:5000
-  grafana        → http://localhost:3001     (admin / admin)
-  rabbitmq       → http://localhost:15672    (guest / guest)
-```
-
-### 3. Build the warehouse (dbt)
-
-```bash
-make dbt-build          # seeds + run + test
-```
-
-Runs **inside** the `data-pipeline` container, so it uses the same image
-that will be deployed.
-
-### 4. Train the demand model
-
-```bash
-make train MODEL=lstm_demand REGION=NEM
-# Or full Optuna sweep:
-make tune MODEL=lstm_demand REGION=NEM TRIALS=50
-```
-
-The run is tracked in MLflow at <http://localhost:5000>. When the model is
-promoted to `Production`, `forecast-api` hot-reloads it on the next request
-— **no service-to-service call**, just a watch on the MLflow registry.
-
-### 5. Use the app
-
-```bash
-# Open the UI
-open http://localhost:3000
-
-# Or hit the API directly
-curl http://localhost:8000/v1/healthz
-curl 'http://localhost:8000/v1/forecast?region=NSW1&horizon=24h'
-curl -X POST http://localhost:8000/v1/footprint \
-  -H 'content-type: application/json' \
-  -d '{"region":"NSW1","kwh":420,"period":"2026-07-01T00:00Z/2026-07-31T23:59Z"}'
-```
-
-### 6. Work on a single service
-
-```bash
-# Tail logs for one service
-make logs-api
-make logs-pipeline
-make logs-dashboard
-
-# Open a shell
-make shell-api
-make shell-pipeline
-make shell-dashboard
-
-# Restart just one
-make restart-api
-
-# Run a service without Docker (faster inner loop)
-make api                # forecast-api in foreground
-make pipeline           # data-pipeline worker
-make web                # dashboard dev server
-```
-
-### 7. Tear down
-
-```bash
-make down
+Dashboard       http://localhost:3000
+Forecast API    http://localhost:8000
+API Docs        http://localhost:8000/docs
+Grafana         http://localhost:3001
 ```
 
 ---
 
-## 🧠 ML pipeline
+# 🔌 API
 
-> **Owner:** the `data-pipeline` service. All ingestion, dbt, training and
-> MLflow registration runs there. The `forecast-api` service only **loads**
-> the registered model — it never trains. See
-> [`docs/microservices-action-plan.md`](docs/microservices-action-plan.md) for
-> the service-boundary rationale.
+The Forecast service exposes versioned REST APIs.
 
-### Demand forecasting (PyTorch LSTM)
+Example resources:
 
-The model is a **multivariate, multi-horizon LSTM**:
-
-- **Inputs** (per 30-min step): regional demand, price, temperature, humidity,
-  solar irradiance, hour-of-day, day-of-week, public-holiday flag, lagged demand
-  at 1d/7d/28d, rolling mean at 24h/168h.
-- **Architecture**: 2-layer `nn.LSTM` (hidden=128, dropout=0.2) →
-  attention pooling → fully-connected head producing 48-step outputs.
-- **Loss**: Huber (robust to dispatch spikes), with a separate pinball loss
-  branch for 10/90 quantile heads.
-- **Trainer**: PyTorch Lightning, mixed-precision, gradient clipping,
-  ReduceLROnPlateau, early stopping on val MAPE.
-- **Uncertainty**: Conformal prediction over the calibration set, returned as
-  P10/P50/P90 bands.
-- **Tracking**: every run → MLflow (params, metrics, git SHA, model signature,
-  artifact store on MinIO/S3).
-
-See [`docs/model-card.md`](docs/model-card.md) for the full model card
-(performance, intended use, limitations, ethics).
-
-### Feature engineering (dbt)
-
-We don't compute features in pandas and then lose them. Each ingest task
-stages its fetch in embedded, local **DuckDB** first (no MongoDB, no
-separate database server for this layer); a RabbitMQ event then decouples
-ingestion from warehousing, so the warehouse sync copies the staged data
-into `raw.*` tables in **NeonDB/PostgreSQL** as an unmodified audit copy —
-independently of the ingest cadence. From `raw.*`, features live as **dbt
-models** in `dbt/ecolens/models/intermediate/`, entirely in SQL against
-NeonDB:
-
-```sql
--- models/intermediate/int_demand_with_weather.sql
-with demand as (
-  select * from {{ ref('stg_aemo_nem_dispatch') }}
-),
-weather as (
-  select * from {{ ref('stg_bom_observations') }}
-)
-select
-  d.ts,
-  d.region,
-  d.demand_mw,
-  w.temp_c,
-  w.radiation_mj_m2,
-  extract(hour    from d.ts) as hour,
-  extract(dow     from d.ts) as dow,
-  lag(d.demand_mw, 48)  over (partition by d.region order by d.ts) as lag_1d,
-  lag(d.demand_mw, 336) over (partition by d.region order by d.ts) as lag_7d,
-  avg(d.demand_mw) over (
-    partition by d.region order by d.ts rows between 335 preceding and current row
-  ) as roll_7d
-from demand d
-left join weather w
-  on d.region = w.region and d.ts = w.ts
+```text
+/v1/forecast
+/v1/emissions
+/v1/carbon-intensity
+/v1/footprint
+/v1/generation-mix
+/v1/regions
+/v1/model
+/v1/healthz
 ```
 
-The training set is **materialised as a Parquet snapshot** in S3 per training
-run — the model never trains on a live Postgres connection.
+The API returns structured JSON responses and OpenAPI documentation.
 
-### MLflow
-
-- Tracking server: `mlflow server --backend-store-uri postgresql://... --default-artifact-root s3://ecolens/mlflow`
-- Model registry stages: `None → Staging → Production → Archived`.
-- Promotion is **CI-gated** — see
-  [`scripts/promote_model.sh`](scripts/promote_model.sh) and the
-  `ml-pipeline` GitHub Action.
-
-### Orchestration (Prefect)
-
-```python
-# services/data-pipeline/app/service/pipeline/flows/__init__.py
-@flow(name="daily-demand")
-def daily_demand():
-    raw  = ingest_aemo_nem()             # land in DuckDB (local staging)
-    sync = sync_duckdb_to_postgres(raw)  # RabbitMQ event -> NeonDB `raw.*`
-    dbt_build(target="prod")             # NeonDB raw -> analytics schema
-    if training_due():
-        train_and_register("lstm_demand", region="NEM")
-```
-
-Schedules: ingest every 5 min (NEM), 30 min (WEM), dbt every 15 min,
-retrain weekly, daily evaluation drift report.
-
----
-
-## 🌐 API reference
-
-Base URL: `https://api.ecolens.example/v1` · OpenAPI: `/docs` · ReDoc: `/redoc`
-
-| Method | Path | Description |
-| --- | --- | --- |
-| `GET`  | `/healthz` | Liveness — 200 if the process is up |
-| `GET`  | `/readyz`  | Readiness — checks DB, Redis, model load |
-| `GET`  | `/v1/forecast` | Demand forecast, point + intervals |
-| `GET`  | `/v1/emissions` | Live emissions for a region |
-| `POST` | `/v1/footprint` | Compute kgCO₂e for user kWh |
-| `GET`  | `/v1/regions` | List supported regions |
-| `GET`  | `/v1/model` | Currently-served model metadata (MLflow) |
-| `WS`   | `/v1/stream/emissions` | Server-sent stream, 5-min updates |
-
-### `GET /v1/forecast`
-
-```http
-GET /v1/forecast?region=NSW1&horizon=24h&interval=30m HTTP/1.1
-```
+Example conceptual forecast response:
 
 ```json
 {
   "region": "NSW1",
-  "model": "lstm_demand@production",
-  "generated_at": "2026-07-18T09:00:00Z",
   "horizon": "24h",
-  "interval": "30m",
-  "points": [
-    { "ts": "2026-07-18T09:00:00Z", "p10": 8120, "p50": 8940, "p90": 9810, "unit": "MW" }
-  ]
+  "forecast": {
+    "p10": [],
+    "p50": [],
+    "p90": []
+  },
+  "model_version": "forecast-model-v12",
+  "generated_at": "2026-08-08T00:00:00Z"
 }
 ```
 
-### `POST /v1/footprint`
-
-```http
-POST /v1/footprint HTTP/1.1
-content-type: application/json
-
-{ "region": "NSW1", "kwh": 420, "period": "2026-07-01T00:00Z/2026-07-31T23:59Z" }
-```
-
-```json
-{
-  "region": "NSW1",
-  "kwh": 420,
-  "kg_co2e": 187.4,
-  "intensity_kg_co2e_per_kwh": 0.446,
-  "method": "live_mix_weighted",
-  "factors_version": "nger-2025-q4"
-}
-```
-
-Schemas live in `app/schemas/` and are exported as JSON Schema in
-the OpenAPI doc. All endpoints are rate-limited (Redis token bucket,
-default 60 req/min per token).
-
 ---
 
-## 🖥️ Frontend
+# 🧪 Testing & Quality
 
-The web app is a **Next.js 15 App Router** project (`/frontend`):
+Each service maintains its own testing and quality pipeline.
 
-- **Server Components** for first paint; **TanStack Query** for live data
-  with stale-while-revalidate.
-- **Recharts** for time-series, **react-map-gl** for the regional map.
-- **shadcn/ui + Tailwind 4** for accessible primitives.
-- **Auth.js** with OIDC; carbon footprint calculator requires a free account.
-- **PWA-ready** (offline dashboard for the last 24h of cached emissions).
-- **Playwright** e2e covering the three critical user journeys:
-  forecast, footprint, share.
-
-Pages:
-
-| Route | What |
-| --- | --- |
-| `/` | Marketing + live grid snapshot |
-| `/dashboard` | Live demand vs forecast, generation mix, intensity |
-| `/forecast` | Forecast explorer with horizon, region, confidence bands |
-| `/emissions` | Historical emissions explorer (5-min granularity) |
-| `/footprint` | Personal/business Scope-2 calculator |
-| `/about` | Methodology, sources, model card |
-
----
-
-## 🧮 Emissions model
-
-For any `(region, interval)`:
-
-```
-emissions_kgco2e =
-    Σ_fuel  generation_mwh[fuel] × intensity_kgco2e_per_mwh[fuel]
-```
-
-where `intensity` is sourced from AEMO/NGER and stored in
-`dbt/ecolens/seeds/emissions_factors.csv` (versioned; see the
-`factors_version` field in API responses). For a user-supplied kWh over a
-period, the platform:
-
-1. Resolves the **energy mix** for that region during the period
-   (live mix, or historical from the warehouse).
-2. Computes the **time-weighted average intensity** (kgCO₂e/kWh).
-3. Returns `kwh × intensity` and the breakdown.
-
-OpenElectricity already publishes emission factors, but we **don't blindly
-trust the third-party number**. Every `/v1/emissions*`/`/v1/footprint`
-response reports which real method actually served it (`method` field):
-
-- `live_provider` — OpenElectricity's own reported intensity for that
-  window, **preferred when it's fresh** (`fct_carbon_intensity.
-  live_provider_intensity_kgco2e_per_mwh`, generation-weighted up to the
-  hour the same way our own figure is — see `service/ml/data.
-  resolve_intensity_method`, forecast-api). "Fresh" means within
-  `Settings.emissions_provider_freshness_minutes` (90 min default) of
-  now — a stale provider row is deliberately not trusted just because
-  it's non-null.
-- `live_mix_weighted` — our own per-fuel-weighted calculation
-  (`seeds/emissions_factors.csv`), served whenever the provider figure
-  is missing or stale. This is the real, honest fallback, not a
-  user-selectable alternative — a live discrepancy between the two
-  (found while building this: the two methods disagree substantially on
-  real data for some intervals) is exactly the kind of thing keeping
-  both, rather than trusting one, is meant to surface.
-
-A third method, `static_nger` (audit-grade, NGER factors only, no live
-weighting at all), is documented here as a real future addition, not
-implemented yet — don't assume it's live from this README alone.
-
-See [`docs/emissions-model.md`](docs/emissions-model.md) (TODO) for the
-full formula and unit tests.
-
----
-
-## 📈 Observability
-
-| Signal | Backend | Where |
-| --- | --- | --- |
-| Traces | OpenTelemetry → Tempo / Jaeger | Auto-instrumented FastAPI, dbt, PyTorch |
-| Metrics | Prometheus | `/metrics` on the API; Prefect + MLflow exporters |
-| Logs | Loki via Vector | JSON logs, `trace_id` correlation |
-| Errors | Sentry | Frontend + backend |
-| Dashboards | Grafana | `infra/grafana/dashboards/{api,ml,grid}.json` |
-| Alerts | Alertmanager | Page on SLO burn, drift, ingest lag |
-
-**SLOs** (initial):
-
-- `/v1/forecast` 95p latency < 250 ms (cache hit), < 1.2 s (cold)
-- `/v1/footprint` 95p latency < 400 ms
-- Forecast MAPE < 6% on rolling 28-day window
-- 99.5% monthly availability for the API
-
----
-
-## 🧪 Testing
+### Unit tests
 
 ```bash
-make test            # all tests
-make test-unit       # fast, no IO
-make test-int        # spins up testcontainers
-make test-e2e        # Playwright + httpx
-make test-ml         # data + model regression tests (deterministic)
+pytest
 ```
 
-Quality gates in CI:
+### Linting
 
-- `ruff check` + `ruff format --check`
-- `mypy --strict` on `src/`
-- `pytest -q` with coverage gate (≥ 85% on `src/ecolens/`)
-- `bandit -r src/`
-- `trivy fs .` and `trivy image`
-- `dbt build` (must pass)
-- `gitleaks` for secrets
+```bash
+ruff check .
+```
+
+### Formatting
+
+```bash
+ruff format .
+```
+
+### Type checking
+
+```bash
+mypy .
+```
+
+### Security
+
+```bash
+bandit -r .
+```
+
+Container images are additionally scanned using Trivy.
+
+CI validates code quality before a service can be released.
 
 ---
 
-## 🚀 Deployment
+# 🔐 Security
 
-### 3 services, 3 images
+Security principles include:
 
-Each service has its own **multi-stage, distroless, non-root, cosign-signed**
-Dockerfile, its own image tag, and its own deploy lane:
+* Non-root containers
+* Least-privilege service accounts
+* Secret management through environment/configuration systems
+* No direct database access from the frontend
+* Internal-only data pipeline services
+* API authentication and authorization
+* Dependency scanning
+* Container scanning
+* Static security analysis
+* Secret scanning
+* SBOM generation
+* Signed production images where supported
 
-| Service | Dockerfile | Image | Default port |
-|---|---|---|---|
-| `forecast-api`  | `infra/docker/forecast-api.Dockerfile`  | `ghcr.io/diptu/ecoLens/forecast-api`  | `8000` |
-| `data-pipeline` | `infra/docker/data-pipeline.Dockerfile` | `ghcr.io/diptu/ecoLens/data-pipeline` | — (headless) |
-| `dashboard`     | `infra/docker/dashboard.Dockerfile`     | `ghcr.io/diptu/ecoLens/dashboard`     | `3000` |
+---
 
-Image tags follow `v<semver>`, `<sha>`, and `latest` for `main`.
+# 🚢 Deployment
 
-### Local stack (development)
+ecoLens is designed to support both local Docker deployment and cloud-native
+deployment.
 
-```bash
-make up
-# = docker compose -f docker-compose.yml up -d
+### Local
+
+```text
+Docker Compose
+     │
+     ├── Services
+     ├── RabbitMQ
+     ├── Redis
+     ├── PostgreSQL
+     ├── MLflow
+     └── Observability
 ```
-
-This brings up the **3 application services** (`forecast-api`,
-`data-pipeline` — API + `warehouse-sync` consumer, `dashboard`) **+ 8
-platform-infra dependencies** (postgres, rabbitmq, redis, minio, mlflow,
-prometheus, grafana, loki). Use `make down`, `make logs`, and `make ps`
-to manage it.
 
 ### Production
 
-Two supported targets:
-
-1. **Container service** (Render / Fly / Railway / ECS / Cloud Run) —
-   the easiest path. Deploy each of the 3 services as its own service,
-   point them at the same Postgres / Redis / S3 / MLflow. See
-   [`docs/deployment.md`](docs/deployment.md) for env-by-env specifics.
-2. **Kubernetes** — per-service Helm chart under `infra/k8s/{forecast-api,
-   data-pipeline, dashboard}/` (Argo CD-managed). HPA on CPU for the API
-   and dashboard; HPA on a custom `forecast_qps` metric for the API; the
-   data-pipeline runs as a `Deployment` with a fixed replica count and a
-   Prefect worker pool.
-
-### CI/CD
-
-CI is **path-filtered per service** so changes to `services/dashboard/**`
-don't rebuild the API image.
-
-| Workflow | Trigger | What |
-| --- | --- | --- |
-| `ci.yml`           | PR, push               | Lint + type + test per service; build 3 images in parallel |
-| `ml-pipeline.yml`  | Daily cron, manual     | dbt build → train → evaluate → register in MLflow |
-| `docker.yml`       | Tag `v*`               | Build, sign (`cosign`), push the 3 service images |
-| `release.yml`      | Tag `v*`               | SBOM (CycloneDX) + SLSA provenance + GitHub release |
-| `codeql.yml`       | PR, push               | CodeQL scan across the 3 services |
-
-### Model promotion
-
-A model is **only** promoted to `Production` when:
-
-1. All CI checks pass on the candidate.
-2. Rolling-28d MAPE is **strictly better** than the current production model
-   on the same evaluation set.
-3. A human approves via PR (or, in fully-automated mode, the
-   `model-promoter` policy in `ml-pipeline.yml`).
-
-Once promoted, `forecast-api` picks it up by watching the MLflow registry —
-no rolling restart, no service-to-service call.
-
----
-
-## 🔐 Security
-
-- Non-root containers, distroless base, read-only filesystems.
-- All secrets via env + secret manager (never committed).
-- `gitleaks` on pre-commit + CI.
-- `bandit` + `codeql` static analysis.
-- `trivy` scans on every PR and every image.
-- OpenSSF Scorecard target: **7+**.
-- SBOM (CycloneDX) + SLSA provenance on every release.
-- Rate limiting, request size limits, CORS allowlist, CSP, HSTS.
-- Dependency review bot blocks new vulns.
-- `SECURITY.md` with coordinated disclosure — see file.
-
----
-
-## 🗺️ Roadmap
-
-- [x] Repo scaffold + dbt + FastAPI skeleton
-- [ ] Baseline LSTM v0 (NSW1) — univariate, no weather
-- [ ] Multivariate LSTM v1 — weather + calendar features
-- [ ] Conformal prediction intervals
-- [ ] WEM (SWIS) training pipeline
-- [ ] OpenElectricity live ingest → Redis stream
-- [ ] Footprint calculator UI + shareable link
-- [ ] Drift monitoring (Evidently) + auto-retrain policy
-- [ ] Multi-region transformer baseline
-- [ ] Greenhouse gas protocol Scope-3 add-on
-- [ ] Mobile (React Native, Expo)
-- [ ] Public API + developer tier
-
-See [`docs/roadmap.md`](docs/roadmap.md) for the living plan.
-
----
-
-## 🤝 Contributing
-
-We welcome issues, PRs, and data contributions. Please read
-[`CONTRIBUTING.md`](CONTRIBUTING.md) and [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)
-before opening a PR.
-
-TL;DR:
-
-1. Fork → branch from `main`.
-2. `make bootstrap` then `make dev`.
-3. PR with a description, linked issue, and a screenshot if UI.
-4. CI must be green; one approval from a CODEOWNER required.
-
-Feature flags go in `src/ecolens/config.py`; breaking changes need an
-[ADR](docs/adr/) entry.
-
----
-
-## 📄 License & attribution
-
-**Code:** [MIT](LICENSE) © 2024–2026 ecoLens contributors.
-
-**Data attribution** (mandatory when redistributing derived numbers):
-
-- AEMO — Australian Energy Market Operator. Data is provided subject to
-  AEMO's copyright and disclaimer.
-- OpenElectricity (formerly OpenNEM) — © OpenElectricity contributors,
-  licensed under [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/).
-  Commercial use requires a [licence from OpenElectricity](https://platform.openelectricity.org.au/).
-- Bureau of Meteorology — © Commonwealth of Australia, licensed under
-  [CC BY 3.0 AU](https://creativecommons.org/licenses/by/3.0/au/).
-- DCCEEW NGER — © Commonwealth of Australia, CC BY 4.0.
-- Electricity Maps AU-WA — © Electricity Maps, ODbL.
-
-ecoLens is an independent project and is **not affiliated with, endorsed by,
-or sponsored by AEMO, OpenElectricity, the BOM, or the Australian
-Government**. Trademarks belong to their respective owners.
-
----
-
-## 📚 Citation
-
-If you use ecoLens in research, please cite:
-
-```bibtex
-@software{ecolens_2026,
-  title  = {ecoLens: Real-time electricity demand forecasting and
-            carbon-footprint intelligence for the Australian NEM},
-  author = {ecoLens contributors},
-  year   = {2026},
-  url    = {https://github.com/diptu/ecoLens},
-  note   = {Data: AEMO, OpenElectricity, BoM, DCCEEW}
-}
+```text
+                    GitHub
+                       │
+                       ▼
+                 CI / Testing
+                       │
+                       ▼
+                Container Registry
+                       │
+                       ▼
+                 Deployment Layer
+                       │
+             ┌─────────┴─────────┐
+             ▼                   ▼
+        Application          Observability
+         Services              Stack
+             │
+       ┌─────┼─────┐
+       ▼     ▼     ▼
+   Ingestion Warehouse Forecast
 ```
 
+Services can be independently scaled according to workload.
+
 ---
 
-## 👥 Maintainers
+# 📈 Performance & Reliability
 
-- **@diptu** — original author
-- See [`CODEOWNERS`](CODEOWNERS) for the full roster
+The platform is designed around several operational goals:
 
-Questions? Open an issue or start a discussion.
-**Built with care for a lower-carbon grid.** 🌱
+### Ingestion
+
+* Preserve source data fidelity
+* Avoid blocking on warehouse processing
+* Handle temporary provider failures
+* Support retryable event processing
+
+### Forecasting
+
+* Low-latency inference
+* Redis caching
+* Model health monitoring
+* Fallback model support
+* Probabilistic calibration
+
+### Warehousing
+
+* Idempotent ingestion
+* Raw-data preservation
+* Incremental dbt transformations
+* Historical reprocessing
+
+### Observability
+
+* Centralized telemetry
+* Service-level metrics
+* Distributed tracing
+* Pipeline monitoring
+* ML performance monitoring
+
+---
+
+# 🗺️ Roadmap
+
+## Data Engineering
+
+* [x] Multi-source energy ingestion
+* [x] DuckDB staging
+* [x] Event-driven warehouse ingestion
+* [x] PostgreSQL raw layer
+* [x] dbt analytical layer
+* [ ] Expanded historical backfill framework
+* [ ] Data lineage visualization
+
+## Machine Learning
+
+* [x] LSTM forecasting
+* [x] Probabilistic forecasting
+* [x] Conformal calibration
+* [ ] TFT production integration
+* [ ] TimesFM integration
+* [ ] Incremental learning
+* [ ] Automated drift-driven retraining
+* [ ] Structured model pruning pipeline
+* [ ] Automated model champion/challenger evaluation
+
+## Carbon Intelligence
+
+* [x] Carbon intensity estimation
+* [x] Generation-mix integration
+* [x] Carbon footprint calculation
+* [ ] Forecast carbon intensity
+* [ ] Forecast emissions by generation source
+* [ ] Facility-level carbon intelligence
+
+## MLOps
+
+* [x] MLflow tracking
+* [x] Model registry
+* [x] Model versioning
+* [ ] Automated promotion gates
+* [ ] Champion/challenger deployment
+* [ ] Automated rollback
+
+## Observability
+
+* [x] OpenTelemetry instrumentation
+* [x] Prometheus metrics
+* [x] Loki logs
+* [x] Tempo traces
+* [x] Grafana dashboards
+* [ ] Automated retraining recommendations
+* [ ] Unified data-quality + model-performance dashboard
+
+## Frontend
+
+* [x] Real-time energy dashboard
+* [x] Forecast visualization
+* [x] Carbon visualization
+* [ ] Model performance dashboard
+* [ ] Data quality dashboard
+* [ ] Forecast uncertainty dashboard
+* [ ] Operational alerting
+
+---
+
+# 🤝 Contributing
+
+Contributions are welcome.
+
+Before submitting a pull request:
+
+1. Run the relevant service tests.
+2. Run Ruff.
+3. Run Mypy.
+4. Run security checks where applicable.
+5. Update documentation for architectural changes.
+6. Add tests for new functionality.
+7. Keep service boundaries intact.
+
+For service-specific contribution guidelines, see the corresponding service
+`README.md`.
+
+---
+
+# 📄 License & Attribution
+
+ecoLens is released under the MIT License.
+
+Energy and environmental data remain subject to the licences and attribution
+requirements of their respective providers.
+
+See:
+
+* [`LICENSE`](LICENSE)
+* [`docs/data-sources.md`](docs/data-sources.md)
+* [`docs/carbon-model.md`](docs/carbon-model.md)
+
+for detailed licensing and attribution information.
+
+---
+
+# 👨‍💻 Maintainer
+
+**Nazmul Alam**
+
+Software Engineer · Data & ML Systems
+
+---
+
+<div align="center">
+
+### 🌱 ecoLens
+
+**From electricity data → to forecasts → to carbon intelligence.**
 
 </div>

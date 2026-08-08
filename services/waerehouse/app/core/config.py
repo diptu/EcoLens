@@ -68,6 +68,27 @@ class Settings(BaseSettings):
     rabbitmq_landing_dlx: str = "ecolens.landing.dlx"
     rabbitmq_landing_dlq: str = "ecolens.landing.dlq"
 
+    # Training-trigger topology (publish-only here) -- this service now
+    # owns the real dbt build (`POST /v1/dbt/build`), so it's the one
+    # that fires the "warehouse transform completed, incremental
+    # training may run" event `forecast-api`'s `training_worker`
+    # consumes, same names/topology data-pipeline's identical
+    # `app/db/rabbitmq.py` used (the queue names are the one real
+    # coupling point with the consumer side, now in forecast-api).
+    rabbitmq_training_exchange: str = "forecasting.training"
+    rabbitmq_training_routing_key: str = "training.trigger"
+    rabbitmq_training_trigger_queue: str = "forecasting.training.trigger"
+    rabbitmq_training_dlx: str = "forecasting.training.dlx"
+    rabbitmq_training_trigger_dlq: str = "forecasting.training.trigger.dlq"
+
+    # Same defaults as forecast-api's identical fields (`incremental.py`'s
+    # window, `train`/`train-tft`'s default region set) -- this service
+    # builds the training-trigger payload but never trains, so it only
+    # needs these two to fill in the payload when a caller doesn't
+    # override them.
+    model_default_regions: list[str] = ["NSW1"]
+    incremental_train_window_hours: int = 24
+
     # DuckDB staging directory -- the SAME shared `landed.duckdb` file
     # `services/ingestion` writes into (its own `Settings.
     # duckdb_staging_dir` docstring covers the full reasoning). This
@@ -133,6 +154,36 @@ class Settings(BaseSettings):
     dbt_project_dir_env: str = Field(
         default="dbt/ecolens", validation_alias="DBT_PROJECT_DIR"
     )
+
+    # `TODO.md`'s "Scheduled Execution Runner" -- how often a real landed
+    # event (`consumers.landed_events.sync_landed_event`) is allowed to
+    # trigger an automatic `dbt build`, at most. Not "build after every
+    # single landed event" -- 5 sources landing independently within the
+    # same ingestion cycle would mean up to 5 builds back to back for no
+    # real benefit (a dbt build already processes everything currently in
+    # `raw.*`, not just the one just-landed row). 15 minutes is tighter
+    # than ingestion's own 30-minute Celery Beat cadence, so a build is
+    # never more than one ingestion cycle stale, without triggering more
+    # than ~2x as often as new data can actually arrive.
+    scheduled_build_min_interval_minutes: int = 15
+
+    # `TODO.md` Phase 6's "OpenTelemetry Tracing" -- `services/observility`'s
+    # OTel Collector already accepts OTLP grpc on this exact port
+    # (`otel-collector-config.yml`'s `otlp.protocols.grpc` receiver,
+    # `docker-compose.yml`'s `4317:4317`); this is that collector's
+    # address, not a direct-to-Tempo export (batching/buffering happens
+    # at the collector, not in this service, per that stack's own
+    # "Avoiding Observability Spam" design principle). `otel_traces_enabled`
+    # defaults `False` -- tracing is opt-in until an operator actually
+    # has the collector running; `configure_tracing()` is a real no-op
+    # otherwise; matches this project's pattern of never assuming
+    # optional infra is present (e.g. `object_storage_configured`).
+    otel_traces_enabled: bool = False
+    otel_exporter_otlp_endpoint: str = "http://localhost:4317"
+    # Bound as a static field on every log line (`core/logging.py`) --
+    # matches `services/observility/prometheus/prometheus.yml.template`'s
+    # own hardcoded `external_labels.environment: development` default.
+    environment: str = "development"
 
     # Recorded in structured logs -- lets an operator tell which
     # process/host ran a given consume/retention/dbt job, same role

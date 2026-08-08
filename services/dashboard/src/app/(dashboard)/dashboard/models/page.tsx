@@ -602,7 +602,7 @@ function FineTuneForm({
             <PlayCircle className="h-3.5 w-3.5" /> Start fine-tune
           </button>
           <p className="text-[11px] text-white/45">
-            Runs in <code className="rounded bg-black/30 px-1 font-mono">data-pipeline</code>'s
+            Runs in <code className="rounded bg-black/30 px-1 font-mono">forecast-api</code>'s
             train-worker process. The new version is registered in MLflow on completion.
           </p>
         </div>

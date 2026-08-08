@@ -73,8 +73,32 @@ async def _read_breaker_state(source: str, breaker: Any) -> str:
     Grafana has something real to plot — same read, no extra Redis
     round-trip. Returns the plain string value `meta._ingest_log.
     circuit_breaker_state` expects.
+
+    Swallows its own Redis errors rather than letting them propagate --
+    real, observed bug: `standard_run`'s `except` handler calls this to
+    log the *original* failure via `_log_run_finish`, and `breaker.state`
+    itself does a live Redis read (`circuit_breaker.py`'s `.state`). When
+    Redis is the reason the original fetch failed (confirmed live,
+    2026-08-08 — a broken local Redis left dozens of `meta._ingest_log`
+    rows permanently stuck at `status='running'`, `_already_in_flight`'s
+    own no-timeout design then blocking every subsequent `POST .../run`
+    with 409 `already_running` for that source, indefinitely), this call
+    raised a *second* exception before `_log_run_finish` ever ran --
+    losing the original error entirely and leaving the row stuck exactly
+    like `_already_in_flight`'s docstring describes as needing "an
+    operator to notice and intervene" for, except the operator had no
+    `error_message` to notice *why*. `"unknown"` (not a fabricated
+    "closed"/"open") is the honest value here -- the real breaker state
+    genuinely couldn't be read, which is itself useful information, not
+    something to hide behind a guessed default.
     """
-    state = await breaker.state
+    try:
+        state = await breaker.state
+    except Exception as e:
+        log.warning(
+            "ingest.breaker_state_unreadable", source=source, error=str(e)
+        )
+        return "unknown"
     circuit_breaker_state_gauge.labels(source=source).set(
         _CIRCUIT_STATE_VALUE.get(state.value, -1)
     )

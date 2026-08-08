@@ -499,6 +499,62 @@ export async function fetchMlflowRuns(limit = 8): Promise<MlflowRun[]> {
   return json.data;
 }
 
+export type TuneTrial = {
+  hidden_size: number;
+  lr: number;
+  val_mape: number;
+  run_id: string;
+};
+
+export type TuneTriggerResult = {
+  best_hidden_size: number;
+  best_lr: number;
+  best_val_mape: number;
+  best_run_id: string;
+  trials: TuneTrial[];
+};
+
+/** Live call to `POST /v1/model/tune` -- a real grid search (3
+ * hidden_sizes × 2 learning_rates = 6 trials, each a full training
+ * run). Synchronous -- resolves once the whole real search completes
+ * (verified live: ~75s at this service's current data volume), not a
+ * 202-queued trigger the way `/model/train` is -- there's no separate
+ * worker process this hands off to. */
+export async function triggerTune(regions?: string[]): Promise<TuneTriggerResult> {
+  const res = await fetch(`${FORECAST_API_URL}/model/tune`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ regions: regions ?? null }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(body?.error?.message ?? `POST /v1/model/tune failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export type TuningRun = {
+  run_id: string;
+  status: string;
+  started_at: string | null;
+  duration_seconds: number | null;
+  metrics: Record<string, number>;
+  params: Record<string, string>;
+};
+
+/** Live call to `GET /v1/model/tuning-runs` -- real MLflow runs tagged
+ * `tuning=true` (every trial `ml/tune.py`'s grid search runs logs
+ * itself with this tag) -- replaces the old mock's 4 hardcoded sample
+ * trial rows. */
+export async function fetchTuningRuns(limit = 20): Promise<TuningRun[]> {
+  const res = await fetch(`${FORECAST_API_URL}/model/tuning-runs?limit=${limit}`);
+  if (!res.ok) {
+    throw new Error(`GET /v1/model/tuning-runs failed: ${res.status}`);
+  }
+  const json: { data: TuningRun[] } = await res.json();
+  return json.data;
+}
+
 export type DriftReport = {
   feature: string;
   psi: number | null;

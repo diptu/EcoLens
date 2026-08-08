@@ -58,11 +58,17 @@ export interface AdminKpi {
 }
 
 export interface EmissionsTrendPoint {
-  date: string;                // YYYY-MM-DD
+  date: string;                // YYYY-MM-DD for actual points; a short label for a forecast point
   actual: number;
   forecast_p10: number;
   forecast_p50: number;
   forecast_p90: number;
+  // True only for a real forward-looking point appended from
+  // `GET /v1/emissions/forecast` (demand-forecast x current-intensity) --
+  // `actual` on that point holds forecast_p50, not a measured value, so
+  // rendering must never label it "Actual".
+  isForecast?: boolean;
+  forecastScope?: string;       // e.g. "NEM" or "NSW1" -- which region the forecast covers
 }
 
 export interface ScopeSlice {

@@ -15,6 +15,13 @@ from app.schemas.model.training import (
     TrainingRunsListResponse,
     TrainTriggerResponse,
 )
+from app.schemas.model.tuning import (
+    TuneTrialOut,
+    TuneTriggerRequest,
+    TuneTriggerResponse,
+    TuningRunOut,
+    TuningRunsListResponse,
+)
 from app.schemas.model.versions import ModelVersionOut, ModelVersionsListResponse
 
 __all__ = [
@@ -34,4 +41,9 @@ __all__ = [
     "TrainingRunOut",
     "TrainingRunsListResponse",
     "TrainTriggerResponse",
+    "TuneTrialOut",
+    "TuneTriggerRequest",
+    "TuneTriggerResponse",
+    "TuningRunOut",
+    "TuningRunsListResponse",
 ]

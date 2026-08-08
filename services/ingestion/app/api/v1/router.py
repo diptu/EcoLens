@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from app.api.v1.anomalies import router as anomalies_router
 from app.api.v1.data_quality import router as data_quality_router
 from app.api.v1.datasources.routes import router as datasources_router
+from app.api.v1.features import router as features_router
 from app.api.v1.health import router as health_router
 from app.api.v1.ingest.routes import router as ingest_router
 from app.api.v1.ingestion.routes import router as ingestion_router
@@ -18,3 +20,5 @@ api_router.include_router(datasources_router)
 api_router.include_router(ingest_router)
 api_router.include_router(ingestion_router)
 api_router.include_router(data_quality_router)
+api_router.include_router(features_router)
+api_router.include_router(anomalies_router)

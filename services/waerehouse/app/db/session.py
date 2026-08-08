@@ -63,3 +63,38 @@ async def get_session() -> AsyncIterator[AsyncSession]:
 async def dispose() -> None:
     """Dispose of the engine's connection pool (call on service shutdown)."""
     await get_engine().dispose()
+    if get_settings().raw_marts_archive_configured:
+        await get_marts_archive_engine().dispose()
+
+
+@lru_cache
+def get_marts_archive_engine() -> AsyncEngine:
+    """Second engine, bound to `Settings.raw_marts_database_url` (a
+    separate Neon project) -- `app/retention/marts_archive.py`'s
+    permanent `raw_marts.*` archive lives here, distinct from `get_
+    engine()`'s primary database. Only call once `raw_marts_archive_
+    configured` is true."""
+    return create_async_engine(
+        get_settings().raw_marts_database_url,
+        pool_pre_ping=True,
+        future=True,
+        connect_args={"statement_cache_size": 0},
+    )
+
+
+@lru_cache
+def get_marts_archive_sessionmaker() -> async_sessionmaker[AsyncSession]:
+    return async_sessionmaker(get_marts_archive_engine(), expire_on_commit=False)
+
+
+@asynccontextmanager
+async def get_marts_archive_session() -> AsyncIterator[AsyncSession]:
+    session = get_marts_archive_sessionmaker()()
+    try:
+        yield session
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        raise
+    finally:
+        await session.close()

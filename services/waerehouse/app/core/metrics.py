@@ -108,6 +108,14 @@ mart_min_ts_seconds = Gauge(
     ["mart"],
     registry=REGISTRY,
 )
+marts_archive_rows_total = Counter(
+    "ecolens_warehouse_marts_archive_rows_total",
+    "Rows archived to the second (RAW_MARTS_DATABASE_URL) database "
+    "before being pruned from the primary database's raw_marts.*, by "
+    "table.",
+    ["table"],
+    registry=REGISTRY,
+)
 
 
 def metrics_as_text() -> bytes:

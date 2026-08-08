@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 
 import { Card } from "@/components/dashboard/card";
+import { IllustrativeBadge } from "@/components/dashboard/illustrative-badge";
 import { cn } from "@/lib/utils";
 import {
   getExecutiveKpis, getEmissionsBySource, getExecutiveTrend,
@@ -21,7 +22,7 @@ import {
 import {
   fetchYtdEmissions, fetchCurrentEmissions, fetchEmissionsTimeseries,
   fetchGenerationMix, fetchDemandSummary, fetchDemandForecast,
-  formatFuelType, fuelColor,
+  fetchEmissionsForecast, formatFuelType, fuelColor,
 } from "@/lib/emissions";
 import { fetchPublicDataQualitySummary } from "@/lib/data-quality";
 import type { EmissionsTrendPoint } from "@/lib/admin-dashboard";
@@ -30,7 +31,7 @@ function formatHourLabel(iso: string): string {
   return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-function KpiCard({ k }: { k: ExecutiveKpi }) {
+function KpiCard({ k, live }: { k: ExecutiveKpi; live: boolean }) {
   const isGood = (k.trend === k.good_when) || (k.trend === "flat");
   return (
     <m.div
@@ -39,7 +40,20 @@ function KpiCard({ k }: { k: ExecutiveKpi }) {
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3, ease: "easeOut" }}
     >
-      <h3 className="text-xs font-medium uppercase tracking-wide text-white/60">{k.label}</h3>
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="text-xs font-medium uppercase tracking-wide text-white/60">{k.label}</h3>
+        {/* Real fetch for this specific KPI never landed (backend down/
+         * unreachable) -- the value shown is the mock placeholder, same
+         * "no silently fabricated dashboards" convention every other
+         * page this session enforces, just per-card instead of
+         * per-page since this grid mixes independently-sourced KPIs. */}
+        {!live && (
+          <span
+            className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-300/70"
+            title="Backend unreachable — showing placeholder, not a live value"
+          />
+        )}
+      </div>
       <div className="mt-1.5 flex items-baseline gap-1.5">
         <span className="text-2xl font-bold text-white">{k.value}</span>
         {k.unit && <span className="text-xs text-white/50">{k.unit}</span>}
@@ -81,6 +95,23 @@ export default function ExecutiveDashboardPage() {
   const [forecastPreview, setForecastPreview] = useState(MOCK_FORECAST_PREVIEW);
   const [emissionsSnapshot, setEmissionsSnapshot] = useState(MOCK_EMISSIONS_SNAPSHOT);
 
+  // Per-section "did the real fetch for this actually land" tracking --
+  // this is the platform's primary landing page (`/dashboard` redirects
+  // here), and every card below silently keeps its mock placeholder on a
+  // failed/never-resolved fetch (`.catch(() => {})` throughout, by
+  // design -- see the comment below). That's a real gap against this
+  // app's own no-silent-fabrication convention: with all backends
+  // healthy it never surfaces, but if one genuinely is down, this page
+  // would show fabricated-looking numbers with zero visual difference
+  // from real ones. `liveKpiLabels` covers the KPI grid (4 independent
+  // fetches touch different labels in the same array); the other 4
+  // sections each get their own flag.
+  const [liveKpiLabels, setLiveKpiLabels] = useState<Set<string>>(new Set());
+  const [sourceLive, setSourceLive] = useState(false);
+  const [trendLive, setTrendLive] = useState(false);
+  const [forecastLive, setForecastLive] = useState(false);
+  const [snapshotLive, setSnapshotLive] = useState(false);
+
   // Every fetch below hits a real backend endpoint (forecast-api, plus
   // data-pipeline's one unauthenticated data-quality summary). Each is
   // independent and fails soft -- if the backend is unreachable (e.g.
@@ -105,6 +136,7 @@ export default function ExecutiveDashboardPage() {
               : k,
           ),
         );
+        setLiveKpiLabels((prev) => new Set(prev).add("Total CO₂e (YTD)"));
       })
       .catch(() => {});
 
@@ -120,6 +152,7 @@ export default function ExecutiveDashboardPage() {
               : k,
           ),
         );
+        setLiveKpiLabels((prev) => new Set(prev).add("Carbon Intensity"));
       })
       .catch(() => {});
 
@@ -137,6 +170,12 @@ export default function ExecutiveDashboardPage() {
             return k;
           }),
         );
+        setLiveKpiLabels((prev) => {
+          const next = new Set(prev);
+          if (summary.renewable_share_pct != null) next.add("Renewable Share");
+          if (summary.avg_price_mwh != null) next.add("Avg Wholesale Price (YTD)");
+          return next;
+        });
       })
       .catch(() => {});
 
@@ -154,6 +193,12 @@ export default function ExecutiveDashboardPage() {
             return k;
           }),
         );
+        setLiveKpiLabels((prev) => {
+          const next = new Set(prev);
+          if (dq.data_quality_score_pct != null) next.add("Data Quality Score");
+          next.add("Open Risks");
+          return next;
+        });
       })
       .catch(() => {});
 
@@ -172,6 +217,7 @@ export default function ExecutiveDashboardPage() {
         );
         setSourceTotal(Math.round(mix.total_emissions_kgco2e / 1000).toLocaleString());
         setSourceHeading("Grid Electricity by Fuel Type");
+        setSourceLive(true);
       })
       .catch(() => {});
 
@@ -186,11 +232,11 @@ export default function ExecutiveDashboardPage() {
         // but useless one when the placeholder is clearly labeled as such
         // elsewhere on this page.
         if (cancelled || series.points.length < 2) return;
-        // Every point here is a measured historical fact, not a
-        // projection -- there's no real day-level forecast to show a
-        // P10-P90 band against (the model's own horizon tops out at
-        // ~24h), so the band collapses to the actual value rather than
-        // fabricate an uncertainty range that doesn't exist.
+        // Every historical point here is a measured fact, not a
+        // projection -- the band collapses to the actual value (no
+        // fabricated uncertainty range) for these. A real forward-looking
+        // point is appended below, once GET /v1/emissions/forecast
+        // resolves, carrying the model's actual P10/P90 band.
         setTrend(
           series.points.map((p) => {
             const actual = Math.round((p.total_emissions_kgco2e ?? 0) / 1000);
@@ -203,6 +249,38 @@ export default function ExecutiveDashboardPage() {
             };
           }),
         );
+        setTrendLive(true);
+
+        // Real projected band: GET /v1/emissions/forecast (demand
+        // forecast x current carbon intensity, held constant across the
+        // horizon -- see that endpoint's own docstring). Tries the
+        // NEM-wide aggregate first; falls back to NSW1 alone if the
+        // aggregate 404s/503s (only NSW1 has a trained Production model
+        // right now -- the NEM path needs all 5 regions fitted). Scope is
+        // disclosed in the chart, never silently swapped for a wider
+        // claim than what was actually served.
+        fetchEmissionsForecast()
+          .catch(() => fetchEmissionsForecast("NSW1"))
+          .then((forecast) => {
+            if (cancelled || forecast.points.length === 0) return;
+            const toT = (kg: number) => Math.round(kg / 1000);
+            const p10 = toT(forecast.points.reduce((s, p) => s + p.p10_kgco2e, 0));
+            const p50 = toT(forecast.points.reduce((s, p) => s + p.p50_kgco2e, 0));
+            const p90 = toT(forecast.points.reduce((s, p) => s + p.p90_kgco2e, 0));
+            setTrend((prev) => [
+              ...prev.filter((p) => !p.isForecast),
+              {
+                date: `Next ${forecast.horizon}`,
+                actual: p50,
+                forecast_p10: p10,
+                forecast_p50: p50,
+                forecast_p90: p90,
+                isForecast: true,
+                forecastScope: forecast.region,
+              },
+            ]);
+          })
+          .catch(() => {});
       })
       .catch(() => {});
 
@@ -217,6 +295,7 @@ export default function ExecutiveDashboardPage() {
           sparkline: series.points.map((p) => Math.round((p.total_emissions_kgco2e ?? 0) / 1000)),
           labels: series.points.map((p) => formatHourLabel(p.bucket)),
         }));
+        setSnapshotLive(true);
       })
       .catch(() => {});
 
@@ -232,6 +311,7 @@ export default function ExecutiveDashboardPage() {
           labels: forecast.points.map((p) => formatHourLabel(p.ts)),
           horizonLabel: `next ${forecast.horizon}`,
         });
+        setForecastLive(true);
       })
       .catch(() => {});
 
@@ -239,6 +319,8 @@ export default function ExecutiveDashboardPage() {
       cancelled = true;
     };
   }, []);
+
+  const forecastPoint = trend.find((p) => p.isForecast) ?? null;
 
   return (
     <div className="space-y-6">
@@ -256,7 +338,7 @@ export default function ExecutiveDashboardPage() {
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
         {kpis.map((k, i) => (
-          <KpiCardWithDelay key={k.label} k={k} delay={i * 0.05} />
+          <KpiCardWithDelay key={k.label} k={k} delay={i * 0.05} live={liveKpiLabels.has(k.label)} />
         ))}
       </div>
 
@@ -268,9 +350,12 @@ export default function ExecutiveDashboardPage() {
               <h2 className="text-base font-semibold text-white">Demand Forecast Preview</h2>
               <p className="text-xs text-white/50">{forecastPreview.horizonLabel} · P10 / P50 / P90</p>
             </div>
-            <Link href="/dashboard/forecast/" className="inline-flex items-center gap-1 text-xs text-emerald-100 hover:underline" data-testid="forecast-preview-link">
-              View full forecast →
-            </Link>
+            <div className="flex items-center gap-2">
+              {!forecastLive && <IllustrativeBadge label="Backend unreachable — placeholder" />}
+              <Link href="/dashboard/forecast/" className="inline-flex items-center gap-1 text-xs text-emerald-100 hover:underline" data-testid="forecast-preview-link">
+                View full forecast →
+              </Link>
+            </div>
           </div>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
             <KpiMini label="Current (P50)" value={`${forecastPreview.current.toLocaleString()} MW`} />
@@ -295,9 +380,12 @@ export default function ExecutiveDashboardPage() {
               <h2 className="text-base font-semibold text-white">Emissions Snapshot</h2>
               <p className="text-xs text-white/50">last 24h · Scope 2 (grid)</p>
             </div>
-            <Link href="/dashboard/carbon/" className="inline-flex items-center gap-1 text-xs text-emerald-100 hover:underline" data-testid="emissions-preview-link">
-              View details →
-            </Link>
+            <div className="flex items-center gap-2">
+              {!snapshotLive && <IllustrativeBadge label="Backend unreachable — placeholder" />}
+              <Link href="/dashboard/carbon/" className="inline-flex items-center gap-1 text-xs text-emerald-100 hover:underline" data-testid="emissions-preview-link">
+                View details →
+              </Link>
+            </div>
           </div>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
             <KpiMini label="Total (Scope 2)" value={`${emissionsSnapshot.totalTco2e.toLocaleString()} tCO₂e`} />
@@ -320,19 +408,38 @@ export default function ExecutiveDashboardPage() {
           <div className="mb-3 flex items-center justify-between">
             <div>
               <h2 className="text-base font-semibold text-white">Emissions Trend</h2>
-              <p className="text-xs text-white/50">8-day rolling tCO₂e, actual</p>
+              <p className="text-xs text-white/50">
+                8-day rolling tCO₂e, actual
+                {forecastPoint
+                  ? ` + real ${forecastPoint.date.replace("Next ", "")} forecast (${forecastPoint.forecastScope})`
+                  : ""}
+              </p>
             </div>
+            {!trendLive && <IllustrativeBadge label="Backend unreachable — placeholder" />}
           </div>
-          <div className="mb-3 flex items-center gap-4 text-xs text-white/60">
+          <div className="mb-3 flex flex-wrap items-center gap-4 text-xs text-white/60">
             <span className="inline-flex items-center gap-1.5">
               <span className="h-1.5 w-3 rounded-full bg-emerald-300" /> Actual
             </span>
+            {forecastPoint && (
+              <>
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="h-1.5 w-3 rounded-full border border-dashed border-emerald-200/70" /> Forecast (P50)
+                </span>
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="h-1.5 w-3 rounded-full bg-emerald-300/15" /> P10–P90 band
+                </span>
+              </>
+            )}
           </div>
           <MiniChart data={trend} />
         </Card>
 
         <Card>
-          <h2 className="mb-3 text-base font-semibold text-white">{sourceHeading}</h2>
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="text-base font-semibold text-white">{sourceHeading}</h2>
+            {!sourceLive && <IllustrativeBadge label="Backend unreachable — placeholder" />}
+          </div>
           <DonutSimple slices={source} total={sourceTotal} unit="tCO₂e" />
         </Card>
       </div>
@@ -340,9 +447,9 @@ export default function ExecutiveDashboardPage() {
   );
 }
 
-function KpiCardWithDelay({ k, delay }: { k: ExecutiveKpi; delay: number }) {
+function KpiCardWithDelay({ k, delay, live }: { k: ExecutiveKpi; delay: number; live: boolean }) {
   return (
-    <KpiCard k={k} key={k.label + delay} />
+    <KpiCard k={k} live={live} key={k.label + delay} />
   );
 }
 
@@ -523,7 +630,20 @@ function MiniChart({ data }: { data: EmissionsTrendPoint[] }) {
   const stepX = hasEnoughData ? innerW / (data.length - 1) : innerW;
   const x = (i: number) => padL + i * stepX;
   const y = (v: number) => padT + innerH - (v / yMax) * innerH;
-  const actualPath = data.map((d, i) => `${i === 0 ? "M" : "L"} ${x(i).toFixed(1)} ${y(d.actual).toFixed(1)}`).join(" ");
+  // Split into a solid "measured" line and a dashed connector out to any
+  // appended forecast point(s) -- a forecast point's `actual` field holds
+  // forecast_p50, not a measurement, so it must never render as part of
+  // the solid "Actual" line.
+  const actualIdx = data.map((_, i) => i).filter((i) => !data[i].isForecast);
+  const forecastIdx = data.map((_, i) => i).filter((i) => data[i].isForecast);
+  const actualPath = actualIdx
+    .map((i, k) => `${k === 0 ? "M" : "L"} ${x(i).toFixed(1)} ${y(data[i].actual).toFixed(1)}`)
+    .join(" ");
+  const lastActualIdx = actualIdx.length ? actualIdx[actualIdx.length - 1] : null;
+  const forecastConnectorPaths = forecastIdx.map((i) => {
+    const fromIdx = lastActualIdx ?? i;
+    return `M ${x(fromIdx).toFixed(1)} ${y(data[fromIdx].actual).toFixed(1)} L ${x(i).toFixed(1)} ${y(data[i].actual).toFixed(1)}`;
+  });
   const bandTop = data.map((d, i) => `${i === 0 ? "M" : "L"} ${x(i).toFixed(1)} ${y(d.forecast_p90).toFixed(1)}`).join(" ");
   const bandBot = data.slice().reverse().map((d, i) => {
     const j = data.length - 1 - i;
@@ -609,7 +729,7 @@ function MiniChart({ data }: { data: EmissionsTrendPoint[] }) {
           transition={{ duration: 0.6, delay: 0.2 }}
         />
 
-        {/* Actual line */}
+        {/* Actual line (measured points only) */}
         <m.path
           d={actualPath}
           fill="none"
@@ -622,14 +742,33 @@ function MiniChart({ data }: { data: EmissionsTrendPoint[] }) {
           transition={{ duration: 1, ease: "easeInOut" }}
         />
 
-        {/* Data points — staggered spring-in */}
+        {/* Forecast connector (dashed -- P50, not a measurement) */}
+        {forecastConnectorPaths.map((d, i) => (
+          <m.path
+            key={`fcst-${i}`}
+            d={d}
+            fill="none"
+            stroke="#34d399"
+            strokeWidth={2}
+            strokeDasharray="4 3"
+            strokeLinecap="round"
+            initial={reduced ? false : { pathLength: 0 }}
+            animate={{ pathLength: 1 }}
+            transition={{ duration: 0.6, delay: 0.4, ease: "easeInOut" }}
+          />
+        ))}
+
+        {/* Data points — staggered spring-in; forecast points render hollow */}
         {data.map((d, i) => (
           <m.circle
             key={d.date}
             cx={x(i)}
             cy={y(d.actual)}
-            r={3}
-            fill="#34d399"
+            r={d.isForecast ? 4 : 3}
+            fill={d.isForecast ? "#0a1410" : "#34d399"}
+            stroke={d.isForecast ? "#34d399" : "none"}
+            strokeWidth={d.isForecast ? 2 : 0}
+            strokeDasharray={d.isForecast ? "2 1.5" : undefined}
             initial={reduced ? false : { scale: 0, opacity: 0 }}
             animate={{ scale: 1, opacity: 1 }}
             transition={{
@@ -656,9 +795,9 @@ function MiniChart({ data }: { data: EmissionsTrendPoint[] }) {
             y={h - 8}
             textAnchor={i === 0 ? "start" : i === data.length - 1 ? "end" : "middle"}
             fontSize="10"
-            fill="rgba(255,255,255,0.5)"
+            fill={d.isForecast ? "rgba(52,211,153,0.85)" : "rgba(255,255,255,0.5)"}
           >
-            {d.date.slice(5)}
+            {d.isForecast ? d.date : d.date.slice(5)}
           </text>
         ))}
 
@@ -715,11 +854,16 @@ function MiniChart({ data }: { data: EmissionsTrendPoint[] }) {
             </div>
             <div className="flex items-center gap-2 py-0.5">
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-300" />
-              <span className="text-white/65">Actual</span>
+              <span className="text-white/65">{hoverPoint.isForecast ? "Forecast (P50)" : "Actual"}</span>
               <span className="ml-auto font-mono font-medium text-white">
                 {hoverPoint.actual.toLocaleString()} tCO₂e
               </span>
             </div>
+            {hoverPoint.isForecast && hoverPoint.forecastScope && (
+              <div className="pb-0.5 text-[10px] text-amber-200/70">
+                Scope: {hoverPoint.forecastScope} only
+              </div>
+            )}
             <div className="flex items-center gap-2 py-0.5">
               <span className="h-1.5 w-1.5 rounded-full border border-emerald-100/50" />
               <span className="text-white/65">P10 (lower)</span>

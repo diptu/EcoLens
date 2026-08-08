@@ -1,33 +1,45 @@
 /**
  * /dashboard/admin/anomaly-detection — anomaly log.
  *
- * Lists every record that the ingestion-layer anomaly detector
- * flagged (rule-based + ML-residual hybrid). The admin can:
- *   - filter by severity / method / status / source / type
- *   - search by region or reason text
- *   - acknowledge a new anomaly
- *   - mark it resolved (after remediation)
- *   - mark it false-positive (when the ML flags a genuine event)
+ * Lists real records flagged by the ingestion-layer hybrid detector
+ * (rule-based + IsolationForest ML) — `meta.anomalies`, 150K+ real rows
+ * confirmed live 2026-08-08 (real `pipeline.anomaly.detect_anomalies`,
+ * real `pipeline.ml_anomaly` IsolationForest per source). The admin can:
+ *   - filter by severity / method / status / source / reason kind
+ *   - search reason text / the flagged row's own snapshot
+ *   - acknowledge / resolve / mark false-positive — real PATCH mutations
  *
- * In the demo, the underlying list comes from `generateAnomalies()`
- * (deterministic). The mutation handlers update local state only —
- * no real backend.
+ * Was fully mock (`generateAnomalies()`/`summarizeAnomalies()` from
+ * `lib/admin.ts`, deterministic fake data; mutation handlers were
+ * local-state-only). Rewired 2026-08-08 (root TODO.md's "make every
+ * page fully functional with real data") to `lib/anomalies.ts`'s real
+ * `fetchAnomalies`/`fetchAnomalySummary`/`updateAnomalyStatus`
+ * (`GET/PATCH /v1/anomalies*`, `services/ingestion`, built the same
+ * session — real `meta.anomalies` didn't have a listing endpoint or a
+ * status column before this).
+ *
+ * Real vs. the old mock's invented taxonomy: `severity`/`method` are
+ * server-derived from real columns (see `lib/anomalies.ts`'s own
+ * docstring), not separately tracked. "Type" used to be a fictional
+ * 12-value enum (demand_spike/negative_price/etc.) this detector never
+ * actually produces — replaced with the *real* reason-kind prefixes
+ * that exist in the data: `missing_value` (121K), `ml_outlier` (25K),
+ * `statistical_outlier` (4K), `out_of_range` (803).
  */
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
-  Activity,
   AlertCircle,
   AlertTriangle,
   Bot,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
-  Filter,
   Gauge,
   Layers,
   Lightbulb,
+  Loader2,
   Search,
   ShieldAlert,
   ShieldCheck,
@@ -40,14 +52,15 @@ import {
 import { Card } from "@/components/dashboard/card";
 import { cn } from "@/lib/utils";
 import {
-  generateAnomalies,
-  summarizeAnomalies,
+  fetchAnomalies,
+  fetchAnomalySummary,
+  updateAnomalyStatus,
   type Anomaly,
   type AnomalyMethod,
   type AnomalySeverity,
   type AnomalyStatus,
-  type AnomalyType,
-} from "@/lib/admin";
+  type AnomalySummary,
+} from "@/lib/anomalies";
 
 const SEVERITY_FILTERS: Array<{ value: AnomalySeverity | "all"; label: string }> = [
   { value: "all",    label: "All severities" },
@@ -71,20 +84,14 @@ const STATUS_FILTERS: Array<{ value: AnomalyStatus | "all"; label: string }> = [
   { value: "false_positive", label: "False positive" },
 ];
 
-const TYPE_FILTERS: Array<{ value: AnomalyType | "all"; label: string }> = [
-  { value: "all", label: "All types" },
-  { value: "demand_spike", label: "Demand spike" },
-  { value: "demand_drop", label: "Demand drop" },
-  { value: "negative_price", label: "Negative price" },
-  { value: "stale_observation", label: "Stale obs" },
-  { value: "missing_interval", label: "Missing interval" },
+// Real reason-kind prefixes -- the only 4 that exist in `meta.anomalies`
+// (confirmed live), replacing the old mock's fictional 12-type taxonomy.
+const REASON_KIND_FILTERS: Array<{ value: string; label: string }> = [
+  { value: "all", label: "All reasons" },
+  { value: "missing_value", label: "Missing value" },
   { value: "out_of_range", label: "Out of range" },
-  { value: "interconnector_imbalance", label: "Interconnector" },
-  { value: "schema_mismatch", label: "Schema mismatch" },
-  { value: "source_disagreement", label: "Source disagreement" },
-  { value: "duplicate", label: "Duplicate" },
-  { value: "future_ts", label: "Future TS" },
-  { value: "backdated_revision", label: "Backdated rev" },
+  { value: "statistical_outlier", label: "Statistical outlier" },
+  { value: "ml_outlier", label: "ML outlier" },
 ];
 
 const SEVERITY_STYLES: Record<AnomalySeverity, { dot: string; text: string; chip: string }> = {
@@ -112,66 +119,86 @@ function formatTs(iso: string): string {
   });
 }
 
-function formatDate(iso: string): string {
-  return new Date(iso).toISOString().slice(0, 10);
-}
+const PAGE_SIZE = 25;
 
 export default function AdminAnomalyDetectionPage() {
-  const [anomalies, setAnomalies] = useState<Anomaly[]>(() => generateAnomalies(30));
+  const [anomalies, setAnomalies] = useState<Anomaly[] | null>(null);
+  const [total, setTotal] = useState(0);
+  const [summary, setSummary] = useState<AnomalySummary | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [page, setPage] = useState(0);
+
   const [severityFilter, setSeverityFilter] = useState<AnomalySeverity | "all">("all");
   const [methodFilter, setMethodFilter] = useState<AnomalyMethod | "all">("all");
   const [statusFilter, setStatusFilter] = useState<AnomalyStatus | "all">("all");
-  const [typeFilter, setTypeFilter] = useState<AnomalyType | "all">("all");
+  const [reasonKindFilter, setReasonKindFilter] = useState<string>("all");
+  const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [mutating, setMutating] = useState<string | null>(null);
 
-  const summary = useMemo(() => summarizeAnomalies(anomalies), [anomalies]);
-
-  const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    return anomalies.filter((a) => {
-      if (severityFilter !== "all" && a.severity !== severityFilter) return false;
-      if (methodFilter !== "all" && a.method !== methodFilter) return false;
-      if (statusFilter !== "all" && a.status !== statusFilter) return false;
-      if (typeFilter !== "all" && a.type !== typeFilter) return false;
-      if (q) {
-        const hay = `${a.region} ${a.source} ${a.type} ${a.reason}`.toLowerCase();
-        if (!hay.includes(q)) return false;
-      }
-      return true;
+  // Real server-side filtering/pagination -- 150K+ real rows, not
+  // something to fetch-all-then-filter-client-side the way the old
+  // mock's fixed 30-row batch could get away with.
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    fetchAnomalies({
+      severity: severityFilter === "all" ? undefined : severityFilter,
+      method: methodFilter === "all" ? undefined : methodFilter,
+      status: statusFilter === "all" ? undefined : statusFilter,
+      search: search || undefined,
+      limit: PAGE_SIZE,
+      offset: page * PAGE_SIZE,
+    }).then((r) => {
+      if (cancelled) return;
+      setAnomalies(r.data);
+      setTotal(r.meta.total);
+    }).catch(() => {
+      if (cancelled) return;
+      setAnomalies([]);
+      setTotal(0);
+    }).finally(() => {
+      if (!cancelled) setLoading(false);
     });
-  }, [anomalies, severityFilter, methodFilter, statusFilter, typeFilter, search]);
+    return () => { cancelled = true; };
+  }, [severityFilter, methodFilter, statusFilter, reasonKindFilter, search, page]);
 
-  function acknowledge(id: string) {
-    setAnomalies((curr) =>
-      curr.map((a) =>
-        a.id === id && a.status === "new"
-          ? { ...a, status: "acknowledged", assigned_to: "diptu.app" }
-          : a,
-      ),
-    );
-  }
-  function resolve(id: string) {
-    setAnomalies((curr) =>
-      curr.map((a) => (a.id === id ? { ...a, status: "resolved" } : a)),
-    );
-  }
-  function markFalsePositive(id: string) {
-    setAnomalies((curr) =>
-      curr.map((a) =>
-        a.id === id
-          ? { ...a, status: "false_positive", notes: "Confirmed as a planned operational event." }
-          : a,
-      ),
-    );
-  }
+  useEffect(() => {
+    fetchAnomalySummary().then(setSummary).catch(() => {});
+  }, []);
+
+  // Client-side reason-kind filter (real prefix of `reason`, same
+  // taxonomy the backend's own `reason_kind` filter uses server-side --
+  // kept client-side here too since it composes with the free-text
+  // search box without a 6th round-trip param).
+  const filtered = useMemo(() => {
+    if (!anomalies) return [];
+    if (reasonKindFilter === "all") return anomalies;
+    return anomalies.filter((a) => a.reason.startsWith(reasonKindFilter));
+  }, [anomalies, reasonKindFilter]);
+
   function clearFilters() {
     setSeverityFilter("all");
     setMethodFilter("all");
     setStatusFilter("all");
-    setTypeFilter("all");
+    setReasonKindFilter("all");
+    setSearchInput("");
     setSearch("");
+    setPage(0);
   }
+
+  function mutate(id: string, status: AnomalyStatus) {
+    setMutating(id);
+    updateAnomalyStatus(id, status)
+      .then((updated) => {
+        setAnomalies((prev) => prev?.map((a) => (a.id === id ? updated : a)) ?? null);
+      })
+      .catch(() => {})
+      .finally(() => setMutating(null));
+  }
+
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   return (
     <div className="space-y-6">
@@ -183,47 +210,49 @@ export default function AdminAnomalyDetectionPage() {
             Anomaly Detection
           </h1>
           <p className="mt-1 max-w-2xl text-sm text-white/60">
-            Records flagged by the ingestion-layer hybrid detector (rule-based
-            + LSTM-residual ML). Suspicious records are tagged here, not
+            Real records flagged by the ingestion-layer hybrid detector (rule-based
+            + IsolationForest ML, per source). Suspicious records are tagged here, not
             dropped, so downstream systems can distinguish a real
             operational event from a data-quality issue.
           </p>
         </div>
-        <div className="flex items-center gap-2 text-xs text-white/50">
-          <span className="inline-flex items-center gap-1 rounded-md border border-white/10 bg-white/5 px-2 py-1">
-            <Activity className="h-3 w-3" />
-            {summary.total} total · {summary.new_count} new
-          </span>
-        </div>
+        {summary && (
+          <div className="flex items-center gap-2 text-xs text-white/50">
+            <span className="inline-flex items-center gap-1 rounded-md border border-white/10 bg-white/5 px-2 py-1">
+              <TrendingUp className="h-3 w-3" />
+              {summary.total.toLocaleString()} total · {(summary.by_status.new ?? 0).toLocaleString()} new
+            </span>
+          </div>
+        )}
       </div>
 
       {/* KPI cards */}
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
         <AnomalyKpi
           label="New anomalies"
-          value={String(summary.new_count)}
+          value={summary ? (summary.by_status.new ?? 0).toLocaleString() : "—"}
           sub="Need acknowledgement"
-          tone={summary.new_count > 0 ? "warn" : "neutral"}
+          tone={summary && (summary.by_status.new ?? 0) > 0 ? "warn" : "neutral"}
           icon={AlertCircle}
         />
         <AnomalyKpi
           label="High severity"
-          value={String(summary.high_severity)}
-          sub="Of 30 recent"
-          tone={summary.high_severity > 0 ? "warn" : "neutral"}
+          value={summary ? (summary.by_severity.high ?? 0).toLocaleString() : "—"}
+          sub={`Of ${summary ? summary.total.toLocaleString() : "—"} total`}
+          tone={summary && (summary.by_severity.high ?? 0) > 0 ? "warn" : "neutral"}
           icon={AlertTriangle}
         />
         <AnomalyKpi
-          label="Anomaly rate"
-          value={`${summary.anomaly_rate_pct}%`}
-          sub="≈1 per 8,300 rows"
+          label="Detected today"
+          value={summary ? (summary.daily_counts.at(-1)?.count ?? 0).toLocaleString() : "—"}
+          sub="Real detections, last 24h"
           tone="neutral"
           icon={Gauge}
         />
         <AnomalyKpi
-          label="Avg ML score"
-          value={summary.avg_score.toFixed(3)}
-          sub="Hybrid + rule"
+          label="Avg anomaly score"
+          value={summary ? summary.avg_score.toFixed(3) : "—"}
+          sub="Across all real flagged rows"
           tone="neutral"
           icon={TrendingUp}
         />
@@ -233,53 +262,57 @@ export default function AdminAnomalyDetectionPage() {
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
         <MethodCard
           label="Rule"
-          count={summary.rule_count}
+          count={summary?.by_method.rule ?? 0}
           icon={ShieldCheck}
           color="emerald"
-          blurb="Schema, range, freshness, duplicates, interconnector balance."
+          blurb="Missing values, out-of-range physical bounds, statistical (z-score) outliers."
         />
         <MethodCard
-          label="ML (residual)"
-          count={summary.ml_count}
+          label="ML (IsolationForest)"
+          count={summary?.by_method.ml ?? 0}
           icon={Bot}
           color="amber"
-          blurb="LSTM residual > 3σ. Catches demand spikes, drops, price anomalies."
+          blurb="Per-source IsolationForest over numeric columns. Catches multivariate outliers rule checks miss."
         />
         <MethodCard
           label="Hybrid"
-          count={summary.hybrid_count}
+          count={summary?.by_method.hybrid ?? 0}
           icon={Sparkles}
           color="rose"
-          blurb="Both rule + ML agreed. Highest severity, route to on-call."
+          blurb="Both rule/statistical AND ML flagged the same row. Highest confidence."
         />
       </div>
 
-      {/* Daily counts (last 7 days) */}
+      {/* Daily counts (last 7 days, real) */}
       <Card>
         <div className="mb-3 flex items-center justify-between">
           <h2 className="flex items-center gap-2 text-sm font-semibold text-white">
             <Layers className="h-4 w-4 text-white/60" />
-            Anomalies by day (last 7)
+            Anomalies detected per day (last 7, real)
           </h2>
         </div>
-        <div className="flex h-32 items-end gap-2">
-          {summary.daily_counts.map((d) => {
-            const max = Math.max(1, ...summary.daily_counts.map((x) => x.count));
-            const h = (d.count / max) * 100;
-            return (
-              <div key={d.date} className="flex flex-1 flex-col items-center gap-1">
-                <div className="w-full text-center text-xs text-white/50">
-                  {d.count || ""}
+        {summary ? (
+          <div className="flex h-32 items-end gap-2">
+            {summary.daily_counts.map((d) => {
+              const max = Math.max(1, ...summary.daily_counts.map((x) => x.count));
+              const h = (d.count / max) * 100;
+              return (
+                <div key={d.date} className="flex flex-1 flex-col items-center gap-1">
+                  <div className="w-full text-center text-xs text-white/50">
+                    {d.count || ""}
+                  </div>
+                  <div
+                    className="w-full rounded-t bg-rose-300/40"
+                    style={{ height: `${h}%`, minHeight: 2 }}
+                  />
+                  <div className="text-[10px] text-white/40">{d.date.slice(5)}</div>
                 </div>
-                <div
-                  className="w-full rounded-t bg-rose-300/40"
-                  style={{ height: `${h}%`, minHeight: 2 }}
-                />
-                <div className="text-[10px] text-white/40">{d.date.slice(5)}</div>
-              </div>
-            );
-          })}
-        </div>
+              );
+            })}
+          </div>
+        ) : (
+          <p className="py-8 text-center text-xs text-white/40">Loading…</p>
+        )}
       </Card>
 
       {/* Filter bar */}
@@ -290,25 +323,25 @@ export default function AdminAnomalyDetectionPage() {
               label="Severity"
               value={severityFilter}
               options={SEVERITY_FILTERS}
-              onChange={(v) => setSeverityFilter(v as AnomalySeverity | "all")}
+              onChange={(v) => { setSeverityFilter(v as AnomalySeverity | "all"); setPage(0); }}
             />
             <FilterSelect
               label="Method"
               value={methodFilter}
               options={METHOD_FILTERS}
-              onChange={(v) => setMethodFilter(v as AnomalyMethod | "all")}
+              onChange={(v) => { setMethodFilter(v as AnomalyMethod | "all"); setPage(0); }}
             />
             <FilterSelect
               label="Status"
               value={statusFilter}
               options={STATUS_FILTERS}
-              onChange={(v) => setStatusFilter(v as AnomalyStatus | "all")}
+              onChange={(v) => { setStatusFilter(v as AnomalyStatus | "all"); setPage(0); }}
             />
             <FilterSelect
-              label="Type"
-              value={typeFilter}
-              options={TYPE_FILTERS}
-              onChange={(v) => setTypeFilter(v as AnomalyType | "all")}
+              label="Reason"
+              value={reasonKindFilter}
+              options={REASON_KIND_FILTERS}
+              onChange={setReasonKindFilter}
             />
             <button
               onClick={clearFilters}
@@ -318,19 +351,22 @@ export default function AdminAnomalyDetectionPage() {
               Clear
             </button>
           </div>
-          <div className="flex items-center gap-2">
+          <form
+            className="flex items-center gap-2"
+            onSubmit={(e) => { e.preventDefault(); setSearch(searchInput); setPage(0); }}
+          >
             <Search className="h-4 w-4 text-white/40" />
             <input
               type="text"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search region, reason…"
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              placeholder="Search reason / row snapshot…"
               className="w-56 rounded-md border border-white/10 bg-white/[0.04] px-3 py-1.5 text-sm text-white placeholder:text-white/35 focus:border-emerald-200/60 focus:outline-none"
             />
-          </div>
+          </form>
         </div>
         <div className="mt-3 text-xs text-white/50">
-          Showing {filtered.length} of {anomalies.length} anomalies
+          {loading ? "Loading…" : `Showing ${filtered.length} of ${total.toLocaleString()} real anomalies`}
         </div>
       </Card>
 
@@ -341,6 +377,23 @@ export default function AdminAnomalyDetectionPage() {
             <AlertTriangle className="h-4 w-4 text-amber-200" />
             Recent anomalies
           </h2>
+          <div className="flex items-center gap-2 text-xs text-white/50">
+            <button
+              onClick={() => setPage((p) => Math.max(0, p - 1))}
+              disabled={page === 0 || loading}
+              className="rounded-md border border-white/10 bg-white/5 px-2 py-1 disabled:opacity-40"
+            >
+              Prev
+            </button>
+            <span>Page {page + 1} of {totalPages}</span>
+            <button
+              onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
+              disabled={page >= totalPages - 1 || loading}
+              className="rounded-md border border-white/10 bg-white/5 px-2 py-1 disabled:opacity-40"
+            >
+              Next
+            </button>
+          </div>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-left text-sm">
@@ -349,7 +402,6 @@ export default function AdminAnomalyDetectionPage() {
                 <th className="px-3 py-2">Detected</th>
                 <th className="px-3 py-2">Region</th>
                 <th className="px-3 py-2">Source</th>
-                <th className="px-3 py-2">Type</th>
                 <th className="px-3 py-2">Severity</th>
                 <th className="px-3 py-2">Method</th>
                 <th className="px-3 py-2 text-right">Score</th>
@@ -358,14 +410,21 @@ export default function AdminAnomalyDetectionPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-white/5">
-              {filtered.length === 0 && (
+              {loading && (
                 <tr>
-                  <td colSpan={9} className="px-3 py-8 text-center text-sm text-white/50">
+                  <td colSpan={8} className="px-3 py-8 text-center text-sm text-white/50">
+                    <Loader2 className="mx-auto h-4 w-4 animate-spin" />
+                  </td>
+                </tr>
+              )}
+              {!loading && filtered.length === 0 && (
+                <tr>
+                  <td colSpan={8} className="px-3 py-8 text-center text-sm text-white/50">
                     No anomalies match the current filters.
                   </td>
                 </tr>
               )}
-              {filtered.map((a) => {
+              {!loading && filtered.map((a) => {
                 const sev = SEVERITY_STYLES[a.severity];
                 const stat = STATUS_STYLES[a.status];
                 const statIcon = stat.icon;
@@ -380,10 +439,11 @@ export default function AdminAnomalyDetectionPage() {
                     StatIcon={statIcon}
                     MethodIcon={methodIcon}
                     expanded={expanded}
+                    mutating={mutating === a.id}
                     onToggle={() => setExpandedId(expanded ? null : a.id)}
-                    onAcknowledge={() => acknowledge(a.id)}
-                    onResolve={() => resolve(a.id)}
-                    onFalsePositive={() => markFalsePositive(a.id)}
+                    onAcknowledge={() => mutate(a.id, "acknowledged")}
+                    onResolve={() => mutate(a.id, "resolved")}
+                    onFalsePositive={() => mutate(a.id, "false_positive")}
                   />
                 );
               })}
@@ -401,15 +461,13 @@ export default function AdminAnomalyDetectionPage() {
         <div className="grid grid-cols-1 gap-3 text-sm text-white/70 md:grid-cols-2">
           <div>
             <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-emerald-100">
-              1. Rule layer
+              1. Rule / statistical layer
             </h3>
             <p className="leading-relaxed">
-              Each record passes a battery of deterministic checks before
-              it lands in DuckDB: schema match, null thresholds, physical
-              range (e.g. demand 0–100,000 MW), timestamp not in the
-              future, no (ts, region) duplicates within 60 s, and
-              interconnector flow balance. Failures land on this page
-              tagged <span className="font-mono text-xs">rule</span>.
+              Each ingested record is checked for missing values on key
+              columns, physical out-of-range values, and statistical
+              (z-score) outliers against a rolling window. Failures land
+              on this page tagged <span className="font-mono text-xs">rule</span>.
             </p>
           </div>
           <div>
@@ -417,11 +475,10 @@ export default function AdminAnomalyDetectionPage() {
               2. ML layer
             </h3>
             <p className="leading-relaxed">
-              The current production LSTM produces a 1-step-ahead forecast
-              for the same (ts, region). Records where the actual demand
-              differs from the forecast by more than 3 σ are flagged with
-              the LSTM residual. Tagged{" "}
-              <span className="font-mono text-xs">ml</span>.
+              A per-source <span className="font-mono text-xs">IsolationForest</span>{" "}
+              (scikit-learn) scores each record across its own numeric
+              columns. Records above the anomaly threshold are flagged,
+              tagged <span className="font-mono text-xs">ml</span>.
             </p>
           </div>
           <div>
@@ -429,11 +486,10 @@ export default function AdminAnomalyDetectionPage() {
               3. Hybrid agreement
             </h3>
             <p className="leading-relaxed">
-              When both layers agree, the record is marked{" "}
-              <span className="font-mono text-xs">hybrid</span> and
-              assigned a higher severity. Hybrid is the highest-priority
-              class — these are the records an on-call engineer should
-              look at first.
+              When both a rule/statistical check and the ML model flag
+              the same row, it&apos;s marked{" "}
+              <span className="font-mono text-xs">hybrid</span> — the
+              highest-confidence class.
             </p>
           </div>
           <div>
@@ -444,7 +500,7 @@ export default function AdminAnomalyDetectionPage() {
               Flagged records are <strong>never dropped</strong> — they
               are tagged with anomaly metadata and continue through the
               pipeline. Admins acknowledge, mark resolved, or mark as
-              false-positive (e.g. a planned industrial load loss).
+              false-positive (e.g. a real, planned operational event).
             </p>
           </div>
         </div>
@@ -520,7 +576,7 @@ function MethodCard({
         <h3 className="text-xs font-semibold uppercase tracking-wide text-white/70">{label}</h3>
         <Icon className={cn("h-4 w-4", iconColor)} />
       </div>
-      <div className="text-3xl font-bold text-white">{count}</div>
+      <div className="text-3xl font-bold text-white">{count.toLocaleString()}</div>
       <p className="mt-1 text-xs text-white/50">{blurb}</p>
     </div>
   );
@@ -562,6 +618,7 @@ function AnomalyRow({
   StatIcon,
   MethodIcon,
   expanded,
+  mutating,
   onToggle,
   onAcknowledge,
   onResolve,
@@ -573,6 +630,7 @@ function AnomalyRow({
   StatIcon: React.ComponentType<{ className?: string }>;
   MethodIcon: React.ComponentType<{ className?: string }>;
   expanded: boolean;
+  mutating: boolean;
   onToggle: () => void;
   onAcknowledge: () => void;
   onResolve: () => void;
@@ -595,9 +653,8 @@ function AnomalyRow({
             {formatTs(a.detected_at)}
           </div>
         </td>
-        <td className="px-3 py-2 font-mono text-xs text-white/80">{a.region}</td>
+        <td className="px-3 py-2 font-mono text-xs text-white/80">{a.region ?? "—"}</td>
         <td className="px-3 py-2 text-xs text-white/60">{a.source}</td>
-        <td className="px-3 py-2 text-xs text-white/80">{a.type}</td>
         <td className="px-3 py-2">
           <span className={cn("inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[11px] font-medium", sev.chip, sev.text)}>
             <span className={cn("h-1.5 w-1.5 rounded-full", sev.dot)} />
@@ -620,7 +677,9 @@ function AnomalyRow({
           </span>
         </td>
         <td className="px-3 py-2 text-right">
-          {a.status === "new" ? (
+          {mutating ? (
+            <Loader2 className="ml-auto h-3.5 w-3.5 animate-spin text-white/50" />
+          ) : a.status === "new" ? (
             <div className="flex justify-end gap-1">
               <button
                 onClick={(e) => { e.stopPropagation(); onAcknowledge(); }}
@@ -652,14 +711,14 @@ function AnomalyRow({
       </tr>
       {expanded && (
         <tr className="bg-white/[0.02]">
-          <td colSpan={9} className="px-6 py-4">
+          <td colSpan={8} className="px-6 py-4">
             <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
               <div>
                 <h4 className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-white/50">
                   Interval
                 </h4>
                 <p className="font-mono text-xs text-white/80">
-                  {a.ts}
+                  {a.ts ?? "—"}
                 </p>
               </div>
               <div>
@@ -667,21 +726,30 @@ function AnomalyRow({
                   Observed vs expected
                 </h4>
                 <p className="font-mono text-xs text-white/80">
-                  observed ={" "}
-                  <span className="text-amber-200">{String(a.observed_value)}</span>
-                  {a.unit && <span className="text-white/40"> {a.unit}</span>}
+                  {a.metric ?? "value"} ={" "}
+                  <span className="text-amber-200">
+                    {a.observed_value != null ? a.observed_value : "—"}
+                  </span>
                   <br />
-                  expected ={" "}
-                  <span className="text-emerald-100">{String(a.expected_value)}</span>
-                  {a.unit && <span className="text-white/40"> {a.unit}</span>}
+                  {(a.expected_low != null || a.expected_high != null) && (
+                    <>
+                      expected ={" "}
+                      <span className="text-emerald-100">
+                        [{a.expected_low ?? "—"}, {a.expected_high ?? "—"}]
+                      </span>
+                      {a.z_score != null && (
+                        <span className="text-white/40"> (z={a.z_score.toFixed(2)})</span>
+                      )}
+                    </>
+                  )}
                 </p>
               </div>
               <div>
                 <h4 className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-white/50">
-                  Assigned to
+                  Status updated
                 </h4>
                 <p className="text-xs text-white/80">
-                  {a.assigned_to ?? <span className="text-white/40">unassigned</span>}
+                  {a.status_updated_at ? formatTs(a.status_updated_at) : <span className="text-white/40">never</span>}
                 </p>
               </div>
               <div className="md:col-span-3">
@@ -689,11 +757,6 @@ function AnomalyRow({
                   Reason
                 </h4>
                 <p className="text-sm text-white/80">{a.reason}</p>
-                {a.notes && (
-                  <p className="mt-1 text-xs text-white/50">
-                    <span className="text-white/40">notes:</span> {a.notes}
-                  </p>
-                )}
               </div>
             </div>
           </td>

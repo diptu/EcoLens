@@ -1,343 +1,231 @@
 /**
  * /dashboard/admin/system — system health.
  *
- * Component health, disk/memory, scheduler status, and a rolling
- * log of recent errors. Links out to the data-pipeline and
- * forecast-api admin endpoints.
+ * Was 100% fabricated (`lib/admin.ts`'s `generateSystemHealth()` --
+ * fixed fake uptime, a fake "mongodb" component this platform doesn't
+ * even use anywhere, fake disk/memory numbers, fake error log). Rewired
+ * 2026-08-08 (root TODO.md's "make every page fully functional with
+ * real data") to `fetchAllServicesHealth()` (`lib/health.ts`) -- the
+ * same real `/v1/readyz` checks `operational-tasks/page.tsx`'s System
+ * Diagnostics card already uses, real for all 5 services (forecast-api/
+ * data-pipeline/ingestion/warehouse/iam) with real per-component
+ * (database/redis/rabbitmq/model) detail and a real single-sample
+ * round-trip latency per check.
+ *
+ * Disk/memory usage and a rolling error log have no real backend
+ * anywhere in this platform (no host-metrics endpoint, no centralized
+ * log aggregation -- confirmed, same gap `operational-tasks/page.tsx`'s
+ * own KPI row already discloses for "System Load") -- marked
+ * `IllustrativeBadge` rather than silently kept as fabricated numbers.
  */
 "use client";
 
+import { useEffect, useState } from "react";
 import {
-  Activity,
   AlertCircle,
-  AlertTriangle,
-  CheckCircle2,
-  ChevronDown,
-  ChevronRight,
   Clock,
-  Cpu,
-  Database,
-  FileText,
-  HardDrive,
-  MemoryStick,
-  Network,
+  RefreshCw,
   Server,
   ShieldCheck,
-  Timer,
-  Workflow,
+  XCircle,
 } from "lucide-react";
 
 import { Card } from "@/components/dashboard/card";
+import { IllustrativeBadge } from "@/components/dashboard/illustrative-badge";
 import { cn } from "@/lib/utils";
-import {
-  generateSystemHealth,
-  type SystemHealth,
-} from "@/lib/admin";
-
-const COMPONENT_ICON: Record<string, React.ComponentType<{ className?: string }>> = {
-  postgres: Database,
-  mongodb: Database,
-  redis: Network,
-  mlflow: Workflow,
-  dbt: FileText,
-  model_loader: Cpu,
-  scheduler: Timer,
-};
+import { fetchAllServicesHealth, type ServiceHealth } from "@/lib/health";
 
 export default function AdminSystemPage() {
-  const health = generateSystemHealth();
+  const [health, setHealth] = useState<ServiceHealth[] | null>(null);
+  const [checkedAt, setCheckedAt] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+
+  function refresh() {
+    setRefreshing(true);
+    fetchAllServicesHealth()
+      .then((results) => {
+        setHealth(results);
+        setCheckedAt(new Date().toISOString());
+      })
+      .catch(() => {})
+      .finally(() => setRefreshing(false));
+  }
+
+  useEffect(() => {
+    refresh();
+    const interval = setInterval(refresh, 60_000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const allHealthy = health != null && health.every((h) => h.reachable && h.ready !== false);
+  const anyUnreachable = health != null && health.some((h) => !h.reachable);
+
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-white">System</h1>
-        <p className="mt-1 text-sm text-white/55">
-          Component health, resource usage, scheduler, and recent error log.
-        </p>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-white">System</h1>
+          <p className="mt-1 text-sm text-white/55">
+            Real per-service readiness from each service&apos;s own <code className="rounded bg-black/30 px-1 font-mono text-[11px]">/v1/readyz</code>.
+          </p>
+        </div>
+        <button
+          onClick={refresh}
+          disabled={refreshing}
+          className={cn(
+            "inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium",
+            refreshing
+              ? "cursor-not-allowed border-white/10 bg-white/5 text-white/40"
+              : "border-emerald-200/30 bg-emerald-200/10 text-emerald-100 hover:bg-emerald-200/15",
+          )}
+        >
+          <RefreshCw className={cn("h-3.5 w-3.5", refreshing && "animate-spin")} />
+          Recheck
+        </button>
       </div>
 
-      <div className="flex flex-wrap items-center gap-3 rounded-lg border border-emerald-200/20 bg-emerald-300/5 px-4 py-3 text-sm text-emerald-100">
-        <ShieldCheck className="h-4 w-4" />
-        <strong>All systems operational</strong>
-        <span className="text-white/50">·</span>
-        <span className="font-mono text-white/70">
-          uptime {Math.floor(health.uptime_seconds / 3600)}h
-        </span>
-      </div>
+      {health === null ? (
+        <p className="py-6 text-center text-xs text-white/40">Checking services…</p>
+      ) : (
+        <div
+          className={cn(
+            "flex flex-wrap items-center gap-3 rounded-lg border px-4 py-3 text-sm",
+            anyUnreachable
+              ? "border-rose-400/20 bg-rose-500/5 text-rose-200"
+              : allHealthy
+                ? "border-emerald-200/20 bg-emerald-300/5 text-emerald-100"
+                : "border-amber-400/20 bg-amber-500/5 text-amber-200",
+          )}
+        >
+          {anyUnreachable ? <XCircle className="h-4 w-4" /> : <ShieldCheck className="h-4 w-4" />}
+          <strong>
+            {anyUnreachable
+              ? `${health.filter((h) => !h.reachable).length}/${health.length} service(s) unreachable`
+              : allHealthy
+                ? "All services healthy"
+                : "Some services not ready"}
+          </strong>
+          {checkedAt && (
+            <>
+              <span className="text-white/30">·</span>
+              <span className="font-mono text-white/60">
+                checked {new Date(checkedAt).toLocaleTimeString("en-AU")}
+              </span>
+            </>
+          )}
+        </div>
+      )}
+
+      <ComponentsCard health={health} />
 
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-        <ComponentCard health={health} />
-        <ResourcesCard health={health} />
+        <IllustrativeResourcesCard />
+        <IllustrativeErrorsCard />
       </div>
-
-      <RecentErrorsCard errors={health.recent_errors} />
     </div>
   );
 }
 
-function ComponentCard({ health }: { health: SystemHealth }) {
+function ComponentsCard({ health }: { health: ServiceHealth[] | null }) {
   return (
     <Card
       title={
         <span className="flex items-center gap-2">
           <Server className="h-4 w-4 text-emerald-200" />
-          Components
+          Services
         </span>
       }
-      subtitle="Internal services the platform depends on."
+      subtitle="Real reachability/readiness/per-component detail from each service's own GET /v1/readyz."
     >
-      <div className="space-y-2" data-testid="components">
-        {Object.entries(health.components).map(([name, comp]) => {
-          const Icon = COMPONENT_ICON[name] ?? Server;
-          const healthy = comp.status === "healthy";
-          return (
-            <div
-              key={name}
-              className={cn(
-                "rounded-md border p-3",
-                healthy ? "border-white/5 bg-white/[0.02]" : "border-amber-400/20 bg-amber-500/5",
-              )}
-              data-testid={`component-row-${name}`}
-            >
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Icon className="h-4 w-4 text-white/65" />
-                  <span className="font-mono text-sm font-semibold text-white">{name}</span>
-                  <span
-                    className={cn(
-                      "rounded-md border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider",
-                      healthy
-                        ? "border-emerald-200/30 bg-emerald-300/10 text-emerald-100"
-                        : "border-amber-400/30 bg-amber-500/10 text-amber-200",
-                    )}
-                  >
-                    {comp.status}
-                  </span>
+      {health === null ? (
+        <p className="py-6 text-center text-xs text-white/40">Checking…</p>
+      ) : (
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-5" data-testid="components">
+          {health.map((h) => {
+            const tone = !h.reachable
+              ? { dot: "bg-rose-400", border: "border-rose-300/30", label: "Unreachable", text: "text-rose-200" }
+              : h.ready
+                ? { dot: "bg-emerald-300", border: "border-emerald-200/30", label: "Healthy", text: "text-emerald-100" }
+                : { dot: "bg-amber-300", border: "border-amber-300/30", label: "Not ready", text: "text-amber-200" };
+            return (
+              <div
+                key={h.service}
+                className={cn("rounded-md border bg-white/[0.02] p-3", tone.border)}
+                data-testid={`component-row-${h.service}`}
+              >
+                <div className="mb-1.5 flex items-center gap-1.5">
+                  <span className={cn("h-2 w-2 rounded-full", tone.dot)} />
+                  <span className="font-mono text-sm font-semibold text-white">{h.service}</span>
                 </div>
-                {comp.latency_ms != null && (
-                  <span className="font-mono text-[11px] text-white/55">
-                    {comp.latency_ms}ms
-                  </span>
+                <div className={cn("text-[11px] font-medium", tone.text)}>{tone.label}</div>
+                {h.latencyMs != null && (
+                  <div className="mt-0.5 text-[10px] text-white/40">{h.latencyMs}ms (this check)</div>
+                )}
+                {h.components.length > 0 && (
+                  <div className="mt-2 space-y-0.5 border-t border-white/5 pt-1.5">
+                    {h.components.map((c) => (
+                      <div key={c.name} className="flex items-center justify-between text-[10px]">
+                        <span className="text-white/50">{c.name}</span>
+                        <span
+                          className={c.healthy ? "text-emerald-200/80" : "text-rose-300"}
+                          title={c.detail ?? undefined}
+                        >
+                          {c.healthy ? "ok" : (c.detail ?? "down")}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
                 )}
               </div>
-              <div className="mt-2 grid grid-cols-2 gap-2 text-[10px] text-white/55 md:grid-cols-3">
-                {comp.pool_active != null && comp.pool_idle != null && (
-                  <FieldInline label="pool" value={`${comp.pool_active} active / ${comp.pool_idle} idle`} />
-                )}
-                {comp.collections != null && (
-                  <FieldInline label="collections" value={comp.collections.toString()} />
-                )}
-                {comp.keys != null && (
-                  <FieldInline label="keys" value={comp.keys.toString()} />
-                )}
-                {comp.experiments != null && (
-                  <FieldInline label="experiments" value={comp.experiments.toString()} />
-                )}
-                {comp.current_model != null && (
-                  <FieldInline label="model" value={comp.current_model} />
-                )}
-                {comp.last_reload != null && (
-                  <FieldInline
-                    label="last reload"
-                    value={new Date(comp.last_reload).toLocaleString("en-AU", {
-                      day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
-                    })}
-                  />
-                )}
-                {comp.last_run != null && (
-                  <FieldInline
-                    label="last dbt run"
-                    value={new Date(comp.last_run).toLocaleString("en-AU", {
-                      day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
-                    })}
-                  />
-                )}
-                {comp.last_duration_s != null && (
-                  <FieldInline label="dbt duration" value={`${comp.last_duration_s}s`} />
-                )}
-                {comp.queued_jobs != null && (
-                  <FieldInline label="queued" value={comp.queued_jobs.toString()} />
-                )}
-                {comp.next_run != null && (
-                  <FieldInline
-                    label="next run"
-                    value={new Date(comp.next_run).toLocaleString("en-AU", {
-                      day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
-                    })}
-                  />
-                )}
-              </div>
-            </div>
-          );
-        })}
-      </div>
+            );
+          })}
+        </div>
+      )}
     </Card>
   );
 }
 
-function FieldInline({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <span className="text-white/40">{label}: </span>
-      <span className="font-mono text-white/85">{value}</span>
-    </div>
-  );
-}
-
-function ResourcesCard({ health }: { health: SystemHealth }) {
+/** No host-metrics endpoint exists on any service (same gap
+ * `operational-tasks/page.tsx`'s "System Load" KPI already discloses)
+ * -- an honest illustrative shape preview, not fabricated live numbers. */
+function IllustrativeResourcesCard() {
   return (
     <Card
       title={
         <span className="flex items-center gap-2">
-          <HardDrive className="h-4 w-4 text-emerald-200" />
+          <Clock className="h-4 w-4 text-amber-200" />
           Resources
         </span>
       }
-      subtitle="Disk, memory, scheduler state."
+      subtitle="Disk/memory usage — no host-metrics endpoint exists on any service yet."
+      badge={<IllustrativeBadge />}
     >
-      <div className="space-y-4">
-        <ResourceBar
-          icon={HardDrive}
-          label="Disk"
-          used={health.disk.used_gb}
-          total={health.disk.total_gb}
-          unit="GB"
-          pct={health.disk.pct_used}
-        />
-        <ResourceBar
-          icon={MemoryStick}
-          label="Memory"
-          used={health.memory.used_mb}
-          total={health.memory.total_mb}
-          unit="MB"
-          pct={health.memory.pct_used}
-        />
-        <div className="rounded-md border border-white/5 bg-white/[0.02] p-3 text-xs">
-          <div className="flex items-center gap-2 text-white/55">
-            <Activity className="h-3.5 w-3.5" /> Scheduler
-          </div>
-          <div className="mt-1 space-y-0.5 font-mono text-white/70">
-            <div>
-              next run:{" "}
-              {new Date(health.components.scheduler.next_run!).toLocaleString("en-AU", {
-                day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
-                timeZone: "Australia/Sydney",
-              })}
-            </div>
-            <div>queued jobs: {health.components.scheduler.queued_jobs}</div>
-          </div>
-        </div>
-        <div className="rounded-md border border-white/5 bg-white/[0.02] p-3 text-xs">
-          <div className="flex items-center gap-2 text-white/55">
-            <Timer className="h-3.5 w-3.5" /> Uptime
-          </div>
-          <div className="mt-1 font-mono text-white/70">
-            {Math.floor(health.uptime_seconds / 3600)}h{" "}
-            ({Math.floor(health.uptime_seconds / 86400)}d)
-          </div>
-        </div>
-      </div>
+      <p className="py-6 text-center text-xs text-white/40">
+        Would show real disk/memory usage per service once a metrics endpoint exists.
+        No fabricated numbers shown in the meantime.
+      </p>
     </Card>
   );
 }
 
-function ResourceBar({
-  icon: Icon, label, used, total, unit, pct,
-}: {
-  icon: React.ComponentType<{ className?: string }>;
-  label: string;
-  used: number;
-  total: number;
-  unit: string;
-  pct: number;
-}) {
-  const tone = pct >= 80 ? "rose" : pct >= 60 ? "amber" : "emerald";
-  return (
-    <div>
-      <div className="mb-1 flex items-center justify-between text-xs">
-        <div className="flex items-center gap-1.5 text-white/55">
-          <Icon className="h-3.5 w-3.5" /> {label}
-        </div>
-        <div className="font-mono text-white/85">
-          {used} / {total} {unit}
-          <span className={cn(
-            "ml-2",
-            tone === "rose"    && "text-rose-200",
-            tone === "amber"   && "text-amber-200",
-            tone === "emerald" && "text-emerald-100",
-          )}>
-            {pct}%
-          </span>
-        </div>
-      </div>
-      <div className="h-2 overflow-hidden rounded-full bg-white/5">
-        <div
-          className={cn(
-            "h-full transition-all",
-            tone === "rose"    && "bg-rose-400",
-            tone === "amber"   && "bg-amber-400",
-            tone === "emerald" && "bg-emerald-200",
-          )}
-          style={{ width: `${pct}%` }}
-        />
-      </div>
-    </div>
-  );
-}
-
-function RecentErrorsCard({
-  errors,
-}: {
-  errors: SystemHealth["recent_errors"];
-}) {
+/** No centralized log aggregation exists anywhere in this platform --
+ * same honest-illustrative treatment. */
+function IllustrativeErrorsCard() {
   return (
     <Card
       title={
         <span className="flex items-center gap-2">
-          <AlertCircle className="h-4 w-4 text-amber-300" />
+          <AlertCircle className="h-4 w-4 text-amber-200" />
           Recent errors
         </span>
       }
-      subtitle="Last 24h, rolled up across all services."
+      subtitle="Rolling error log — no centralized log aggregation exists across services yet."
+      badge={<IllustrativeBadge />}
     >
-      <div className="space-y-2" data-testid="errors">
-        {errors.map((e, i) => (
-          <div
-            key={i}
-            className={cn(
-              "rounded-md border p-3 text-xs",
-              e.level === "ERROR" ? "border-rose-400/20 bg-rose-500/5" :
-              e.level === "WARN"  ? "border-amber-400/20 bg-amber-500/5" :
-              "border-white/5 bg-white/[0.02]",
-            )}
-            data-testid={`error-${i}`}
-          >
-            <div className="flex items-center gap-2">
-              {e.level === "ERROR" ? (
-                <AlertCircle className="h-3.5 w-3.5 text-rose-300" />
-              ) : e.level === "WARN" ? (
-                <AlertTriangle className="h-3.5 w-3.5 text-amber-300" />
-              ) : (
-                <CheckCircle2 className="h-3.5 w-3.5 text-white/45" />
-              )}
-              <span className={cn(
-                "rounded-md border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider",
-                e.level === "ERROR" ? "border-rose-400/30 text-rose-200" :
-                e.level === "WARN"  ? "border-amber-400/30 text-amber-200" :
-                "border-white/10 text-white/55",
-              )}>
-                {e.level}
-              </span>
-              <span className="font-mono text-white/65">{e.service}</span>
-              <span className="ml-auto font-mono text-[10px] text-white/40">
-                {new Date(e.ts).toLocaleString("en-AU", {
-                  day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
-                })}
-              </span>
-            </div>
-            <p className="mt-1.5 text-white/75">{e.message}</p>
-          </div>
-        ))}
-      </div>
+      <p className="py-6 text-center text-xs text-white/40">
+        Would show a real rolling error log across services once one exists.
+        Each service&apos;s own structured logs are real today, just not aggregated here.
+      </p>
     </Card>
   );
 }

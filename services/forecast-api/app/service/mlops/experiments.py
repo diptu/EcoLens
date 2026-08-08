@@ -109,3 +109,52 @@ async def list_experiments(settings: Settings) -> list[ExperimentSummary]:
 
 async def list_mlflow_runs(settings: Settings, limit: int = 8) -> list[MlflowRunSummary]:
     return await asyncio.to_thread(_list_runs_sync, settings.mlflow_tracking_uri, limit)
+
+
+@dataclass
+class TuningRunSummary:
+    run_id: str
+    status: str
+    started_at: datetime | None
+    duration_seconds: float | None
+    metrics: dict[str, float]
+    params: dict[str, str]
+
+
+def _list_tuning_runs_sync(tracking_uri: str, limit: int) -> list[TuningRunSummary]:
+    """Real MLflow runs tagged `tuning=true` -- `ml/tune.py`'s own
+    module docstring: every grid-search trial logs to MLflow as its own
+    run with this tag, specifically so a real trial history is
+    queryable without a separate Postgres table. Backs the dashboard's
+    Hparam Search History table (previously 4 hardcoded sample rows,
+    root TODO.md's "make every page fully functional with real data")."""
+    client = MlflowClient(tracking_uri=tracking_uri)
+    experiments = client.search_experiments()
+    if not experiments:
+        return []
+    exp_ids = [exp.experiment_id for exp in experiments]
+    runs = client.search_runs(
+        exp_ids,
+        filter_string="tags.tuning = 'true'",
+        order_by=["start_time DESC"],
+        max_results=limit,
+    )
+    out = []
+    for run in runs:
+        start_ms = run.info.start_time
+        end_ms = run.info.end_time
+        out.append(
+            TuningRunSummary(
+                run_id=run.info.run_id,
+                status=str(run.info.status).lower(),
+                started_at=_ms_to_datetime(start_ms),
+                duration_seconds=(end_ms - start_ms) / 1000 if start_ms and end_ms else None,
+                metrics=dict(run.data.metrics),
+                params=dict(run.data.params),
+            )
+        )
+    return out
+
+
+async def list_tuning_runs(settings: Settings, limit: int = 20) -> list[TuningRunSummary]:
+    return await asyncio.to_thread(_list_tuning_runs_sync, settings.mlflow_tracking_uri, limit)

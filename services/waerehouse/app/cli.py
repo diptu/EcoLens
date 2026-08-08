@@ -109,6 +109,42 @@ def vacuum() -> None:
     click.echo(f"Vacuumed: {', '.join(tables)}")
 
 
+@main.command("archive-marts")
+@click.option(
+    "--days",
+    type=int,
+    default=None,
+    help="Override Settings.marts_local_retention_days (60).",
+)
+def archive_marts(days: int | None) -> None:
+    """Archive raw_marts.* rows older than --days to the second database
+    (RAW_MARTS_DATABASE_URL), then delete them from the primary --
+    same safe export-before-prune ordering as `export-and-prune`, just
+    for the marts layer instead of raw.* (root TODO.md's "save raw and
+    raw.marts in seperate database" item). No-ops if RAW_MARTS_
+    DATABASE_URL isn't configured."""
+    from app.core.config import get_settings
+    from app.retention.marts_archive import archive_and_prune_marts
+
+    if not get_settings().raw_marts_archive_configured:
+        click.echo("RAW_MARTS_DATABASE_URL is not configured -- nothing to do.")
+        return
+
+    results, cutoff = asyncio.run(archive_and_prune_marts(days))
+    click.echo(f"Cutoff: {cutoff.isoformat()}")
+    if not results:
+        click.echo("Nothing eligible to archive/prune.")
+        return
+    for table, counts in sorted(results.items()):
+        click.echo(f"{table}: archived {counts['archived']}, pruned {counts['pruned']}")
+
+    if sum(c["pruned"] for c in results.values()) > 0:
+        from app.retention.vacuum import vacuum_analyze_marts_tables
+
+        vacuumed = asyncio.run(vacuum_analyze_marts_tables())
+        click.echo(f"Vacuumed: {', '.join(vacuumed)}")
+
+
 @main.command("check-size")
 def check_size() -> None:
     """Report current Postgres database size against the configured
@@ -164,6 +200,34 @@ def dbt(subcommand: str, target: str, extra_args: tuple[str, ...]) -> None:
     click.echo(output)
     if exit_code != 0:
         raise SystemExit(exit_code)
+
+
+# ── celery (scheduled retention -- root TODO.md's "Vacuum Database") ──────
+
+
+@main.command(context_settings={"ignore_unknown_options": True})
+@click.argument("celery_args", nargs=-1, type=click.UNPROCESSED)
+def worker(celery_args: tuple[str, ...]) -> None:
+    """Run the Celery worker that executes scheduled retention tasks
+    (`app.celery_app`'s `beat_schedule` is what actually enqueues them —
+    run `beat` alongside this, or nothing gets dispatched on a
+    schedule). Equivalent to `celery -A app.celery_app worker`; extra
+    args (e.g. `--loglevel=info`) pass straight through."""
+    from app.celery_app import celery_app
+
+    celery_app.start(["worker", *celery_args])
+
+
+@main.command(context_settings={"ignore_unknown_options": True})
+@click.argument("celery_args", nargs=-1, type=click.UNPROCESSED)
+def beat(celery_args: tuple[str, ...]) -> None:
+    """Run the Celery Beat scheduler -- fires `export-and-prune-and-
+    vacuum` daily at 03:00 UTC (`app.celery_app`'s `beat_schedule`),
+    enqueuing a task for a `worker` process to pick up. Equivalent to
+    `celery -A app.celery_app beat`."""
+    from app.celery_app import celery_app
+
+    celery_app.start(["beat", *celery_args])
 
 
 # ── serve / health ──────────────────────────────────────────────────────

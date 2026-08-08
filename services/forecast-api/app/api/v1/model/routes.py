@@ -37,10 +37,15 @@ from app.schemas.model import (
     TrainingRunsListResponse,
     TrainRequest,
     TrainTriggerResponse,
+    TuneTrialOut,
+    TuneTriggerRequest,
+    TuneTriggerResponse,
+    TuningRunOut,
+    TuningRunsListResponse,
 )
 from app.core.config import Settings
 from app.service.model.actions import list_training_runs, trigger_training
-from app.service.mlops.experiments import list_experiments, list_mlflow_runs
+from app.service.mlops.experiments import list_experiments, list_mlflow_runs, list_tuning_runs
 from app.service.mlops.live_drift import compute_drift
 from app.service.ml.registry import (
     DeletionRejected,
@@ -71,6 +76,61 @@ async def get_training_runs(
 ) -> TrainingRunsListResponse:
     runs = await list_training_runs(db, limit)
     return TrainingRunsListResponse(data=runs)
+
+
+@router.post("/model/tune", response_model=TuneTriggerResponse)
+async def trigger_tune_endpoint(
+    body: TuneTriggerRequest = TuneTriggerRequest(),
+    settings: Settings = Depends(get_app_settings),
+) -> TuneTriggerResponse:
+    """Real grid search (`ml/tune.py`'s own default grid: 3 hidden_sizes
+    × 2 learning_rates = 6 trials, each a full `train_model` run) --
+    root TODO.md's "Hyperparameter Tuning tab" item, previously
+    `IllustrativeBadge`-marked because this trigger route didn't exist
+    (the search itself was always real, CLI-only). Synchronous, not
+    202-queued -- see this schema's own module docstring for why (no
+    separate worker process this hands off to, and the real grid
+    completes in real seconds-to-low-minutes at this service's current
+    data volume)."""
+    from app.service.ml.tune import tune
+
+    regions = body.regions or settings.model_default_regions
+    result = await tune(regions, settings=settings)
+    return TuneTriggerResponse(
+        best_hidden_size=result.best_config.hidden_size,
+        best_lr=result.best_config.lr,
+        best_val_mape=result.best_val_mape,
+        best_run_id=result.best_run_id,
+        trials=[
+            TuneTrialOut(
+                hidden_size=t.hidden_size, lr=t.lr, val_mape=t.val_mape, run_id=t.run_id
+            )
+            for t in result.trials
+        ],
+    )
+
+
+@router.get("/model/tuning-runs", response_model=TuningRunsListResponse)
+async def get_tuning_runs(
+    limit: int = Query(default=20, ge=1, le=200),
+    settings: Settings = Depends(get_app_settings),
+) -> TuningRunsListResponse:
+    """Real MLflow runs tagged `tuning=true` -- root TODO.md's "Hparam
+    Search History table" item, previously 4 hardcoded sample rows."""
+    runs = await list_tuning_runs(settings, limit)
+    return TuningRunsListResponse(
+        data=[
+            TuningRunOut(
+                run_id=r.run_id,
+                status=r.status,
+                started_at=r.started_at,
+                duration_seconds=r.duration_seconds,
+                metrics=r.metrics,
+                params=r.params,
+            )
+            for r in runs
+        ]
+    )
 
 
 @router.get("/model/experiments", response_model=ExperimentsListResponse)

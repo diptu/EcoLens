@@ -153,7 +153,7 @@ export default function EmissionsMethodologyPage() {
         </div>
       </Card>
 
-      {/* ── Live trace (mock for now, real once API is wired) ── */}
+      {/* ── Live trace (real — GET /v1/emissions/trace) ── */}
       <Card
         title={
           <span className="flex items-center gap-2">
@@ -515,8 +515,8 @@ function WorkedExampleView({ example }: { example: WorkedExample }) {
 }
 
 /**
- * Mock trace mockup (placeholder until live API is wired up).
- * Shows the structure of what a real trace response looks like.
+ * Renders a real `EmissionsTrace` response (`GET /v1/emissions/trace`)
+ * — real `fct_carbon_intensity`/`fct_generation_mix` warehouse values.
  */
 function TraceResult({ trace }: { trace: EmissionsTrace }) {
   if (trace.intervals.length === 0) {

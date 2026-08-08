@@ -232,6 +232,21 @@ export default function PerformancePage() {
   );
   const lastRun = runs?.[0] ?? null;
 
+  // Real % change between the two most recent versions' MAPE (mapeSeries
+  // is already chronological, real, per-version data fetched above) --
+  // matches what the "MAPE increase > 15% vs last version" alert
+  // condition actually asks, unlike just echoing the raw Production MAPE.
+  const mapeChangePct =
+    mapeSeries.length >= 2 && mapeSeries[mapeSeries.length - 2] !== 0
+      ? ((mapeSeries[mapeSeries.length - 1] - mapeSeries[mapeSeries.length - 2]) /
+          mapeSeries[mapeSeries.length - 2]) *
+        100
+      : null;
+  // Real max PSI among the top 3 drift-ranked features -- `drift` is
+  // already sorted descending by PSI (live_drift.py), so this is just
+  // the top feature's PSI, not a new computation invented for this card.
+  const top3Psi = drift ? drift.slice(0, 3).find((r) => r.psi !== null)?.psi ?? null : null;
+
   return (
     <div className="space-y-6">
       {/* ── Header ──────────────────────────────────────────── */}
@@ -698,9 +713,9 @@ export default function PerformancePage() {
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
           {[
             { label: "Coverage < 75%", current: coverage !== null ? `${(coverage * (coverage <= 1 ? 100 : 1)).toFixed(1)}%` : "—" },
-            { label: "MAPE increase > 15% vs last version", current: mape !== null ? `${mape.toFixed(1)}%` : "—" },
-            { label: "PSI (top 3 features) > 0.5", current: "—" },
-            { label: "Error plateau detected", current: "—" },
+            { label: "MAPE increase > 15% vs last version", current: mapeChangePct !== null ? `${mapeChangePct >= 0 ? "+" : ""}${mapeChangePct.toFixed(1)}%` : "— (needs 2+ versions with logged MAPE)" },
+            { label: "PSI (top 3 features) > 0.5", current: top3Psi !== null ? top3Psi.toFixed(2) : "—" },
+            { label: "Error plateau detected", current: "— (no plateau-detection formula defined yet)" },
           ].map((cond) => (
             <div key={cond.label} className="rounded-md border border-white/5 bg-white/[0.02] p-3">
               <AlertTriangle className="h-3.5 w-3.5 text-amber-300/70" />

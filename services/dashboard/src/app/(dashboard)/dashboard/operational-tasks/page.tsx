@@ -48,7 +48,12 @@
  * — see `executeCommand`'s own docstring for why the other 4 stay
  * disabled rather than fabricated). Active Tasks' other 5 task types
  * (data_quality/feature_build/forecast/report/anomaly) still have no
- * "task in flight" concept anywhere in any service and stay mock.
+ * "task in flight" concept anywhere in any service -- `getActiveTasks()`'s
+ * hardcoded mock rows for them were removed entirely (2026-08-08, root
+ * `TODO.md`'s "Active Tasks" item) rather than kept: they were shown with
+ * zero visual distinction from the real rows above, a real violation of
+ * this app's own no-silent-fabrication convention. An honest empty state
+ * for those types is more truthful than a labeled-fake row.
  */
 "use client";
 
@@ -75,7 +80,6 @@ import {
 import { Card } from "@/components/dashboard/card";
 import { cn } from "@/lib/utils";
 import {
-  getActiveTasks,
   getSystemCommands,
   type ActiveTask,
   type OperationalKpi,
@@ -90,7 +94,7 @@ import {
   type ModelInfo,
   type ModelVersion,
 } from "@/lib/emissions";
-import { fetchAllServicesHealth } from "@/lib/health";
+import { fetchAllServicesHealth, type ServiceHealth } from "@/lib/health";
 import {
   PIPELINE_CATALOG,
   triggerTraining,
@@ -101,6 +105,7 @@ import {
   pollBackfillSummary,
   fetchBackfillStatus,
   triggerDbtBuild,
+  triggerFeatureRebuild,
   pollLatestDbtBuild,
   fetchPublicPipelines,
   monthToRange,
@@ -285,12 +290,41 @@ export default function OperationalTasksPage() {
   const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null);
   const [modelInfoLoaded, setModelInfoLoaded] = useState(false);
   const [modelVersions, setModelVersions] = useState<ModelVersion[] | null>(null);
-  const [modelVersionsLoaded, setModelVersionsLoaded] = useState(false);
   const [trainStatus, setTrainStatus] = useState<TrainStatus>({ state: "idle" });
   const [trainingRuns, setTrainingRuns] = useState<TrainingRunLog[] | null>(null);
   const [commandStatus, setCommandStatus] = useState<
     Record<string, { state: "running" | "success" | "error"; message: string }>
   >({});
+  const [serviceHealth, setServiceHealth] = useState<ServiceHealth[] | null>(null);
+  const [serviceHealthCheckedAt, setServiceHealthCheckedAt] = useState<string | null>(null);
+  const [serviceHealthRefreshing, setServiceHealthRefreshing] = useState(false);
+
+  // System Diagnostics card -- root TODO.md's "should show which system
+  // are healthy and which are not": a persistent status grid, not just
+  // the one-shot "Check System Health" button `executeCommand`'s `c6`
+  // already had (that button's real call, `fetchAllServicesHealth()`,
+  // is reused here so both surfaces agree). Fetches on mount and every
+  // 60s after that -- frequent enough to catch a service dying between
+  // visits without hammering 5 real `/readyz` endpoints on every render.
+  const refreshServiceHealth = useMemo(
+    () => () => {
+      setServiceHealthRefreshing(true);
+      fetchAllServicesHealth()
+        .then((results) => {
+          setServiceHealth(results);
+          setServiceHealthCheckedAt(new Date().toISOString());
+        })
+        .catch(() => {})
+        .finally(() => setServiceHealthRefreshing(false));
+    },
+    [],
+  );
+
+  useEffect(() => {
+    refreshServiceHealth();
+    const interval = setInterval(refreshServiceHealth, 60_000);
+    return () => clearInterval(interval);
+  }, [refreshServiceHealth]);
 
   useEffect(() => {
     let cancelled = false;
@@ -357,16 +391,21 @@ export default function OperationalTasksPage() {
       .filter((t): t is ActiveTask => t !== null);
   }, [pipelineRows]);
 
-  // The `model_training`/`ingestion`/`transform`-typed rows are real
+  // `model_training`/`ingestion`/`transform`-typed rows are real
   // (`meta._training_log` + this page's own live pipeline/dbt-build
-  // polling); the remaining 4 task types (data_quality, feature_build,
-  // forecast, report, anomaly) stay mock -- nothing else logs "a task
-  // is in flight" anywhere yet (`services/ingestion/TODO.md`'s own
-  // note).
-  const allTasks = useMemo(() => {
-    const mockTasks = getActiveTasks().filter(
-      (t) => t.type !== "model_training" && t.type !== "ingestion" && t.type !== "transform",
-    );
+  // polling). The remaining 4 task types (data_quality, feature_build,
+  // forecast, report, anomaly) used to fall back to `getActiveTasks()`'s
+  // hardcoded mock rows (fake IDs, fake "May 19" dates that don't even
+  // match this app's real calendar) shown with zero visual distinction
+  // from the real rows above -- a real violation of this app's own
+  // "no silently fabricated dashboards" convention every other section
+  // follows (`IllustrativeBadge`, honest empty states). Removed
+  // 2026-08-08 rather than badged: nothing logs "a task of this type is
+  // in flight" anywhere in any service yet, so there's no real shape to
+  // preview either -- an honest empty state for those types (via
+  // `ActiveTasksTable`'s own "No tasks" case) is more truthful than a
+  // labeled-fake row.
+  const allTasks = useMemo((): ActiveTask[] => {
     const realTrainingTasks: ActiveTask[] = (trainingRuns ?? []).map((r) => ({
       id: r.id,
       type: "model_training",
@@ -376,7 +415,7 @@ export default function OperationalTasksPage() {
       status: r.status === "running" ? "running" : r.status === "success" ? "completed" : "failed",
       progress: r.status === "running" ? 50 : 100,
     }));
-    return [...realTrainingTasks, ...pipelineActiveTasks, ...mockTasks];
+    return [...realTrainingTasks, ...pipelineActiveTasks];
   }, [trainingRuns, pipelineActiveTasks]);
   const commands = useMemo(() => getSystemCommands(), []);
 
@@ -501,10 +540,7 @@ export default function OperationalTasksPage() {
       .then((r) => {
         if (!cancelled) setModelVersions(r.data);
       })
-      .catch(() => {})
-      .finally(() => {
-        if (!cancelled) setModelVersionsLoaded(true);
-      });
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
@@ -628,17 +664,43 @@ export default function OperationalTasksPage() {
       });
   }
 
-  // Of `getSystemCommands()`'s 6 buttons, only these two map onto a real,
-  // safe, already-existing backend call -- see `services/ingestion/
-  // TODO.md`'s "System Commands" item for why the other 4 don't:
-  // "Rebuild Features" needs a local `master.duckdb` this service's own
-  // script explicitly refuses to build from cloud credentials on demand
-  // (dev/data-science tooling, not a production capability); "Clear
-  // Cache"/"Vacuum Database" are real but destructive-adjacent
-  // admin-only operations against live infra with no defined-safe scope
+  // Of `getSystemCommands()`'s 6 buttons, these three now map onto a
+  // real backend call -- see `services/ingestion/TODO.md`'s "System
+  // Commands" item for why the other 3 don't: "Clear Cache"/"Vacuum
+  // Database" (the button, not the now-real Celery schedule -- see root
+  // TODO.md's "Vacuum Database" item) are destructive-adjacent admin-only
+  // operations against live infra with no defined-safe on-demand scope
   // yet; "Reindex Search" has no search-index concept anywhere in this
   // codebase to map onto at all.
+  //
+  // "Rebuild Features" (c1) was left unwired for the same stated reason
+  // as those two until 2026-08-08 -- reconsidered: `select_features.py`
+  // never needed cloud credentials on demand in the first place, only a
+  // *local* `master.duckdb` that must already exist (a real, disclosed
+  // precondition, not a silent one -- `POST /v1/features/rebuild` itself
+  // returns a real 422 `master_duckdb_missing` if it doesn't). Wiring a
+  // button that surfaces that real success/failure honestly doesn't
+  // contradict the original design decision the way auto-*building*
+  // `master.duckdb` from R2 on every click would have.
   function executeCommand(id: string) {
+    if (id === "c1") {
+      setCommandStatus((prev) => ({
+        ...prev,
+        [id]: { state: "running", message: "Running feature selection (real sklearn compute -- can take several minutes)…" },
+      }));
+      triggerFeatureRebuild()
+        .then((result) => {
+          setCommandStatus((prev) => ({
+            ...prev,
+            [id]: { state: "success", message: `${result.n_selected} features selected.` },
+          }));
+        })
+        .catch((err) => {
+          const message = err instanceof TriggerIngestionError ? err.message : "feature rebuild failed";
+          setCommandStatus((prev) => ({ ...prev, [id]: { state: "error", message } }));
+        });
+      return;
+    }
     if (id === "c2") {
       setCommandStatus((prev) => ({ ...prev, [id]: { state: "running", message: "Building…" } }));
       triggerDbtBuild()
@@ -658,8 +720,13 @@ export default function OperationalTasksPage() {
     }
     if (id === "c6") {
       setCommandStatus((prev) => ({ ...prev, [id]: { state: "running", message: "Checking…" } }));
+      // Shares the System Diagnostics card's own fetch/state below
+      // (`serviceHealth`/`serviceHealthCheckedAt`) instead of an
+      // independent round-trip -- one real check, both surfaces agree.
       fetchAllServicesHealth()
         .then((results) => {
+          setServiceHealth(results);
+          setServiceHealthCheckedAt(new Date().toISOString());
           const unhealthy = results.filter((r) => !r.reachable || r.ready === false);
           const message = unhealthy.length === 0
             ? `All ${results.length} services healthy.`
@@ -953,8 +1020,13 @@ export default function OperationalTasksPage() {
         <Card className="lg:col-start-2">
           <div className="mb-3">
             <h2 className="text-base font-semibold text-white">Recent Training Runs</h2>
+            <p className="text-xs text-white/50">
+              Real rows from `meta._training_log` (`GET /v1/model/training-runs`) —
+              actual attempts (running/success/failed), not just successfully
+              registered versions.
+            </p>
           </div>
-          <TrainingRunsList versions={modelVersions} loaded={modelVersionsLoaded} />
+          <RecentTrainingRunsList runs={trainingRuns} />
         </Card>
       </div>
 
@@ -982,7 +1054,7 @@ export default function OperationalTasksPage() {
                 key={c.id}
                 c={c}
                 status={commandStatus[c.id]}
-                onExecute={c.id === "c2" || c.id === "c6" ? () => executeCommand(c.id) : undefined}
+                onExecute={c.id === "c1" || c.id === "c2" || c.id === "c6" ? () => executeCommand(c.id) : undefined}
                 // "Refresh Materialized Views" (c2) shares the dbt-build
                 // row's own live-polled state -- a build already in
                 // flight (self- or externally-triggered, observed via
@@ -996,6 +1068,41 @@ export default function OperationalTasksPage() {
           </div>
         </Card>
       </div>
+
+      {/* System Diagnostics */}
+      <Card>
+        <div className="mb-3 flex items-center justify-between">
+          <div>
+            <h2 className="text-base font-semibold text-white">System Diagnostics</h2>
+            <p className="text-xs text-white/50">
+              Real <code className="rounded bg-black/30 px-1 font-mono">/v1/readyz</code> checks
+              across all 5 services — reachability, readiness, and per-component detail
+              (database/redis/rabbitmq/model), not a fabricated status list.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            {serviceHealthCheckedAt && (
+              <span className="text-[11px] text-white/40">
+                Checked {formatRelativeTime(serviceHealthCheckedAt)}
+              </span>
+            )}
+            <button
+              onClick={refreshServiceHealth}
+              disabled={serviceHealthRefreshing}
+              className={cn(
+                "inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium",
+                serviceHealthRefreshing
+                  ? "cursor-not-allowed border-white/10 bg-white/5 text-white/40"
+                  : "border-emerald-200/30 bg-emerald-200/10 text-emerald-100 hover:bg-emerald-200/15",
+              )}
+            >
+              <RefreshCw className={cn("h-3 w-3", serviceHealthRefreshing && "animate-spin")} />
+              Recheck
+            </button>
+          </div>
+        </div>
+        <SystemDiagnosticsGrid health={serviceHealth} />
+      </Card>
 
       {backfillModal && (
         <BackfillModal
@@ -1337,6 +1444,14 @@ function ModelInfoTable({ info, loaded }: { info: ModelInfo | null; loaded: bool
 }
 
 function ActiveTasksTable({ rows }: { rows: ActiveTask[] }) {
+  if (rows.length === 0) {
+    return (
+      <div className="rounded-md border border-white/5 bg-white/[0.02] px-4 py-6 text-center text-xs text-white/50">
+        No active tasks right now. (Only `model_training`/`ingestion`/`transform` tasks are
+        tracked — other task types have no "in flight" concept in the backend yet.)
+      </div>
+    );
+  }
   return (
     <table className="w-full text-left text-sm">
       <thead className="border-b border-white/5 text-[11px] uppercase tracking-wide text-white/40">
@@ -1433,53 +1548,113 @@ function ScheduledTable({ rows, loaded }: { rows: LivePipeline[]; loaded: boolea
   );
 }
 
-/** Real registered versions from `GET /v1/model/versions`, newest first
- * (Model Operations TODO.md Phase 1) -- metrics are rendered generically
- * from whatever keys are actually present (`test_mape`/
- * `test_coverage_raw`/`test_coverage_calibrated`, see
- * `forecast-api/app/service/ml/train.py`), not the old mock's
- * fabricated MAPE+RMSE pair. */
-function TrainingRunsList({ versions, loaded }: { versions: ModelVersion[] | null; loaded: boolean }) {
-  if (!loaded) {
+/** Real training-run attempts from `GET /v1/model/training-runs`
+ * (`meta._training_log`) -- root `TODO.md`'s "show 3 Recent Training
+ * Runs if training run is >= 3": caps the list at 3 (the natural
+ * reading once there are enough real runs to cap; fewer than 3 just
+ * shows whatever real count exists, not padded with anything fake).
+ * Deliberately distinct from the Model Registry's version list this
+ * card used to borrow (`ModelVersion[]`, `GET /v1/model/versions`) --
+ * a *run* can be `running`/`failed` and never produce a version at all,
+ * which a registry-only view would silently hide. */
+function RecentTrainingRunsList({ runs }: { runs: TrainingRunLog[] | null }) {
+  if (runs === null) {
     return <p className="py-4 text-center text-xs text-white/40">Loading training history…</p>;
   }
-  if (!versions || versions.length === 0) {
+  if (runs.length === 0) {
     return (
       <div className="rounded-md border border-white/5 bg-white/[0.02] p-3 text-center text-xs text-white/50">
-        No model has been trained and registered yet.
+        No training run has been logged yet.
       </div>
     );
   }
+  const recent = runs.slice(0, 3);
+  const statusColor: Record<TrainingRunLog["status"], string> = {
+    success: "border-emerald-200/40 bg-emerald-200/10 text-emerald-100",
+    running: "border-cyan-300/40 bg-cyan-300/10 text-cyan-200",
+    failed: "border-rose-300/40 bg-rose-300/10 text-rose-200",
+  };
   return (
     <ul className="space-y-1.5">
-      {versions.map((v) => (
-        <li key={v.version} className="rounded-md border border-white/5 bg-white/[0.02] p-2.5">
+      {recent.map((r) => (
+        <li key={r.id} className="rounded-md border border-white/5 bg-white/[0.02] p-2.5">
           <div className="flex items-center justify-between">
             <div>
               <div className="flex items-center gap-2">
-                <span className="rounded bg-purple-300/15 px-1.5 py-0.5 font-mono text-[10px] text-purple-200">v{v.version}</span>
+                <span className="text-[11px] text-white/80">{r.model_name}</span>
+                {r.model_version && (
+                  <span className="rounded bg-purple-300/15 px-1.5 py-0.5 font-mono text-[10px] text-purple-200">
+                    v{r.model_version}
+                  </span>
+                )}
               </div>
-              <div className="text-[11px] text-white/50">{formatRelativeTime(v.created_at)}</div>
+              <div className="text-[11px] text-white/50">
+                {formatRelativeTime(r.started_at)} · {r.triggered_by} · {r.regions.join(", ")}
+              </div>
             </div>
-            <span className="rounded-md border border-emerald-200/40 bg-emerald-200/10 px-2 py-0.5 text-[11px] font-medium text-emerald-100">
-              {v.stage}
+            <span className={cn("rounded-md border px-2 py-0.5 text-[11px] font-medium", statusColor[r.status])}>
+              {r.status}
             </span>
           </div>
-          <div className="mt-1.5 flex flex-wrap items-center gap-3 text-[11px] text-white/60">
-            {Object.keys(v.metrics).length === 0 ? (
-              <span>No test metrics logged for this run.</span>
-            ) : (
-              Object.entries(v.metrics).map(([key, value]) => (
-                <span key={key}>{key.replace(/_/g, " ")}: {value.toFixed(2)}</span>
-              ))
-            )}
-          </div>
+          {r.status === "failed" && r.error_message && (
+            <p className="mt-1.5 text-[11px] text-rose-300" title={r.error_message}>
+              {r.error_message}
+            </p>
+          )}
         </li>
       ))}
       <li className="pt-1 text-center">
         <Link href="/dashboard/models/" className="text-xs text-emerald-100 hover:underline">View all versions</Link>
       </li>
     </ul>
+  );
+}
+
+/** One tile per service, real `reachable`/`ready`/`components`/
+ * `latencyMs` from `fetchAllServicesHealth()` (`lib/health.ts`) -- no
+ * "degraded"/"warning" middle state fabricated beyond what each
+ * service's own `/v1/readyz` actually reports (unreachable vs.
+ * reachable-but-not-ready vs. ready), and `latencyMs` is a real
+ * single-sample round-trip for *this* check, labeled as such rather
+ * than implying a tracked historical p95. */
+function SystemDiagnosticsGrid({ health }: { health: ServiceHealth[] | null }) {
+  if (health === null) {
+    return <p className="py-6 text-center text-xs text-white/40">Checking services…</p>;
+  }
+  return (
+    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-5">
+      {health.map((h) => {
+        const tone = !h.reachable
+          ? { dot: "bg-rose-400", border: "border-rose-300/30", label: "Unreachable", text: "text-rose-200" }
+          : h.ready
+            ? { dot: "bg-emerald-300", border: "border-emerald-200/30", label: "Healthy", text: "text-emerald-100" }
+            : { dot: "bg-amber-300", border: "border-amber-300/30", label: "Not ready", text: "text-amber-200" };
+        return (
+          <div key={h.service} className={cn("rounded-md border bg-white/[0.02] p-3", tone.border)}>
+            <div className="mb-1.5 flex items-center gap-1.5">
+              <span className={cn("h-2 w-2 rounded-full", tone.dot)} />
+              <span className="text-xs font-semibold text-white">{h.service}</span>
+            </div>
+            <div className={cn("text-[11px] font-medium", tone.text)}>{tone.label}</div>
+            {h.latencyMs != null && (
+              <div className="mt-0.5 text-[10px] text-white/40">{h.latencyMs}ms (this check)</div>
+            )}
+            {h.components.length > 0 && (
+              <div className="mt-2 space-y-0.5 border-t border-white/5 pt-1.5">
+                {h.components.map((c) => (
+                  <div key={c.name} className="flex items-center justify-between text-[10px]">
+                    <span className="text-white/50">{c.name}</span>
+                    <span className={c.healthy ? "text-emerald-200/80" : "text-rose-300"} title={c.detail ?? undefined}>
+                      {c.healthy ? "ok" : (c.detail ?? "down")}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
   );
 }
 

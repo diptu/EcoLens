@@ -111,6 +111,52 @@ async function fetchDbtBuildRuns(limit = 20): Promise<DbtBuildRun[]> {
   }
 }
 
+/** Shape of `services/waerehouse`'s `RetentionRunOut` -- one
+ * `meta._retention_log` row, backing `GET /v1/retention/runs`. Real
+ * daily export-and-prune-and-vacuum job (`app.celery_app`'s
+ * `beat_schedule`, root `TODO.md`'s "Vacuum Database" item). */
+export type RetentionRun = {
+  id: string;
+  trigger: string;
+  triggered_by: string;
+  status: "running" | "success" | "failed";
+  started_at: string;
+  finished_at: string | null;
+  pruned: Record<string, { exported: number; pruned: number }> | null;
+  vacuumed: string[] | null;
+  error: string | null;
+};
+
+/** Live call to `GET /v1/retention/runs` (`services/waerehouse`) -- same
+ * best-effort "don't fail the whole pipeline list over this" contract
+ * as `fetchDbtBuildRuns` above. */
+async function fetchRetentionRuns(limit = 20): Promise<RetentionRun[]> {
+  try {
+    const res = await fetch(`${WAREHOUSE_API_URL}/retention/runs?limit=${limit}`);
+    if (!res.ok) return [];
+    const body: { data: RetentionRun[] } = await res.json();
+    return body.data;
+  } catch {
+    return [];
+  }
+}
+
+/** Real next UTC fire time for a daily `crontab(minute=0, hour=3)`
+ * schedule (`services/waerehouse/app/celery_app.py`'s `beat_schedule`)
+ * -- computed client-side since there's no live Celery Beat introspection
+ * endpoint, but the schedule itself is a fixed, known constant, not a
+ * guess. Today 03:00 UTC if that hasn't passed yet, otherwise tomorrow. */
+function nextDailyUtc(hour: number, minute: number): string {
+  const now = new Date();
+  const next = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), hour, minute, 0),
+  );
+  if (next.getTime() <= now.getTime()) {
+    next.setUTCDate(next.getUTCDate() + 1);
+  }
+  return next.toISOString();
+}
+
 /** Real, unauthenticated equivalents now live on two different services
  * — `services/ingestion`'s `GET /v1/ingestion/public/pipelines` (the 5
  * real ingestion sources) has no 6th dbt-warehouse row (dbt isn't its
@@ -130,19 +176,13 @@ async function fetchDbtBuildRuns(limit = 20): Promise<DbtBuildRun[]> {
  * duration math until it finishes (same reasoning ingestion's own
  * aggregate can't be exactly reproduced client-side either -- an
  * in-flight run has no `finished_at` yet). */
-export async function fetchPublicPipelines(): Promise<PipelinesList> {
-  const [ingestionRes, runs] = await Promise.all([
-    fetch(`${INGESTION_API_URL}/ingestion/public/pipelines`),
-    fetchDbtBuildRuns(),
-  ]);
-  if (!ingestionRes.ok) {
-    throw new Error(`GET /v1/ingestion/public/pipelines failed: ${ingestionRes.status}`);
-  }
-  const ingestion: PipelinesList = await ingestionRes.json();
-
-  const sources: LivePipeline[] = ingestion.data.map((p) => ({ ...p, stage: "extract" }));
-
-  const latest = runs[0] ?? null;
+/** Real 24h run-count/success-rate/p95-duration aggregate from any
+ * `{started_at, finished_at, status}`-shaped run list -- shared by the
+ * dbt-build row and the retention-job row below so both compute this
+ * identically rather than two near-copies drifting apart. */
+function aggregate24h(
+  runs: { started_at: string; finished_at: string | null; status: string }[],
+): { runCount: number | null; successRate: number | null; p95DurationMs: number | null } {
   const cutoff24h = Date.now() - 24 * 60 * 60 * 1000;
   const runs24h = runs.filter((r) => new Date(r.started_at).getTime() >= cutoff24h);
   const finished24h = runs24h.filter((r) => r.finished_at != null);
@@ -151,7 +191,30 @@ export async function fetchPublicPipelines(): Promise<PipelinesList> {
     .map((r) => new Date(r.finished_at as string).getTime() - new Date(r.started_at).getTime())
     .sort((a, b) => a - b);
   const p95Index = durationsMs.length > 0 ? Math.ceil(durationsMs.length * 0.95) - 1 : -1;
+  return {
+    runCount: runs24h.length > 0 ? runs24h.length : null,
+    successRate: finished24h.length > 0
+      ? Math.round((succeeded24h / finished24h.length) * 1000) / 10
+      : null,
+    p95DurationMs: p95Index >= 0 ? durationsMs[p95Index] : null,
+  };
+}
 
+export async function fetchPublicPipelines(): Promise<PipelinesList> {
+  const [ingestionRes, dbtRuns, retentionRuns] = await Promise.all([
+    fetch(`${INGESTION_API_URL}/ingestion/public/pipelines`),
+    fetchDbtBuildRuns(),
+    fetchRetentionRuns(),
+  ]);
+  if (!ingestionRes.ok) {
+    throw new Error(`GET /v1/ingestion/public/pipelines failed: ${ingestionRes.status}`);
+  }
+  const ingestion: PipelinesList = await ingestionRes.json();
+
+  const sources: LivePipeline[] = ingestion.data.map((p) => ({ ...p, stage: "extract" }));
+
+  const latestDbt = dbtRuns[0] ?? null;
+  const dbtAgg = aggregate24h(dbtRuns);
   const dbtRow: LivePipeline = {
     id: "pipe-dbt-warehouse",
     name: "dbt Warehouse Build",
@@ -161,16 +224,34 @@ export async function fetchPublicPipelines(): Promise<PipelinesList> {
     // no auto-rebuild cron, this is manual-trigger-only (`triggerDbtBuild`).
     schedule: { cron: "manual", timezone: "UTC", enabled: true },
     depends_on: sources.map((s) => s.id),
-    last_run_at: latest?.started_at ?? null,
+    last_run_at: latestDbt?.started_at ?? null,
     next_run_at: null,
-    run_count_24h: runs24h.length > 0 ? runs24h.length : null,
-    success_rate_24h: finished24h.length > 0
-      ? Math.round((succeeded24h / finished24h.length) * 1000) / 10
-      : null,
-    p95_duration_ms_24h: p95Index >= 0 ? durationsMs[p95Index] : null,
+    run_count_24h: dbtAgg.runCount,
+    success_rate_24h: dbtAgg.successRate,
+    p95_duration_ms_24h: dbtAgg.p95DurationMs,
   };
 
-  const data = [...sources, dbtRow];
+  // Real cron (`app.celery_app.beat_schedule`'s `crontab(minute=0,
+  // hour=3)`, root TODO.md's "Vacuum Database"/"Scheduled Operations"
+  // items) -- unlike the dbt row above, this genuinely does run on a
+  // fixed daily schedule, so `next_run_at` is a real computed value, not
+  // absent like that row's "manual" one.
+  const latestRetention = retentionRuns[0] ?? null;
+  const retentionAgg = aggregate24h(retentionRuns);
+  const retentionRow: LivePipeline = {
+    id: "pipe-warehouse-retention",
+    name: "Warehouse Retention (export + prune + vacuum)",
+    source_id: null,
+    stage: "transform",
+    schedule: { cron: "0 3 * * *", timezone: "UTC", enabled: true },
+    last_run_at: latestRetention?.started_at ?? null,
+    next_run_at: nextDailyUtc(3, 0),
+    run_count_24h: retentionAgg.runCount,
+    success_rate_24h: retentionAgg.successRate,
+    p95_duration_ms_24h: retentionAgg.p95DurationMs,
+  };
+
+  const data = [...sources, dbtRow, retentionRow];
   const active = data.filter((p) => p.status !== "paused").length;
   return {
     meta: { total: data.length, active, paused: data.length - active, as_of: ingestion.meta.as_of },
@@ -586,6 +667,42 @@ export async function triggerDbtBuild(): Promise<DbtBuildTrigger> {
     const body = await res.json().catch(() => null);
     const message: string =
       body?.error?.message ?? `POST /v1/dbt/build failed: ${res.status}`;
+    throw new TriggerIngestionError(message, res.status, body?.error?.code ?? null);
+  }
+  return res.json();
+}
+
+/** Shape of `services/ingestion`'s `FeatureRebuildTriggerResponse`. */
+export type FeatureRebuildTrigger = {
+  run_id: string;
+  status: "success";
+  n_selected: number;
+};
+
+/** Live call to `POST /v1/features/rebuild` (`services/ingestion`) --
+ * the "Rebuild Features" System Command (root `TODO.md`'s "System
+ * Commands" item). Real sklearn/duckdb compute (mutual information +
+ * RandomForest + permutation importance, per-region) against whatever
+ * `data/training/master.duckdb` already exists on the server -- minutes,
+ * not a fast request/response cycle (verified live: ~10 minutes for a
+ * real 6-region pass). This call blocks for that whole duration; the
+ * caller's own UI should show a real "running" state, not assume this
+ * resolves quickly the way `triggerDbtBuild` usually does.
+ *
+ * Two real, honest failure modes, not silently retried or hidden:
+ * `TriggerIngestionError.code === "rebuild_in_progress"` (409, another
+ * rebuild is already running) and `"master_duckdb_missing"` (422,
+ * `data/training/master.duckdb` doesn't exist on the server -- this
+ * endpoint deliberately never auto-builds it from cloud credentials,
+ * see `app.service.features.rebuild`'s own module docstring for why). */
+export async function triggerFeatureRebuild(): Promise<FeatureRebuildTrigger> {
+  const res = await fetch(`${INGESTION_API_URL}/features/rebuild`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    const message: string =
+      body?.error?.message ?? `POST /v1/features/rebuild failed: ${res.status}`;
     throw new TriggerIngestionError(message, res.status, body?.error?.code ?? null);
   }
   return res.json();

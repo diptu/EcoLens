@@ -55,6 +55,27 @@ class Settings(BaseSettings):
     postgres_user: str = "postgres"
     postgres_password: str = "postgres"
 
+    # Second physical database (root TODO.md's "save raw and raw.marts
+    # in seperate database" -- a separate Neon project, not a schema on
+    # the same one). `app/retention/marts_archive.py` is the only thing
+    # that ever connects to it: `raw_marts.*`'s permanent, unbounded
+    # archive lives here, while the primary database keeps a rolling
+    # window of the same tables (`marts_local_retention_days`) for live
+    # queries. Optional -- unset means the archive task no-ops (same
+    # "optional infra" convention `object_storage_configured` already
+    # uses), not a hard failure.
+    raw_marts_database_url_env: str | None = Field(
+        default=None, validation_alias="RAW_MARTS_DATABASE_URL"
+    )
+
+    # How long `raw_marts.*` rows stay in the *primary* database before
+    # being archived to `raw_marts_database_url` and pruned. Defaults to
+    # `retention_days` for consistency with `raw.*`'s own window, but
+    # kept as its own field since marts rows are much smaller
+    # individually (aggregated, not raw per-reading) -- an operator may
+    # reasonably want to keep more days of marts locally than raw.
+    marts_local_retention_days: int = 60
+
     # RabbitMQ (Phase 1's "RabbitMQ Consumer Framework") -- consume-only,
     # the mirror image of ingestion's publish-only `rabbitmq_url`/
     # `rabbitmq_landing_queue`. `rabbitmq_landing_dlx`/`_dlq` are new
@@ -211,6 +232,32 @@ class Settings(BaseSettings):
             f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
+
+    @property
+    def raw_marts_archive_configured(self) -> bool:
+        """True once a real second-database URL is set. Same shape as
+        `object_storage_configured` -- the archive task checks this and
+        no-ops rather than failing when unconfigured."""
+        return bool(self.raw_marts_database_url_env)
+
+    @property
+    def raw_marts_database_url(self) -> str:
+        """`postgresql+asyncpg://` DSN for the second database -- same
+        two normalizations `database_url` applies. Only call this after
+        checking `raw_marts_archive_configured`; raises if unset rather
+        than silently falling back to the primary database (archiving a
+        table to itself would be a real, silent no-op bug, not a safe
+        default)."""
+        if not self.raw_marts_database_url_env:
+            raise RuntimeError(
+                "RAW_MARTS_DATABASE_URL is not configured -- check "
+                "raw_marts_archive_configured before calling this"
+            )
+        url = self.raw_marts_database_url_env
+        if url.startswith("postgresql://"):
+            url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        url = url.replace("sslmode=", "ssl=")
+        return url
 
     @property
     def dbt_project_dir(self) -> str:

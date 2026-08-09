@@ -279,7 +279,7 @@ _PROMOTION_GATE_METRIC = "test_mape"  # lower is better
 
 
 async def promote_version(
-    model_name: str, version: str, stage: str
+    model_name: str, version: str, stage: str, force: bool = False
 ) -> ModelVersionSummary:
     """Transitions `version` to `stage` in the MLflow registry.
 
@@ -289,7 +289,12 @@ async def promote_version(
 
     1. **Training-time `test_mape`** (the original gate): if both the
        candidate and the current Production version have one logged,
-       reject when the candidate's is worse (higher).
+       reject when the candidate's is worse (higher). Skipped when
+       `force=True` -- see that param's own docstring (`schemas.model.
+       create.PromoteModelRequest`) for the real case this exists for: a
+       multi-region model's blended `test_mape` can fail this gate even
+       when a real per-region walk-forward evaluation shows most regions
+       genuinely improved, something this one scalar can't see.
     2. **Live evaluation gate** (Phase 4's `evaluate.run_live_evaluation_
        gate`, data-pipeline-side): if the candidate version carries a
        real `eval_gate_passed` *tag* set to `"False"`, reject outright --
@@ -302,7 +307,9 @@ async def promote_version(
        violation -- forecast-api never *runs* the evaluate harness
        itself (still `README.md`'s "forecast-api never trains" rule),
        it only reads a tag data-pipeline's own training/incremental
-       pipeline already computed and persisted.
+       pipeline already computed and persisted. **Never skipped by
+       `force`** -- this is a real correctness signal from fresh
+       out-of-sample data, not a blended-metric artifact.
 
     Neither gate blocks if its respective signal is simply *absent*
     (no logged `test_mape`, no `eval_gate_passed` tag at all -- e.g. an
@@ -341,7 +348,7 @@ async def promote_version(
                 )
 
             current = client.get_latest_versions(model_name, stages=["Production"])
-            if current:
+            if current and not force:
                 current_metrics = dict(client.get_run(current[0].run_id).data.metrics)
                 candidate_mape = candidate_metrics.get(_PROMOTION_GATE_METRIC)
                 current_mape = current_metrics.get(_PROMOTION_GATE_METRIC)

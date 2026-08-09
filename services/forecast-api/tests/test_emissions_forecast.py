@@ -40,7 +40,17 @@ class _FakeSession:
     async def execute(self, query, params=None):
         sql = str(query)
         if "fct_energy_demand" in sql:
-            return _FakeResult(self.demand_rows)
+            # Real per-region fetches (`data.load_latest_window`'s
+            # cross-region-context fix) key off each row's `region`
+            # matching the query's bound `:region` param -- retag the
+            # fixture rows to that region rather than ignoring the
+            # param, so a NEM request (5 regions) still sees every
+            # region as having identical underlying data, same fixture
+            # intent `test_forecast.py`'s identical fake session uses.
+            rows = self.demand_rows
+            if params and "region" in params:
+                rows = [dict(r, region=params["region"]) for r in rows]
+            return _FakeResult(rows)
         if "aemo_holidays" in sql:
             return _FakeResult([])
         if "fct_carbon_intensity" in sql:

@@ -107,18 +107,25 @@ async def _run_inference(
     db: AsyncSession, bundle: ModelBundle, region: str
 ) -> tuple[DemandForecast, pd.Series]:
     n_rows = bundle.lookback + _FEATURE_WARMUP_ROWS
-    raw_df = await load_latest_window(db, region, n_rows)
-    if len(raw_df) < n_rows:
+    # Every other region this bundle was trained on, fetched alongside
+    # `region` -- so `build_features`'s cross-region-context features
+    # reflect the real multi-region total the model was actually trained
+    # against, not "region vs. itself" (see `load_latest_window`'s own
+    # docstring for the real train/serve skew this fixes).
+    cross_regions = [r for r in bundle.feature_scalers if r != region]
+    raw_df = await load_latest_window(db, region, n_rows, cross_regions=cross_regions)
+    own_rows = int((raw_df["region"] == region).sum())
+    if own_rows < n_rows:
         raise ApiError(
             503,
             "insufficient_data",
             f"Not enough recent warehouse data for region '{region}' to build a forecast "
-            f"(need {n_rows} rows, have {len(raw_df)})",
+            f"(need {n_rows} rows, have {own_rows})",
         )
 
     holidays = await load_holidays(db)
     engineered = build_features(raw_df, holidays=holidays)
-    window = engineered.tail(bundle.lookback)
+    window = engineered[engineered["region"] == region].tail(bundle.lookback)
 
     feature_matrix = window[list(FEATURE_COLUMNS)]
     if feature_matrix.isna().any().any():

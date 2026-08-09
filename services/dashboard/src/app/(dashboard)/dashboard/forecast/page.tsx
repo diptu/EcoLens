@@ -29,6 +29,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
+  AlertTriangle,
   ArrowDownRight,
   ArrowUpRight,
   Activity,
@@ -57,6 +58,20 @@ import {
 } from "@/lib/emissions";
 
 const ALL_FORECAST_REGIONS: (Region | "NEM")[] = ["NEM", ...ALL_REGIONS];
+
+// Real, measured (not invented) result from a walk-forward backtest of
+// the currently-served model (lstm_demand v3) run 2026-08-09 --
+// `ecolens-forecast evaluate --version 3 --region TAS1`: 25.43% MAPE,
+// worse than the seasonal-naive baseline (8.69%). Every other NEM
+// region (NSW1/QLD1/VIC1/SA1) beats its baseline comfortably in the
+// same run -- TAS1 alone is a real, known weak spot in this model
+// version, not a UI-only guess. Static (not live-fetched) because a
+// walk-forward backtest is a deliberate, occasional evaluation run, not
+// something computed on every page load -- same "hardcoded but real"
+// convention CONFORMAL_ALPHA uses on /dashboard/performance/. Re-run
+// the evaluate command after any future retrain to keep this accurate.
+const TAS1_WALK_FORWARD_MAPE = 25.43;
+const TAS1_BASELINE_MAPE = 8.69;
 
 function parseIntervalMinutes(interval: string): number {
   const m = /^(\d+)([mh])$/.exec(interval);
@@ -93,19 +108,28 @@ export default function ForecastPage() {
 
   const [live, setLive] = useState<DemandForecast | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
+  // The real backend error message (e.g. "The currently-served model
+  // has no fitted feature scaler for region 'WEM'..." or "Recent data
+  // for region 'WEM' has gaps...") -- surfaced directly rather than
+  // guessing a category from the error code, so whatever forecast-api
+  // actually says is what shows up here, not a paraphrase that can
+  // drift out of sync with it.
+  const [loadErrorMessage, setLoadErrorMessage] = useState<string | null>(null);
   const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     setLoadFailed(false);
+    setLoadErrorMessage(null);
     fetchDemandForecast(region)
       .then((f) => {
         if (!cancelled) setLive(f);
       })
-      .catch(() => {
+      .catch((err: Error) => {
         if (!cancelled) {
           setLive(null);
           setLoadFailed(true);
+          setLoadErrorMessage(err.message || null);
         }
       });
     return () => {
@@ -258,6 +282,18 @@ export default function ForecastPage() {
         />
       </div>
 
+      {(region === "TAS1" || region === "NEM") && (
+        <div className="flex items-start gap-2 rounded-md border border-amber-300/20 bg-amber-300/5 px-3 py-2 text-xs text-amber-100/80">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-300/70" />
+          <span>
+            {region === "TAS1" ? "TAS1 is a known weak spot for the currently-served model" : "NEM includes TAS1, a known weak spot for the currently-served model"} —
+            a real walk-forward backtest measured {TAS1_WALK_FORWARD_MAPE}% MAPE for TAS1, worse than
+            a seasonal-naive baseline ({TAS1_BASELINE_MAPE}%). Every other NEM region beats its baseline
+            comfortably in the same evaluation.
+          </span>
+        </div>
+      )}
+
       {/* ── Main chart + sidebar ──────────────────────────────── */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
         <Card
@@ -349,7 +385,8 @@ export default function ForecastPage() {
           ) : (
             <p className="py-12 text-center text-sm text-white/40">
               {loadFailed
-                ? "No forecast available for this region right now — is forecast-api running, and is a model loaded?"
+                ? (loadErrorMessage ??
+                  "No forecast available for this region right now — is forecast-api running, and is a model loaded?")
                 : "Loading forecast…"}
             </p>
           )}

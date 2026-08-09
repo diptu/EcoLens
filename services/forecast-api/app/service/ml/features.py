@@ -39,6 +39,18 @@ _LAGS: tuple[int, ...] = (1, 2, 3, 6, 12)
 _ROLLING_WINDOWS: tuple[int, ...] = (6, 12, 24)
 _COMFORT_TEMP_C = 18.0
 
+#: Same canonical region set `api/v1/regions/routes.py`'s own static list
+#: uses -- one-hot region identity (`add_region_dummies`), added so a
+#: single shared-weight model trained across multiple regions can learn
+#: region-specific demand dynamics instead of relying on per-region
+#: feature *scaling* alone to bridge the gap. Real, measured need: a
+#: DemandLSTM trained across all 5 NEM regions with no region signal at
+#: all scored 76.79% test_mape (vs. 3.73% single-region NSW1-only) --
+#: TAS1's demand shape genuinely differs from NSW1's beyond just
+#: magnitude, which scaling alone can't fix (root TODO.md's "NEM
+#: (5-region sum)" item).
+ALL_MODEL_REGIONS: tuple[str, ...] = ("NSW1", "QLD1", "VIC1", "SA1", "TAS1", "WEM")
+
 
 def add_cyclical(df: pd.DataFrame, col: str, period: float) -> pd.DataFrame:
     out = df.copy()
@@ -126,12 +138,35 @@ def add_cross_region_context(
     return out
 
 
+def add_region_dummies(
+    df: pd.DataFrame,
+    regions: Sequence[str] = ALL_MODEL_REGIONS,
+    group_col: str = "region",
+) -> pd.DataFrame:
+    """One-hot region identity, `region_{code}` per `regions` -- always
+    all 6 canonical columns regardless of which regions are actually
+    present in `df`, so a model trained on any subset (e.g. just the 5
+    NEM regions) has the same fixed `FEATURE_COLUMNS` shape as one
+    trained on a different subset later. `float` (0.0/1.0), matching
+    `is_weekend`/`is_holiday`'s existing flag-column convention --
+    trivially known for the entire forecast horizon (a series' region
+    never changes), so this belongs in `KNOWN_FUTURE_COLUMNS` below, and
+    is never scaled (`NUMERIC_COLUMNS` excludes it), same reasoning as
+    those two flags.
+    """
+    out = df.copy()
+    for code in regions:
+        out[f"region_{code}"] = (out[group_col] == code).astype(float)
+    return out
+
+
 def build_features(
     df: pd.DataFrame, holidays: pd.DataFrame | None = None
 ) -> pd.DataFrame:
     out = add_calendar_features(df, holidays=holidays)
     out = add_weather_derived(out)
     out = add_cross_region_context(out)
+    out = add_region_dummies(out)
     out = add_lag_and_rolling(out)
     return out
 
@@ -163,6 +198,7 @@ _CROSS_REGION_COLUMNS: tuple[str, ...] = (
     "total_demand_all_regions_mw",
     "demand_share_of_total",
 )
+_REGION_COLUMNS: tuple[str, ...] = tuple(f"region_{code}" for code in ALL_MODEL_REGIONS)
 _LAG_COLUMNS: tuple[str, ...] = tuple(f"{TARGET_COLUMN}_lag_{lag}" for lag in _LAGS)
 _ROLLING_COLUMNS: tuple[str, ...] = tuple(
     f"{TARGET_COLUMN}_rolling_{stat}_{window}"
@@ -176,17 +212,19 @@ FEATURE_COLUMNS: tuple[str, ...] = (
     + _CALENDAR_CYCLICAL_COLUMNS
     + _WEATHER_DERIVED_COLUMNS
     + _CROSS_REGION_COLUMNS
+    + _REGION_COLUMNS
     + _LAG_COLUMNS
     + _ROLLING_COLUMNS
 )
 
 #: The subset of `FEATURE_COLUMNS` the feature scaler was actually fit
-#: on (data-pipeline's `service/ml/data.py`'s `fit_scalers`/`NUMERIC_COLUMNS`) --
-#: cyclical encodings are already in `[-1, 1]` and the calendar flags are
-#: already `0`/`1`, so neither was scaled at training time either.
-#: `api/v1/forecast/routes.py`'s inference path must only transform these
-#: columns, not all of `FEATURE_COLUMNS`, or `StandardScaler.transform`
-#: raises on the column-count mismatch.
+#: on (`service/ml/data.py`'s `fit_scalers`/`NUMERIC_COLUMNS`) --
+#: cyclical encodings are already in `[-1, 1]`, the calendar flags and
+#: region one-hot columns are already `0`/`1`, so none of those were
+#: scaled at training time either. `api/v1/forecast/routes.py`'s
+#: inference path must only transform these columns, not all of
+#: `FEATURE_COLUMNS`, or `StandardScaler.transform` raises on the
+#: column-count mismatch.
 NUMERIC_COLUMNS: tuple[str, ...] = (
     _RAW_CONTEXT_COLUMNS
     + _WEATHER_DERIVED_COLUMNS
@@ -209,7 +247,7 @@ NUMERIC_COLUMNS: tuple[str, ...] = (
 #: (this service trains TFT now too, not just serves LSTM) -- previously
 #: only existed in data-pipeline's copy of this file.
 KNOWN_FUTURE_COLUMNS: tuple[str, ...] = (
-    _CALENDAR_FLAG_COLUMNS + _CALENDAR_CYCLICAL_COLUMNS
+    _CALENDAR_FLAG_COLUMNS + _CALENDAR_CYCLICAL_COLUMNS + _REGION_COLUMNS
 )
 
 #: The complement of `KNOWN_FUTURE_COLUMNS` within `FEATURE_COLUMNS`:

@@ -49,28 +49,7 @@ _NUMERIC_TRAINING_COLUMNS = tuple(
 )
 
 
-async def load_latest_window(
-    db: AsyncSession, region: str, n_rows: int
-) -> pd.DataFrame:
-    """The most recent `n_rows` rows for `region`, ascending by `ts`.
-    `service/ml/registry.py`'s inference path requests `lookback +
-    max(lag/rolling windows)` rows so the lag/rolling features for the
-    *last* `lookback` of them are fully populated (not `NaN` from
-    feature-engineering warmup) once `ml.features.build_features` runs —
-    same reasoning `ml.data.DemandDataset` (data-pipeline) applies at
-    training time, just without a `Dataset` wrapper since inference only
-    ever needs the single most recent window, not a sliding-window
-    dataset.
-
-    **Single-region caveat**: this only fetches `region`'s own rows, so
-    `build_features`'s cross-region-context features
-    (`total_demand_all_regions_mw`/`demand_share_of_total`) always come
-    out as "region vs. itself" (share=1.0) here — consistent with v0
-    training also being single-region only (`Settings.
-    model_default_regions`), not a bug specific to serving. A genuinely
-    multi-region model would need this to fetch every trained region's
-    latest window, not just the one being forecast.
-    """
+async def _fetch_region_rows(db: AsyncSession, region: str, n_rows: int) -> pd.DataFrame:
     result = await db.execute(
         text(
             # nosec B608 -- `_TRAINING_COLUMNS`/`MARTS_SCHEMA` are fixed
@@ -90,7 +69,46 @@ async def load_latest_window(
     df[list(_NUMERIC_TRAINING_COLUMNS)] = df[list(_NUMERIC_TRAINING_COLUMNS)].apply(
         pd.to_numeric
     )
-    return df.sort_values("ts").reset_index(drop=True)
+    return df
+
+
+async def load_latest_window(
+    db: AsyncSession, region: str, n_rows: int, cross_regions: Sequence[str] = ()
+) -> pd.DataFrame:
+    """The most recent `n_rows` rows for `region`, ascending by `ts`.
+    `service/ml/registry.py`'s inference path requests `lookback +
+    max(lag/rolling windows)` rows so the lag/rolling features for the
+    *last* `lookback` of them are fully populated (not `NaN` from
+    feature-engineering warmup) once `ml.features.build_features` runs —
+    same reasoning `ml.data.DemandDataset` (data-pipeline) applies at
+    training time, just without a `Dataset` wrapper since inference only
+    ever needs the single most recent window, not a sliding-window
+    dataset.
+
+    `cross_regions`: a real multi-region model's own trained region set
+    (`bundle.feature_scalers.keys()`) -- when given, also fetches each of
+    these OTHER regions' same-length latest windows, so `build_features`'s
+    cross-region-context features (`total_demand_all_regions_mw`/
+    `demand_share_of_total`) reflect the true multi-region total instead
+    of "region vs. itself" (share=1.0). Real, measured need: a version
+    trained across 5 regions together learns `demand_share_of_total` as a
+    real per-region signal (TAS1 ~3% of NEM, NSW1 ~28%) -- serving it with
+    this always pinned to 1.0 (this function's own prior single-region-
+    only behavior) fed it a value far outside what training ever showed
+    it, and live forecasts for the smaller regions (SA1/TAS1) came out
+    inflated 3-6x as a result (root TODO.md's "NEM 5-region sum" item).
+    The returned frame still has *all* fetched regions' rows -- the
+    caller is responsible for filtering back down to just `region`'s
+    rows after `build_features` runs, the same way training's own
+    multi-region dataframe gets grouped by `region` throughout.
+
+    Omitted (the default, `()`) reproduces the exact prior single-region
+    behavior -- every other caller of this function is unaffected.
+    """
+    regions_to_fetch = list(dict.fromkeys([region, *cross_regions]))
+    frames = [await _fetch_region_rows(db, r, n_rows) for r in regions_to_fetch]
+    df = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
+    return df.sort_values(["region", "ts"]).reset_index(drop=True)
 
 
 async def load_holidays(db: AsyncSession) -> pd.DataFrame:

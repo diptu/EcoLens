@@ -11,10 +11,22 @@ class PromoteModelRequest(AppBaseModel):
     default) promotes a version of `Settings.mlflow_registry_model_name`
     (`lstm_demand`, unchanged existing behavior); pass e.g.
     `lstm_demand_tft` to promote a TFT version instead, now that more
-    than one architecture is really registered."""
+    than one architecture is really registered.
+
+    `force` (default `False`) skips only the single-scalar `test_mape`
+    regression gate -- never the `eval_gate_passed` live-evaluation gate,
+    which stays a hard block regardless. Real need this surfaced for: a
+    multi-region model's *blended* `test_mape` across all its regions
+    can fail the gate against a single-region Production version even
+    when every region but one is a real improvement -- `test_mape` alone
+    can't see that breakdown, only a real per-region walk-forward
+    evaluation (`ecolens-forecast evaluate`) can. `force` exists for that
+    reviewed-by-a-human case, not to make the gate meaningless -- it's
+    still the default-off path."""
 
     stage: Literal["Production", "Staging", "Archived"]
     model_name: str | None = None
+    force: bool = False
 
 
 class TrainRequest(AppBaseModel):

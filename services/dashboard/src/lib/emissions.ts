@@ -261,7 +261,12 @@ export type DemandForecast = {
 export async function fetchDemandForecast(region: string = "NEM"): Promise<DemandForecast> {
   const res = await fetch(`${FORECAST_API_URL}/forecast?region=${region}`);
   if (!res.ok) {
-    throw new Error(`GET /v1/forecast failed: ${res.status}`);
+    const body = await res.json().catch(() => null);
+    const err = new Error(
+      body?.error?.message ?? `GET /v1/forecast failed: ${res.status}`,
+    );
+    (err as Error & { code?: string }).code = body?.error?.code;
+    throw err;
   }
   return res.json();
 }

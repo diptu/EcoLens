@@ -266,7 +266,7 @@ def test_loss_curve_returns_503_when_the_registry_is_unreachable(monkeypatch, cl
 def test_promote_uses_the_given_model_name_in_the_request_body(monkeypatch, client):
     captured = {}
 
-    async def _fake_promote_version(model_name, version, stage):
+    async def _fake_promote_version(model_name, version, stage, force=False):
         captured["model_name"] = model_name
         return ModelVersionSummary(
             version="3",
@@ -298,7 +298,7 @@ def test_promote_returns_the_updated_version(monkeypatch, client):
         git_sha="deadbeef",
     )
 
-    async def _fake_promote_version(model_name, version, stage):
+    async def _fake_promote_version(model_name, version, stage, force=False):
         assert version == "3"
         assert stage == "Production"
         return updated
@@ -314,7 +314,7 @@ def test_promote_returns_the_updated_version(monkeypatch, client):
 
 
 def test_promote_returns_409_when_the_gate_rejects_it(monkeypatch, client):
-    async def _fake_promote_version(model_name, version, stage):
+    async def _fake_promote_version(model_name, version, stage, force=False):
         raise PromotionRejected("version 3's test_mape is worse")
 
     monkeypatch.setattr(model_routes, "promote_version", _fake_promote_version)
@@ -329,7 +329,7 @@ def test_promote_returns_404_for_an_unknown_version(monkeypatch, client):
     from mlflow.exceptions import MlflowException
     from mlflow.protos.databricks_pb2 import RESOURCE_DOES_NOT_EXIST
 
-    async def _fake_promote_version(model_name, version, stage):
+    async def _fake_promote_version(model_name, version, stage, force=False):
         raise MlflowException("not found", error_code=RESOURCE_DOES_NOT_EXIST)
 
     monkeypatch.setattr(model_routes, "promote_version", _fake_promote_version)
@@ -350,7 +350,7 @@ def test_promote_returns_503_when_the_registry_is_unreachable(monkeypatch, clien
     # "the registry itself is unreachable".
     from mlflow.exceptions import MlflowException
 
-    async def _fake_promote_version(model_name, version, stage):
+    async def _fake_promote_version(model_name, version, stage, force=False):
         raise MlflowException("API request failed with error code 403")
 
     monkeypatch.setattr(model_routes, "promote_version", _fake_promote_version)

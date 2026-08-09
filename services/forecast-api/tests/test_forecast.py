@@ -33,7 +33,19 @@ class _FakeSession:
     async def execute(self, query, params=None):
         sql = str(query)
         if "fct_energy_demand" in sql:
-            return _FakeResult(self.demand_rows)
+            # Real per-region fetches (`data.load_latest_window`'s own
+            # cross-region-context fix) key off each row's `region`
+            # field matching the query's bound `:region` param -- retag
+            # the fixture rows to that region rather than ignoring the
+            # param outright, so a multi-region caller (the NEM
+            # aggregate tests below) still sees every region as having
+            # identical underlying data, the actual test intent, instead
+            # of every fetch silently returning rows tagged for whichever
+            # region happened to build the fixture.
+            rows = self.demand_rows
+            if params and "region" in params:
+                rows = [dict(r, region=params["region"]) for r in rows]
+            return _FakeResult(rows)
         if "aemo_holidays" in sql:
             return _FakeResult([])
         raise AssertionError(f"unexpected query: {sql}")

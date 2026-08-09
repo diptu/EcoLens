@@ -341,7 +341,7 @@ async def promote_model_version(
 ) -> ModelVersionOut:
     model_name = body.model_name or settings.mlflow_registry_model_name
     try:
-        summary = await promote_version(model_name, version, body.stage)
+        summary = await promote_version(model_name, version, body.stage, force=body.force)
     except PromotionRejected as exc:
         raise ApiError(409, "worse_than_production", exc.message) from exc
     except MlflowException as exc:

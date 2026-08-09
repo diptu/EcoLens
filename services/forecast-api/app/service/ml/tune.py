@@ -7,10 +7,11 @@ Two approaches, both real:
   hyperparameters (`hidden_size`, `lr`). Cheap (6 trials, each a full
   `config.epochs` run) and exhaustive over its small grid.
 - `tune_optuna` (`todo-model-training.md`-adjacent real request: an
-  actual Optuna search, not a grid) — TPE-sampled search over 5
-  hyperparameters (`hidden_size`/`num_layers`/`dropout`/`lr`/`batch_size`)
-  with median pruning of bad trials mid-training via `ml/train.py`'s
-  generic `epoch_callback` hook. Each trial trains for a *reduced* epoch
+  actual Optuna search, not a grid) — TPE-sampled search over 6
+  hyperparameters (`hidden_size`/`num_layers`/`dropout`/`weight_decay`/
+  `lr`/`batch_size`) with median pruning of bad trials mid-training via
+  `ml/train.py`'s generic `epoch_callback` hook. Each trial trains for a
+  *reduced* epoch
   budget (`tune_epochs`, default well under `Settings.model_train_epochs`)
   as a fast proxy for full-budget quality — standard successive-halving
   practice, not a shortcut unique to this codebase. The caller is
@@ -67,6 +68,11 @@ OPTUNA_NUM_LAYERS: tuple[int, int] = (1, 3)
 OPTUNA_DROPOUT: tuple[float, float] = (0.1, 0.5)
 OPTUNA_LR: tuple[float, float] = (1e-4, 5e-3)
 OPTUNA_BATCH_SIZES: tuple[int, ...] = (32, 64, 128, 256)
+# Added alongside `Settings.model_weight_decay` (previously absent from
+# the optimizer entirely) -- log-uniform, matching `OPTUNA_LR`'s own
+# `log=True` search, since a good weight_decay is a real order-of-
+# magnitude question, not a linear one.
+OPTUNA_WEIGHT_DECAY: tuple[float, float] = (1e-6, 1e-3)
 
 
 @dataclass
@@ -267,6 +273,7 @@ async def tune_optuna(
         )
         num_layers = trial.suggest_int("num_layers", *OPTUNA_NUM_LAYERS)
         dropout = trial.suggest_float("dropout", *OPTUNA_DROPOUT)
+        weight_decay = trial.suggest_float("weight_decay", *OPTUNA_WEIGHT_DECAY, log=True)
         lr = trial.suggest_float("lr", *OPTUNA_LR, log=True)
         batch_size = trial.suggest_categorical("batch_size", list(OPTUNA_BATCH_SIZES))
 
@@ -275,6 +282,7 @@ async def tune_optuna(
             hidden_size=hidden_size,
             num_layers=num_layers,
             dropout=dropout,
+            weight_decay=weight_decay,
             lr=lr,
             batch_size=batch_size,
             epochs=tune_epochs,
@@ -289,6 +297,7 @@ async def tune_optuna(
             hidden_size=hidden_size,
             num_layers=num_layers,
             dropout=dropout,
+            weight_decay=weight_decay,
             lr=lr,
             batch_size=batch_size,
         )

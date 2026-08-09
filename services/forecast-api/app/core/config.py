@@ -102,10 +102,68 @@ class Settings(BaseSettings):
     model_train_epochs: int = 50
     model_train_lr: float = 1e-3
     model_hidden_size: int = 128
-    model_dropout: float = 0.5
+    # Was 0.5 -- real, measured overfitting symptom (large train-vs-val
+    # gap) on a 2-layer LSTM; 0.5 between only 2 stacked layers is
+    # aggressive enough to hurt sequential learning on top of whatever
+    # regularization benefit it adds. Lowered to the middle of a more
+    # standard 0.2-0.3 range for time-series LSTMs, not the extreme end.
+    model_dropout: float = 0.25
+    # L2 regularization on Adam -- previously absent entirely (confirmed:
+    # `torch.optim.Adam(model.parameters(), lr=config.lr)` had no
+    # `weight_decay` kwarg anywhere in train.py/train_energy_forecast.py/
+    # train_tft.py). Real gap, not a hypothetical one -- same train-vs-val
+    # overfitting symptom above. 1e-5, the conservative end of a
+    # 1e-4-1e-5 range: a real optimizer/regularization change to a
+    # production-serving model warrants starting light and letting
+    # `tune.py`'s Optuna search (which now covers this dimension too)
+    # find a stronger value if the data actually calls for one, rather
+    # than guessing a large penalty upfront.
+    model_weight_decay: float = 1e-5
     model_num_layers: int = 2
+    # Row-offset lookback/horizon at each region's own native ingestion
+    # grain (5-min for NEM, 30-min for WEM) -- shared, as-is, by
+    # `EnergyTrainConfig` (`train_energy_forecast.py`, the separate
+    # `energy_forecast_multi_task` model) and `TFTTrainConfig`
+    # (`train_tft.py`, inherits `TrainConfig.from_settings()` directly).
+    # Deliberately NOT changed for the demand-model's 7-day/hourly-grain
+    # retrain below -- `EnergyTrainConfig`'s own module comment already
+    # documents its row-offset scheme as an accepted, separate trade-off
+    # for that model; repurposing this shared field would have silently
+    # changed its training window too, never reviewed for that model.
     model_lookback: int = 48
     model_horizon: int = 48
+    # Dedicated to the demand model (`TrainConfig`, `lstm_demand` +
+    # `lstm_demand_tft` via `TFTTrainConfig` inheriting `TrainConfig.
+    # from_settings()`) specifically -- at *hourly* grain, not row-offset
+    # like `model_lookback`/`model_horizon` above. Hourly is what lets WEM
+    # join the same shared-weight model as the 5 NEM regions for the
+    # first time -- its native 30-min rows and NEM's native 5-min rows
+    # only mean the same real wall-clock span per step once both are
+    # resampled to a common grain. `ml/data.py`'s hourly aggregation is
+    # what actually produces that grain; these two numbers are moot
+    # without it.
+    #
+    # 24/48 (1-day lookback, 2-day horizon) -- NOT the originally-planned
+    # 7-day (168h) horizon. Real, measured, code-verified constraint, not
+    # a design preference: `fct_energy_demand`'s real live history is far
+    # shorter than earlier assumed (~60 days) -- NEM regions only have
+    # ~14 days (~300 real hourly rows after gaps), WEM ~44 days. At
+    # horizon=168h, even a SINGLE training window for a NEM region alone
+    # needs 64%+ of its total 300 rows, leaving no room for genuinely
+    # separate (non-leaky) held-out val/cal windows under any split-
+    # fraction arrangement -- confirmed by directly running the real
+    # windowing code across a horizon sweep (168h down to 48h), not by
+    # formula alone. 48h is the largest horizon that gives every one of
+    # the 6 regions multiple real, non-empty train/val/cal windows today
+    # (measured: ~64 train/~26 val/~27 cal per NEM region, ~416/~202/~203
+    # for WEM) -- see `TrainConfig.train_frac`/`val_frac`'s own comment
+    # (`ml/train.py`) for the matching split-fraction change this
+    # required. Revisit the full 7-day ask once NEM's real ingestion
+    # (~21 rows/day since 2026-07-24) reaches enough history for a
+    # non-thin evaluation -- estimated ~2026-08-18/19, not the originally
+    # estimated 5-6 weeks (that estimate used too coarse a formula).
+    model_demand_lookback: int = 24
+    model_demand_horizon: int = 48
     model_batch_size: int = 64
     model_quantile_weight: float = 1.0
     model_early_stopping_patience: int = 5
@@ -117,8 +175,11 @@ class Settings(BaseSettings):
     # `ml/train.py`'s docstring for why these must be disjoint.
     model_cal_frac: float = 0.5
     # Regions `train`/`train-tft` trains across when no `--region` is
-    # passed.
-    model_default_regions: list[str] = ["NSW1"]
+    # passed. Was `["NSW1"]` -- now all 6 real regions (5 NEM + WEM),
+    # since the hourly-grain retrain (see `model_lookback`/`model_horizon`
+    # above) is specifically what makes training WEM alongside the NEM
+    # regions temporally coherent for the first time.
+    model_default_regions: list[str] = ["NSW1", "QLD1", "VIC1", "SA1", "TAS1", "WEM"]
 
     # Incremental (warm-started) training tunables -- `ml/incremental.py`.
     # Deliberately much lighter than `model_train_epochs`/`model_train_lr`'s

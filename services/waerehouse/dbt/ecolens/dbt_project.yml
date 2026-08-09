@@ -15,9 +15,16 @@ clean-targets:
 
 # Materializations per docs/data/dbt-commands.md's documented DAG:
 # staging = view (cheap, always fresh off raw.*), intermediate = ephemeral
-# (inlined into whatever mart references it, never materialized on its
-# own — these are feature-engineering CTEs, not something queried
-# directly), marts = table by default.
+# by default (inlined into whatever mart references it, never
+# materialized on its own — these are feature-engineering CTEs, not
+# something queried directly), marts = table by default.
+#
+# `+schema: intermediate` (-> physical `raw_intermediate`) exists for the
+# one intermediate model that overrides its own materialization away
+# from ephemeral (`int_demand_with_weather.sql` -> `incremental`, see
+# that model's own header comment for why) -- ephemeral models never
+# materialize into a schema at all, so this has no effect on the other
+# 6 intermediate models that still use the ephemeral default above.
 #
 # The 4 time-series `fct_*` marts override this to `materialized:
 # incremental` in their own model-level `config()` block (`TODO.md`
@@ -35,6 +42,7 @@ models:
       +schema: staging
     intermediate:
       +materialized: ephemeral
+      +schema: intermediate
     marts:
       +materialized: table
       +schema: marts

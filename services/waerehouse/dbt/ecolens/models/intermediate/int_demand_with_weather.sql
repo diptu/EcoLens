@@ -47,8 +47,19 @@
 -- would mean ignoring a real, data-driven finding for engineering
 -- convenience.
 --
--- Ephemeral (dbt_project.yml) -- inlined into fct_energy_demand, never
--- materialized on its own.
+-- Incremental (dbt_project.yml's `+schema: intermediate` /
+-- `raw_intermediate`), NOT ephemeral -- this used to be ephemeral (the
+-- `intermediate/` folder default), which meant every one of this
+-- model's 6 downstream references (2 singular tests, 4 generic column
+-- tests) re-executed this entire query -- LATERAL as-of joins + a
+-- 336-row rolling window over the *full unbounded history* -- from
+-- scratch, independently. Confirmed live: the top 5 slowest steps in a
+-- real build were all reads of this one ephemeral model, summing to
+-- ~7,400s out of a ~2,300s-total 90-step build. `delete+insert` on
+-- `unique_key=[ts, region]` (same convention the 4 fct_* marts already
+-- use) plus the two `is_incremental()` filters below fix this: computed
+-- once per build, not 6+ times, and bounded to a small recent window
+-- regardless of how much raw history has accumulated.
 --
 -- Weather and generation-mix joins are both "as-of" (last observation
 -- at or before `d.ts`), not exact-timestamp -- BoM/OpenElectricity both
@@ -61,10 +72,32 @@
 -- enough that forward-filling the most recent real reading is the
 -- standard, honest way to handle this, not a fabricated value.
 
-with demand as (
+{{
+    config(
+        materialized='incremental',
+        unique_key=['ts', 'region'],
+        incremental_strategy='delete+insert',
+    )
+}}
+
+with demand_all as (
     select ts, region, demand_mw, price_mwh from {{ ref('stg_aemo_nem_dispatch') }}
     union all
     select ts, region, demand_mw, price_mwh from {{ ref('stg_aemo_wem_dispatch') }}
+),
+
+-- Priming buffer for the lag(...,336)/roll_7d window functions below --
+-- 336 rows needs 7 full days of *prior* context at WEM's 30-min grain
+-- (the binding constraint; NEM's 5-min grain needs far less for the
+-- same row count). 12 days = that 7-day requirement + ~40% margin +
+-- the 2-day output-retention window itself, so this stays small and
+-- flat regardless of total raw history -- not a fixed cost that grows
+-- forever the way the old unbounded scan did.
+demand as (
+    select * from demand_all
+    {% if is_incremental() %}
+    where ts > (select coalesce(max(ts), '1900-01-01'::timestamptz) from {{ this }}) - interval '12 days'
+    {% endif %}
 ),
 
 weather as (
@@ -170,3 +203,6 @@ left join lateral (
     order by g2.ts desc
     limit 1
 ) g on true
+{% if is_incremental() %}
+where d.ts > (select coalesce(max(ts), '1900-01-01'::timestamptz) from {{ this }}) - interval '2 days'
+{% endif %}

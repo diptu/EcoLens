@@ -245,7 +245,9 @@ def train_tft_model(
     if warm_start_state_dict is not None:
         model.load_state_dict(warm_start_state_dict)
     model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
+    optimizer = torch.optim.Adam(
+        model.parameters(), lr=config.lr, weight_decay=config.weight_decay
+    )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", patience=2
     )

@@ -30,7 +30,16 @@ from app.dbt.training_trigger import publish_training_triggers_for_build
 log = get_logger(__name__)
 tracer = get_tracer()
 
-_STALE_LOCK_MINUTES = 30
+_STALE_LOCK_MINUTES = 15
+# Was 30 -- shorter than builds actually ran (30-40+ min), so a build
+# past the 30-min mark silently stopped being seen as "in progress" and
+# a second concurrent `dbt build` could start against the same database
+# (confirmed live: this happened, producing lock-contention slowdowns
+# on otherwise-trivial steps). `int_demand_with_weather.sql`'s own
+# perf fix (see that model's header) gets builds well under 5 minutes,
+# so 15 min is a comfortable 3-7.5x margin above the new expected
+# duration while still capping how long a genuinely crashed/killed
+# build (one that never reaches `_log_build_finish`) blocks new ones.
 
 
 async def _try_start_build(

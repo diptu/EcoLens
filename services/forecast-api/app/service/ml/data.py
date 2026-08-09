@@ -48,15 +48,33 @@ _NUMERIC_TRAINING_COLUMNS = tuple(
     c for c in _TRAINING_COLUMNS if c not in ("ts", "region")
 )
 
+# Hourly resample for the demand model (`DemandLSTM`/`lstm_demand` and,
+# via `TFTTrainConfig` inheriting the same window convention, `DemandTFT`/
+# `lstm_demand_tft`) -- was native per-row grain (5-min for NEM regions,
+# 30-min for WEM), which is what made `Settings.model_demand_horizon=48`
+# mean "4 hours" and made WEM un-includable alongside NEM in a shared-
+# weight model at all (a fixed row count meant a different real wall-
+# clock span per region -- `app/api/v1/forecast/routes.py`'s own module
+# docstring already documented this exact limitation). Hourly is the
+# common grain both NEM's 5-min and WEM's 30-min data resample onto
+# meaningfully, and is what makes the new 336/168 (14-day lookback/7-day
+# horizon) config real wall-clock time instead of row-offset guesswork.
+# `avg()` over each numeric column -- Postgres ignores NULLs in an
+# aggregate the same honest way a single missing native row already did,
+# not a fabricated value for an hour with partial/no coverage.
+_HOURLY_AGG_SELECT = ", ".join(f"avg({c}) AS {c}" for c in _NUMERIC_TRAINING_COLUMNS)
+
 
 async def _fetch_region_rows(db: AsyncSession, region: str, n_rows: int) -> pd.DataFrame:
     result = await db.execute(
         text(
-            # nosec B608 -- `_TRAINING_COLUMNS`/`MARTS_SCHEMA` are fixed
+            # nosec B608 -- `_HOURLY_AGG_SELECT`/`MARTS_SCHEMA` are fixed
             # module-level constants, not user input
-            f"SELECT {', '.join(_TRAINING_COLUMNS)} "  # nosec B608
+            f"SELECT date_trunc('hour', ts) AS ts, region, {_HOURLY_AGG_SELECT} "  # nosec B608
             f"FROM {MARTS_SCHEMA}.fct_energy_demand "
-            "WHERE region = :region ORDER BY ts DESC LIMIT :n_rows"
+            "WHERE region = :region "
+            "GROUP BY date_trunc('hour', ts), region "
+            "ORDER BY date_trunc('hour', ts) DESC LIMIT :n_rows"
         ),
         {"region": region, "n_rows": n_rows},
     )
@@ -241,6 +259,26 @@ class DemandDataset(Dataset):
     for simplicity — fine at the data volumes this trains on (weeks to a
     few years of 5/30-minute interval data per region), not built to
     scale past that.
+
+    `min_target_ts` (default `None`, unchanged prior behavior): when
+    given, only keeps windows whose *target* (the first `y` timestep,
+    `group[ts_col]` at `start + lookback`) is strictly after this bound —
+    `df` itself may still contain earlier rows, which are then only ever
+    used as lookback *context*, never scored as a target. Real, deliberate
+    use case (`ml/train.py`'s `train_model`, 2026-08-09): with only ~14
+    days of live NEM history, a strict "val/test rows never overlap train
+    rows at all" split (the old behavior — pass a pre-filtered `df`, leave
+    this `None`) can't fit even one `lookback=96/horizon=168` window into
+    an 8-day val slice. Passing the *full* history as `df` and gating only
+    the target via `min_target_ts` still guarantees no val/test *target*
+    (the label actually scored/backpropagated-against) was ever a train
+    target too — the model never gets gradient signal from a held-out
+    label — but lets the input context leading up to that label reach back
+    across the split boundary. Standard for scarce-data walk-forward
+    setups; the tradeoff (disclosed, not silent) is that val/test MAPE is
+    somewhat more optimistic than a fully train-disjoint-context
+    evaluation would give, since the model has seen the raw context values
+    (not the labels) before.
     """
 
     def __init__(
@@ -252,6 +290,7 @@ class DemandDataset(Dataset):
         horizon: int = 48,
         group_col: str = "region",
         ts_col: str = "ts",
+        min_target_ts=None,
     ) -> None:
         self.feature_columns = list(feature_columns)
         self.target_col = target_col
@@ -264,7 +303,10 @@ class DemandDataset(Dataset):
         for _, group in sorted_df.groupby(group_col, sort=False):
             features = group[self.feature_columns].to_numpy(dtype=np.float32)
             target = group[self.target_col].to_numpy(dtype=np.float32)
+            timestamps = group[ts_col].to_numpy()
             for start in range(len(group) - window_span + 1):
+                if min_target_ts is not None and timestamps[start + lookback] <= min_target_ts:
+                    continue
                 x = features[start : start + lookback]
                 y = target[start + lookback : start + window_span]
                 if np.isnan(x).any() or np.isnan(y).any():
@@ -374,6 +416,13 @@ async def load_training_data(
     materialized via `fct_energy_demand.sql`) for exactly the columns
     `build_features` needs, long-form (one row per `(ts, region)`).
 
+    Hourly-resampled (`_HOURLY_AGG_SELECT`), same reasoning as
+    `_fetch_region_rows`'s own comment -- the `WHERE`/`since` filter still
+    applies to the underlying native rows before aggregation (standard
+    SQL `GROUP BY` evaluation order), so `since` still means "native rows
+    at or after this instant," just aggregated into hourly buckets
+    afterward.
+
     The model never trains against a live query beyond this one read —
     `ml/train.py` snapshots the result into memory (matching `README.md`'s
     "the model never trains on a live Postgres connection", minus the
@@ -389,13 +438,14 @@ async def load_training_data(
 
     result = await db.execute(
         text(
-            # nosec B608 -- `_TRAINING_COLUMNS`/`MARTS_SCHEMA` are fixed
+            # nosec B608 -- `_HOURLY_AGG_SELECT`/`MARTS_SCHEMA` are fixed
             # module-level constants and `where` is only ever built from
             # fixed literal clause fragments above; values are bound params
-            f"SELECT {', '.join(_TRAINING_COLUMNS)} "  # nosec B608
+            f"SELECT date_trunc('hour', ts) AS ts, region, {_HOURLY_AGG_SELECT} "  # nosec B608
             f"FROM {MARTS_SCHEMA}.fct_energy_demand "
             f"WHERE {' AND '.join(where)} "
-            "ORDER BY region, ts"
+            "GROUP BY date_trunc('hour', ts), region "
+            "ORDER BY region, date_trunc('hour', ts)"
         ),
         params,
     )

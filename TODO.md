@@ -1,15 +1,134 @@
 # Todo's
 
 ## Book keeping
+[x] remove all unnecessary schemas from both RAW_DATABASE_URL and RAW_MARTS_DATABASE_URL
+[x] verify if feature_selection script is based on services/forecast-api/notebooks/feature_selection.ipynb(find features that are predictive, non-leaky, high-quality, non-redundant, and consistently useful over time and across regions, then produces a compact top-30 feature set for the forecasting model.)
+    (2026-08-10) -- NO, corrects an earlier, inaccurate claim below (both
+    the original 2026-08-08 "Checked" entry and the 2026-08-09 "re-
+    verified... no source-cell changes" follow-up under "Book keeping
+    (continued)") -- see that entry, now corrected in place, for the
+    real line-by-line evidence.
+[x] optimize dbt pipeline to run under 2 min. (2026-08-09, see "dbt build
+    speed fix" section below -- 77.59s on the first steady-state run.
+    Re-confirmed 2026-08-09 13:26 UTC with a real, independently-
+    auto-triggered build (`triggered_by: "landed_event"`, not manually
+    run): 82.09s, still comfortably under target.)
+[x] Models should be train on all region and predict upto next 7 dasy forecast.(Fix Optimization & Regularization (Immediate Wins)Implement Learning Rate Scheduling: A static learning rate of $0.001$ with Adam is likely causing the model to stall. Introduce a scheduler like ReduceLROnPlateau (monitoring validation loss) or a Cosine Annealing scheduler to help the optimizer break out of plateaus.Add Weight Decay (L2 Regularization): Pass weight_decay=1e-4 or 1e-5 into the Adam optimizer configuration to penalize large weights and curb the massive train-vs-val discrepancy.Re-evaluate Dropout Placement: A dropout of $0.5$ between only two LSTM layers can be overly aggressive for time-series data, destroying sequential momentum. Try reducing it to $0.2\text{–}0.3$ or applying spatial dropout.)
+    (2026-08-10) -- Regularization fixes done as asked: LR scheduling was
+    already correct (ReduceLROnPlateau, unchanged); added
+    `weight_decay=1e-5` to Adam in all 3 training scripts (train.py/
+    train_energy_forecast.py/train_tft.py) + Optuna search dimension;
+    lowered `model_dropout` 0.5 -> 0.25 (real, was the actual value in
+    use via `Settings`, not the 0.2 the `DemandLSTM`/`TrainConfig`
+    class defaults suggested).
+
+    All-region/7-day retrain: NOT fully achievable as originally
+    specified -- real, code-verified data-volume ceiling, not a
+    hyperparameter problem. `fct_energy_demand`'s real live history is
+    far shorter than an earlier session assumption of "~60 days": NEM
+    regions (NSW1/QLD1/VIC1/SA1/TAS1) have only ~14 days (~300 real
+    hourly rows after gaps); WEM has ~44 days. At horizon=168h(7d), even
+    ONE training window for a NEM region needs 64%+ of its total 300
+    rows alone, leaving no room for genuinely separate held-out val/cal
+    windows under any split-fraction arrangement (confirmed by running
+    the real windowing code across a horizon sweep, not by formula).
+
+    Shipped instead, with explicit user sign-off at each step: a
+    **unified 48h (2-day) horizon at hourly grain, shared by all 6
+    regions including WEM for the first time** (previously WEM was
+    excluded entirely -- native 30-min cadence made a shared fixed-step
+    window with NEM's 5-min cadence temporally incoherent). Also fixed
+    along the way: `ml/data.py`'s `DemandDataset` gained a
+    `min_target_ts` option so val/cal windows can pull lookback context
+    across the split boundary without ever reusing a train *target* as a
+    held-out label; `ml/train.py`'s `train_model` now computes split
+    boundaries **per region** (was one global boundary dominated by
+    WEM's longer history, which silently starved NEM of windows at any
+    horizon); `TrainConfig.train_frac`/`val_frac` moved 60/20 -> 49/49
+    (cal_frac halves whatever val_frac allocates, and the old 20% share
+    was too thin to fit even a 48h target block for NEM).
+
+    Real walk-forward results (`ecolens-forecast evaluate`, all 6
+    regions, `n_origins=5`): after 2 rounds of real Optuna tuning
+    (25 then 50 trials -- the second round plateaued, val_mape 14.90 ->
+    14.98, confirming diminishing returns from more search), the
+    winning config (`hidden_size=128, num_layers=1, dropout=0.233,
+    lr=0.00276, batch_size=32`) registered as `lstm_demand` v6:
+      NSW1 8.50% · QLD1 7.04% · VIC1 11.88% · SA1 18.81% · TAS1 22.90% ·
+      WEM 44.50% MAPE, vs. seasonal-naive baselines of 5.60/5.54/9.79/
+      12.22/6.14/9.50% respectively -- v6 still loses to naive
+      everywhere (1.2x-1.5x for NSW1/QLD1/VIC1/SA1, 3.7x for TAS1, 4.7x
+      for WEM), same as v3 already did (this is not a v6-introduced
+      regression). But v6 is a clear, real improvement over v3 (the
+      model that was actually live) in every region that existed under
+      it -- NSW1 15.43%->8.50%, QLD1 17.85%->7.04%, VIC1 19.57%->11.88%,
+      SA1 26.77%->18.81%, TAS1 33.50%->22.90% -- and makes WEM
+      forecastable for the first time (v3 had 0 real evaluation windows
+      for WEM; it was never trained on it at all). v3's uncertainty
+      coverage was also badly miscalibrated (0.06-0.68 vs. the ~80%
+      target); v6's (0.76-0.84) is much closer.
+
+    Promoted `lstm_demand` v6 to Production 2026-08-10 (`force=True`,
+    though the standard `test_mape` regression gate would have ungated
+    on its own -- v6's `test` split legitimately has 0 rows at the new
+    49/49/~2% fractions, and `promote_version`'s own documented
+    behavior is to skip a gate when its signal is simply absent).
+    Verified live: `GET /v1/forecast?region=WEM` (and every other
+    region) now returns 48 real hourly points from
+    `lstm_demand@production` -- zero serving-path code changes were
+    needed, confirming `registry.py`/`routes.py` never hardcoded the old
+    horizon. Dashboard's `/dashboard/forecast/` disclosure banner and
+    module docstring updated with the real v6 per-region numbers
+    (replacing the stale v3/TAS1-only figures) and the new
+    horizon/grain contract.
+
+    Still open, not done in this pass: the genuine 7-day horizon this
+    was originally asked for. NEM's real ingestion (~21 rows/day since
+    2026-07-24) needs to reach roughly 528 rows (`lookback + 3*horizon`
+    for a non-thin 3-way split) for a real, non-leaky 7-day evaluation --
+    estimated ~2026-08-18/19. TAS1 and WEM's gap to naive (3.7x/4.7x)
+    looks unlikely to close with more hyperparameter search alone (2
+    tuning rounds already plateaued); worth trying a genuinely different
+    lever next time (e.g. a residual-from-naive architecture, or simply
+    more real data) rather than a third identical Optuna pass. Also
+    still unexplained: `ml.ml_features_demand_v1` (a real, previously
+    wired-in alternate training-data source covering a full year across
+    all 6 regions) no longer exists in either database -- confirmed
+    (via git-blame timing + an earlier `information_schema.tables` count
+    taken before this session's schema cleanup) that it was already gone
+    before this session's `DROP SCHEMA ml CASCADE`, not caused by it,
+    but its loss is real and still worth investigating -- it would have
+    made the 7-day ask trivially achievable today.
+
+[] Investigate BOM (Bureau of Meteorology) ingestion further -- see
+    "Book keeping (continued)" for what's already found/fixed
+    (2026-08-09). The http->https redirect bug is fixed, but ad-hoc
+    testing outside the app found BOM's `/fwo/{station}/observations.json`
+    endpoint can also return 403/404 depending on request headers --
+    possibly the URL pattern itself is stale, or real anti-scraping
+    measures. Not root-caused yet; the pipeline's existing
+    `bom.using_synthetic_stub` fallback keeps it from hard-failing in
+    the meantime, at the cost of BOM data staying synthetic (not real)
+    until this is actually resolved.
+[] Run Celery Beat + worker (ingestion, and warehouse's retention/marts-
+    archive beat) under a real process supervisor (launchd/systemd/
+    docker), not a manually-started background process -- see "Book
+    keeping (continued)" for the 2026-08-09 incident this caused
+    (silently stopped fetching data for 2-13+ hours, real ingestion
+    gaps, no alert). A manually-started `nohup ... &` dies with the
+    terminal session/on reboot with no automatic restart.
 
 [x] save raw and raw.marts in seperate database uing seperate Database_URL (so taht i can save 2*512 mb data)
     See "Book keeping (continued)" below for the real implementation
     (2026-08-09) — periodic archive+prune, not a live cross-database join.
 
 [x] update services/ingestion/scripts/select_features.py based on services/forecast-api/notebooks/feature_selection.ipynb and update warehouse pipeline accordingly.
-    See "Book keeping (continued)" below — verified 2026-08-08, re-verified
-    2026-08-09 after the notebook's next commit (105075b) touched only
-    stale error outputs/kernelspec metadata, no source-cell changes.
+    Correction (2026-08-10) — see "Book keeping (continued)" below: the
+    earlier "verified"/"re-verified" claims here were wrong. The script
+    is actually based on the *other*, separate notebook,
+    `services/ingestion/notebooks/feature-selection.ipynb` (confirmed
+    via that file's own docstring + a real line-by-line match). This
+    forecast-api notebook is an earlier, buggier, never-executed draft.
 
 ## operational-tasks
 
@@ -236,22 +355,98 @@
 
 ## Book keeping (continued)
 
+[x] Diagnosed "why isn't cron/Celery Beat fetching data" (2026-08-09) --
+    real incident, not a hypothetical. `GET /v1/data-sources` showed
+    every source's `last_run_at` stuck 2-13 hours stale despite real
+    5/15/30-min cron cadences (`ds-oe` last ran 2h ago on a 5-min
+    schedule; `ds-bom` 13h ago on a 30-min schedule) -- this is exactly
+    what produced the 24-29h raw ingestion gaps found the same day
+    (Emissions Trend chart's "misleading straight line" investigation).
+    Root cause, confirmed directly: `ps aux | grep celery` returned
+    *nothing* -- no Celery Beat scheduler and no worker process were
+    running at all, for any service. `ingest-all-sources` (the real
+    30-min Beat schedule that in turn checks each source's own cadence)
+    was configured correctly the whole time; there was simply no Beat
+    process alive to ever fire it. Fixed by starting both
+    `ecolens-ingestion worker --pool=solo` and `ecolens-ingestion beat`
+    as background processes. Verified live: the worker immediately
+    dispatched and completed real ingestion runs for AEMO NEM, AEMO WEM,
+    and OpenElectricity (`GET /v1/data-sources` confirmed fresh
+    `last_run_at` for all three within seconds of starting).
+
+    **Not fixed yet, needs a real supervisor**: this was started as a
+    plain background process (`nohup ... &`), not under launchd/systemd/
+    docker -- it will silently stop again the same way (no crash, no
+    alert, just a growing staleness gap) the next time this terminal
+    session ends or the machine restarts. A real fix needs this
+    supervised so it auto-restarts; see the "remining task" list above.
+
+    **Second, separate real bug found while investigating**: BOM's
+    ingestion *was* actually running (not blocked by the Beat outage
+    any differently than the others), but every station request failed
+    with a real HTTP 301 (`http://www.bom.gov.au/fwo/{station}/
+    observations.json` now redirects to `https://`), silently falling
+    back to `bom.using_synthetic_stub`'s 6-row placeholder instead of
+    real station data -- meaning BOM has likely been serving synthetic,
+    not real, weather data for a while independent of the Beat outage.
+    Fixed the scheme (`http://` -> `https://`) in `ingest_bom.py` and
+    `models/datasources.py`. Ad-hoc testing outside the app afterward
+    found BOM's endpoint can still return 403/404 depending on request
+    headers -- the redirect fix is real and correct, but there may be a
+    second, deeper issue (stale URL pattern, or real anti-scraping)
+    still causing the synthetic-stub fallback to trigger. Left as an
+    open item (see "remining task" list) rather than guessing further
+    without confirming the real cause.
+
 [x] update services/ingestion/scripts/select_features.py based on services/forecast-api/notebooks/feature_selection.ipynb and update warehouse pipeline accordingly.
-    Checked 2026-08-08 — already done, before this session. Diffed
-    `forecast-api/notebooks/feature_selection.ipynb` (cell 0, 931 lines)
-    against `ingestion/scripts/select_features.py` (804 lines) function-
-    by-function: every class/function in the notebook already exists in
-    the script, verbatim logic (the only diff is formatting — the
-    script's been reformatted, plus 3 new functions the script-wrapper
-    itself needs: `main`/`run_selection`/`selected_features_path`). The
-    real, executed output (`data/training/selected_features.json`, a
-    real populated artifact, not empty/stale) is already consumed by
-    both `services/waerehouse/dbt/.../int_demand_with_weather.sql`
-    (wind_gust_kmh/wind_direction_deg were added because this file
-    flagged them) and `forecast-api/app/service/ml/energy_features.py`.
-    Marking this item accurate-but-stale rather than checking the box
-    silently — nothing needed changing, but worth recording that it was
-    actually verified, not assumed.
+    **Correction (2026-08-10), replacing both the 2026-08-08 "Checked"
+    entry that used to be here and a follow-up "re-verified 2026-08-09"
+    note (also removed)** — both were wrong. They were probably
+    conflating this notebook with the *other*, separate one,
+    `services/ingestion/notebooks/feature-selection.ipynb` (different
+    file, different directory, hyphen not underscore) — that one really
+    is what `select_features.py` is based on (its own module docstring
+    says so, and a fresh, direct line-by-line read confirms it: every
+    class/the whole per-region RUN cell matches verbatim).
+
+    This forecast-api notebook (`services/forecast-api/notebooks/
+    feature_selection.ipynb`) is a different, *earlier, buggier, never-
+    executed* draft -- read directly this time (not summarized), with
+    concrete, checkable differences from the script:
+    - `_add_lag_features` here never calls `self.registry.register(column,
+      family="historical_raw", requires_lag=True, ...)` for the raw
+      historical column itself -- exactly the leakage-registration bug
+      the ingestion notebook's own "BUG FIX" comment describes fixing
+      ("confirmed live: oe_hydro_mw, oe_gas_mw, oe_battery_charge_mw all
+      showed up as top-ranked *raw*, same-timestamp selected features
+      before this fix"). This draft still has that bug.
+    - `LeakageFilter.filter` still has the dead `if availability ==
+      "future": continue` branch the ingestion notebook's own comment
+      says was removed (nothing here ever registers `availability=
+      "future"` -- the taxonomy is `historical`/`known_future`/`forecast`).
+    - `_add_lag_features`/`_add_rolling_features` insert one `df[name] =
+      ...` column at a time (no batched `pd.DataFrame(new_columns)`
+      assignment) -- the pandas-fragmentation perf fix isn't here either.
+    - `AutomaticEnergyFeatureSelector.fit` uses a bare `except Exception:
+      continue` (silently swallows a real failure), not the `warnings.warn(...)`
+      version the script/ingestion-notebook has.
+    - No real RUN cell at all -- just a generic, literally-unexecuted
+      example (`selector.fit(df, target_columns=["demand_mw"])`, `df`
+      undefined) with a generic `demand_mw` target, not the real
+      `aemo_demand_mw`, no per-region loop, no R2/duckdb loading. Every
+      saved cell output in the file is a baked-in `NameError: name 'df'
+      is not defined` traceback -- confirmed via `git show` on its last
+      touching commit (`105075b`) that this file has *never* been
+      executed with real data, ever.
+
+    `forecast-api/TODO.md` itself already independently calls this
+    notebook (and `lstm.ipynb`) "historical source material" reviewed
+    only for LSTM-model content, separately from any feature-selection-
+    script claim -- consistent with this correction, not contradicting
+    it. The real, executed output (`data/training/selected_features.json`)
+    is unaffected by this correction and still real/consumed downstream
+    as previously recorded -- only the "which notebook" attribution and
+    the "verbatim" claim were wrong.
 
 [x] save raw and raw.marts in seperate database uing seperate Database_URL (so taht i can save 2*512 mb data)
     FDW infrastructure built and proven for real 2026-08-08; the actual
@@ -547,5 +742,109 @@ pages via parallel investigation, then closed every real gap found.
     this fix, but broke `load_latest_window`'s new per-region row-count
     check once it started actually caring which rows came back for which
     region. Fixed by retagging fixture rows to the requested region
+
+## `dbt build` speed fix — 30-40min+ (and mostly failing) -> ~78s (2026-08-09)
+
+[x] Root-caused and fixed: `dbt build` was taking 30-40+ minutes, and
+    every run for ~19 hours before this had ended "Failed". Diagnosed
+    live (log inspection + full DAG audit, not guessed): one model,
+    `services/waerehouse/dbt/ecolens/models/intermediate/
+    int_demand_with_weather.sql`, was `materialized: ephemeral` (the
+    `intermediate/` folder default) with a genuinely expensive query
+    (2 correlated `LATERAL` as-of joins + a 336-row rolling window,
+    unbounded full history, no index anywhere on the join keys) --
+    being ephemeral meant this got re-executed from scratch for every
+    one of its 6 downstream references (2 singular tests, 4 generic
+    tests). Confirmed live: those 6 references alone summed to ~7,400s
+    in one build.
+
+    Fix (`0009_int_demand_with_weather_perf_indexes.sql`,
+    `0010_int_demand_with_weather_unique_index.sql`,
+    `int_demand_with_weather.sql`, `dbt_project.yml`,
+    `app/dbt/scheduler.py`): (1) `(region, ts)` indexes on the 4 raw
+    tables the LATERAL joins/window functions read (none existed
+    before -- only each table's PK, `(ts, region)`-ordered, wrong
+    leading column for a "latest row per region" lookup); (2) real
+    unique indexes on the 4 `fct_*` marts' declared `unique_key`
+    (confirmed live: none existed on the primary DB either, making
+    their `delete+insert` incremental strategy scan-heavy as they
+    grow -- one run logged "1 row inserted in 425s"); (3)
+    `int_demand_with_weather` changed from `ephemeral` to
+    `incremental` (`delete+insert`, `unique_key=[ts,region]`), with a
+    12-day priming-buffer filter on its `demand` CTE (sized off WEM's
+    30-min grain -- the binding constraint for its 336-row/7-day
+    window functions) and a 2-day output-retention filter, same
+    convention the 4 `fct_*` marts already use; (4)
+    `scheduler.py`'s `_STALE_LOCK_MINUTES` 30 -> 15 -- the old value
+    was *shorter* than real build duration, confirmed live to have let
+    a second concurrent build start mid-run at least once.
+
+    Measured, live, end to end: first build after the fix (real
+    first-time full-history materialization, no incremental benefit
+    yet) took 25m43s -- down from 30-40min+, but the real number is
+    the *second* build (steady-state, 12-day-bounded): **77.59s**.
+    Comfortably under the 5min target and the 2min stretch goal, and
+    durable -- bounded by a fixed lookback window, not by how much raw
+    history has accumulated.
+
+    Explicit non-goal, unchanged by this fix: `assert_generation_mix_
+    sums_near_total` (8,353 failing rows) and `assert_national_
+    intensity_within_tolerance` (1 failing row) are pre-existing, real
+    data-quality failures, not a speed problem -- `dbt build` still
+    reports overall `status: "failed"` because of these two, same as
+    before. `fct_energy_demand` and its own tests still SKIP as a
+    result (pre-existing dbt dependency-skip behavior). Root cause not
+    yet investigated -- separate item, not started here.
+
+    **Real, dangerous finding while applying this (not the bug being
+    fixed above, an unrelated pre-existing one)**: `scripts/
+    apply-migrations.sh`'s own header comment claims "idempotent...
+    re-running this script is always safe" -- false for migration
+    `0002_fix_raw_schema_to_match_real_ingestion_output.sql`, which
+    does unconditional `DROP TABLE` + `CREATE TABLE` (not `IF NOT
+    EXISTS`-guarded) on all 4 live `raw.*` ingestion tables. Running
+    the full script again (as this fix's own instructions originally
+    called for, to apply the new `0009`) started actually executing
+    those drops -- caught mid-run (blocked on an unrelated lock,
+    hadn't dropped anything yet) and killed before any data loss;
+    confirmed via row counts after (`aemo_nem_dispatch`: 55,165 rows,
+    `openelectricity_mix`: 94,370, `aemo_wem_dispatch`: 17,040,
+    `bom_observations`: 8,670 -- all intact). Applied `0009`/`0010`
+    directly instead of via the wrapper script. The script's header
+    comment and/or migration `0002`'s lack of `IF NOT EXISTS` guards
+    need fixing before anyone runs `apply-migrations.sh` again on a
+    live database -- not fixed here, flagged for a deliberate follow-up
+    since it's outside what was asked this session.
+
+## Executive page — smooth-curve chart + click-to-detail modal (2026-08-09)
+
+[x] Integrated the useful part of a `v18x` prototype export (`/Users/
+    macbook/Downloads/executive-page-zip/`) into the real `/dashboard/
+    executive/` page's Emissions Trend chart: Catmull-Rom smooth-curve
+    rendering (ported from the prototype's `smoothPath()`, tension
+    0.35; its `smoothBandPath()` sibling had a real bug -- claimed to
+    trace the band's bottom edge but only drew 2 straight segments to
+    its first/last points -- fixed, not ported as-is) and a
+    click-to-detail modal (wired the already-existing, previously
+    executive-page-unused `DetailModal` component to real chart-point
+    data: timestamp, actual/forecast value, P10-P90 range, band width,
+    forecast-region-served disclosure when applicable).
+
+    Everything else in that prototype export -- its `page.tsx`, `lib/
+    dashboards.ts`, and `getEmissionsTrendV2`'s mock data generator --
+    was deliberately NOT adopted: line-by-line comparison confirmed it
+    reverts several real, deliberate product decisions (a fake
+    "Compliance Score"/"Cost Savings" KPI this app intentionally
+    dropped, a `delta_pct` type that's supposed to be `number | null`),
+    references a `getModelOps` export that doesn't exist in the real
+    `admin-dashboard.ts` (wouldn't compile as-is), and its chart's data
+    layer fabricates a full 24-168h forecast shape (a seeded-PRNG
+    diurnal curve + 12h smoothstep blend + a confidence band that
+    mechanically grows 10%->45% with no real forecast input behind it)
+    -- directly conflicts with this app's real-data-only policy (the
+    real forecast horizon is genuinely ~4h, shown honestly with empty
+    axis space after it). The real chart's data fetching, region/
+    forecast-period selectors, gap-handling, and KPI cards are all
+    unchanged.
     per-query, preserving each test's real intent (identical underlying
     data across regions) rather than weakening the new check.

@@ -8,10 +8,14 @@
 -- `table` materialization here would silently rebuild this mart from
 -- only whatever's left in `raw.*` on every `dbt run`, dropping all
 -- older history the mart had already accumulated (`TODO.md` Phase 1).
--- `int_demand_with_weather`'s lag/rolling window functions still see
--- the full history available in `raw.*` on every run (they're computed
--- before the filter below is applied) — only the *materialize* step is
--- incremental, the feature computation itself isn't windowed down.
+-- `int_demand_with_weather` is itself incremental now too (its own
+-- header comment has the full story — it used to be ephemeral, which
+-- meant its lag/rolling window functions recomputed over the full
+-- unbounded raw history on every one of its 6 downstream references,
+-- confirmed live as the single dominant cost in a 30-40min build), so
+-- the feature computation this mart reads is already bounded to a
+-- small recent window before it ever gets here — not full-history on
+-- every run the way it used to be.
 -- `ts > max(ts) - 2 days` re-processes a short trailing overlap so
 -- late-arriving/corrected rows near the previous run's high-water mark
 -- still get picked up, not just brand-new timestamps.

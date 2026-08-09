@@ -93,7 +93,7 @@ async def _try_live_api(lookback_minutes: int) -> pd.DataFrame | None:
         limits=DEFAULT_LIMITS,
     ) as client:
         for region, station_id in settings.bom_stations.items():
-            url = f"http://www.bom.gov.au/fwo/{station_id}/observations.json"
+            url = f"https://www.bom.gov.au/fwo/{station_id}/observations.json"
             try:
                 async def _get(u: str = url) -> httpx.Response:
                     resp = await client.get(u)

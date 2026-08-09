@@ -94,6 +94,7 @@ class EnergyTrainConfig:
     hidden_size: int = 128
     num_layers: int = 2
     dropout: float = 0.2
+    weight_decay: float = 1e-5
     lr: float = 1e-3
     epochs: int = 50
     batch_size: int = 64
@@ -111,6 +112,7 @@ class EnergyTrainConfig:
             hidden_size=settings.model_hidden_size,
             num_layers=settings.model_num_layers,
             dropout=settings.model_dropout,
+            weight_decay=settings.model_weight_decay,
             lr=settings.model_train_lr,
             epochs=settings.model_train_epochs,
             batch_size=settings.model_batch_size,
@@ -123,6 +125,7 @@ class EnergyTrainConfig:
             "hidden_size": self.hidden_size,
             "num_layers": self.num_layers,
             "dropout": self.dropout,
+            "weight_decay": self.weight_decay,
             "lr": self.lr,
             "epochs": self.epochs,
             "batch_size": self.batch_size,
@@ -273,7 +276,9 @@ def train_energy_model(
         generation_sources=len(GENERATION_TARGET_COLUMNS),
     )
     model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
+    optimizer = torch.optim.Adam(
+        model.parameters(), lr=config.lr, weight_decay=config.weight_decay
+    )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", patience=2)
 
     best_val_mape = float("inf")

@@ -46,7 +46,7 @@ import pandas as pd
 import torch
 from sklearn.preprocessing import StandardScaler
 from torch import nn
-from torch.utils.data import DataLoader
+from torch.utils.data import ConcatDataset, DataLoader
 
 from app.core.config import Settings, get_settings
 from app.db.session import get_session
@@ -79,11 +79,20 @@ log = get_logger(__name__)
 
 @dataclass
 class TrainConfig:
-    lookback: int = 48
+    # Literal defaults kept in sync with `Settings`' own (both changed
+    # together, `app/core/config.py`'s own comments have the full
+    # rationale) -- a real training run always goes through
+    # `from_settings()` below, which reads `Settings` directly regardless
+    # of what's written here, but a stale-looking literal default here
+    # once caused real confusion about what a training run actually uses
+    # (this dataclass said 0.2/48/48, `Settings` said 0.5/48/48 -- only
+    # the latter was real). Not worth repeating.
+    lookback: int = 24
     horizon: int = 48
     hidden_size: int = 128
     num_layers: int = 2
-    dropout: float = 0.2
+    dropout: float = 0.25
+    weight_decay: float = 1e-5
     lr: float = 1e-3
     epochs: int = 50
     batch_size: int = 64
@@ -96,14 +105,27 @@ class TrainConfig:
     # selection signal leak into the coverage guarantee.
     cal_frac: float = 0.5
     early_stopping_patience: int = 5
-    # 60/20/20 (2026-08-05, changed from 70/15/15 at the user's explicit
-    # request) -- once the full OE historical backfill lands (this
-    # file's own tracked follow-up), training uses the *entire*
-    # `fct_energy_demand` range instead of a `--since`-scoped recent
-    # window, so `test`'s share needed to grow to still be a
-    # meaningful, non-trivial holdout.
-    train_frac: float = 0.6
-    val_frac: float = 0.2
+    # 49/49/2 (2026-08-09, changed from 60/20/20) -- real, measured
+    # constraint, not a style preference: NEM regions only have ~300 real
+    # hourly rows (~14 days incl. gaps) each. At `horizon=48`, `cal_frac`
+    # halves whatever `val_frac` allocates (see `_split_val_for_
+    # calibration`), so the old 20% val share only gave each of
+    # earlystop-val/cal a ~30-row slice -- less than `horizon` itself, so
+    # 0 real windows for every NEM region regardless of `lookback`
+    # (confirmed empirically against the real windowing code, not
+    # assumed: `got 336/0/0 windows` on a real training run). 49/49 gives
+    # earlystop-val/cal each a ~73-row slice (49% * 0.5 of ~300),
+    # comfortably above `horizon=48`, and empirically yields real
+    # non-trivial window counts per NEM region (~64 train / ~26 val / ~27
+    # cal); `train`'s own 49% share (~147 rows) still comfortably clears
+    # `lookback+horizon=72`. `test` shrinks to ~2% (often 0 rows) --
+    # accepted: `test_loader`/`test_mape` are already fully optional
+    # (`registry.py`'s `promote_version` docstring: "neither gate blocks
+    # if its signal is simply absent"), unlike train/val/cal, which
+    # `train_model` requires non-empty. `val`/`cal` were the two splits
+    # data volume was actually starving here.
+    train_frac: float = 0.49
+    val_frac: float = 0.49
 
     @classmethod
     def from_settings(cls, settings: Settings) -> Self:
@@ -112,11 +134,16 @@ class TrainConfig:
         # actually returning a `TFTTrainConfig` (with its own `n_heads`
         # default intact), not a plain `TrainConfig` upcast.
         return cls(
-            lookback=settings.model_lookback,
-            horizon=settings.model_horizon,
+            # Dedicated demand-model fields, not the shared
+            # `model_lookback`/`model_horizon` `EnergyTrainConfig` also
+            # reads (see `Settings.model_demand_lookback`'s own comment
+            # for why these are separate).
+            lookback=settings.model_demand_lookback,
+            horizon=settings.model_demand_horizon,
             hidden_size=settings.model_hidden_size,
             num_layers=settings.model_num_layers,
             dropout=settings.model_dropout,
+            weight_decay=settings.model_weight_decay,
             lr=settings.model_train_lr,
             epochs=settings.model_train_epochs,
             batch_size=settings.model_batch_size,
@@ -133,6 +160,7 @@ class TrainConfig:
             "hidden_size": self.hidden_size,
             "num_layers": self.num_layers,
             "dropout": self.dropout,
+            "weight_decay": self.weight_decay,
             "lr": self.lr,
             "epochs": self.epochs,
             "batch_size": self.batch_size,
@@ -331,26 +359,52 @@ def train_model(
     out of `train_model` uncaught, aborting the run.
     """
     engineered = build_features(raw_df, holidays=holidays)
-    split = split_by_time(
-        engineered, train_frac=config.train_frac, val_frac=config.val_frac
-    )
-    earlystop_val, cal = _split_val_for_calibration(split.val, config.cal_frac)
+
+    # Per-region split boundaries (2026-08-09), not one global boundary --
+    # a single `split_by_time(engineered, ...)` call computes its boundary
+    # from the *union* of every region's timestamps, which real, measured
+    # data showed silently starves whichever region has the shortest real
+    # history (NEM regions here: only ~14 days, versus WEM's ~44) even at
+    # a small horizon, because the global boundary lands wherever the
+    # *longer*-history region's density dominates, not where each region's
+    # own data actually is. Splitting each region against its own
+    # timestamps first, then combining, is what actually gives every
+    # region a fair, real split of its own history.
+    per_region_split: dict[str, tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]] = {}
+    for region, region_df in engineered.groupby("region"):
+        region_split = split_by_time(
+            region_df, train_frac=config.train_frac, val_frac=config.val_frac
+        )
+        region_earlystop_val, region_cal = _split_val_for_calibration(
+            region_split.val, config.cal_frac
+        )
+        per_region_split[region] = (region_split.train, region_earlystop_val, region_cal)
+
+    split_train = pd.concat([t for t, _, _ in per_region_split.values()])
+    earlystop_val = pd.concat([v for _, v, _ in per_region_split.values()])
+    cal = pd.concat([c for _, _, c in per_region_split.values()])
 
     # Checked before fitting anything: an empty split makes
     # `StandardScaler.fit`/`DemandDataset` raise their own, less useful
     # errors first otherwise.
-    if split.train.empty or earlystop_val.empty or cal.empty:
+    if split_train.empty or earlystop_val.empty or cal.empty:
         raise ValueError(
             "not enough history to build train/val/calibration splits "
             f"(lookback={config.lookback}, horizon={config.horizon}) -- "
-            f"got {len(split.train)}/{len(earlystop_val)}/{len(cal)} rows"
+            f"got {len(split_train)}/{len(earlystop_val)}/{len(cal)} rows"
         )
 
-    scalers = fit_scalers(split.train)
-    train_scaled = apply_scalers(split.train, scalers)
-    val_scaled = apply_scalers(earlystop_val, scalers)
-    cal_scaled = apply_scalers(cal, scalers)
-    test_scaled = apply_scalers(split.test, scalers)
+    scalers = fit_scalers(split_train)
+    # `DemandDataset.min_target_ts`'s own docstring has the full rationale
+    # (2026-08-09): with only ~14 days of live NEM history, a strictly
+    # train-disjoint val/cal slice doesn't fit even a modest window.
+    # Scalers/target_scaler are still fit on `split_train` only (no
+    # leakage of distribution statistics into val/test), but *windowing*
+    # now runs against the full history so val/cal/test windows' lookback
+    # context can reach back across the split boundary -- only each
+    # window's *target* is gated to its own split below (per-region, via
+    # `min_target_ts`), so no held-out label is ever also a train label.
+    full_scaled = apply_scalers(engineered, scalers)
 
     # `demand_mw` itself (the target `DemandDataset` windows into `y`) is
     # deliberately *not* one of `fit_scalers`' `NUMERIC_COLUMNS` -- it's
@@ -365,26 +419,82 @@ def train_model(
     # range as the (already-scaled) lag/rolling features fixes this the
     # standard way; predictions are inverse-transformed back to MW before
     # any metric, calibration, or serving code ever sees them.
-    target_scaler = _fit_target_scaler(split.train)
-    train_scaled = _scale_target(train_scaled, target_scaler)
-    val_scaled = _scale_target(val_scaled, target_scaler)
-    cal_scaled = _scale_target(cal_scaled, target_scaler)
-    test_scaled = _scale_target(test_scaled, target_scaler)
+    target_scaler = _fit_target_scaler(split_train)
+    full_scaled = _scale_target(full_scaled, target_scaler)
 
-    train_ds = DemandDataset(
-        train_scaled, lookback=config.lookback, horizon=config.horizon
-    )
-    val_ds = DemandDataset(val_scaled, lookback=config.lookback, horizon=config.horizon)
-    cal_ds = DemandDataset(cal_scaled, lookback=config.lookback, horizon=config.horizon)
-    test_ds = DemandDataset(
-        test_scaled, lookback=config.lookback, horizon=config.horizon
-    )
+    # Build one `DemandDataset` per region per split, using that region's
+    # OWN boundaries (recovered the same way as the prior single-region
+    # implementation: the max `ts` actually present in each of that
+    # region's own split rows), then concatenate across regions --
+    # `DemandDataset` already refuses to build a window spanning two
+    # regions, but that guarantee only holds if it's never handed two
+    # regions' rows with two DIFFERENT real boundaries conflated into one
+    # `min_target_ts` in the first place.
+    train_parts, val_parts, cal_parts, test_parts = [], [], [], []
+    region_window_counts: dict[str, tuple[int, int, int]] = {}
+    for region, (region_train, region_earlystop_val, region_cal) in per_region_split.items():
+        if region_train.empty or region_earlystop_val.empty or region_cal.empty:
+            log.warning(
+                "train_model.region_split_empty",
+                region=region,
+                n_train=len(region_train),
+                n_earlystop_val=len(region_earlystop_val),
+                n_cal=len(region_cal),
+            )
+            region_window_counts[region] = (0, 0, 0)
+            continue
+
+        region_full = full_scaled[full_scaled["region"] == region]
+        region_train_end = region_train["ts"].max()
+        region_val_end = pd.concat([region_earlystop_val, region_cal])["ts"].max()
+        region_cal_boundary = region_earlystop_val["ts"].max()
+
+        region_train_ds = DemandDataset(
+            region_full[region_full["ts"] <= region_train_end],
+            lookback=config.lookback,
+            horizon=config.horizon,
+        )
+        region_val_ds = DemandDataset(
+            region_full[region_full["ts"] <= region_cal_boundary],
+            lookback=config.lookback,
+            horizon=config.horizon,
+            min_target_ts=region_train_end,
+        )
+        region_cal_ds = DemandDataset(
+            region_full[region_full["ts"] <= region_val_end],
+            lookback=config.lookback,
+            horizon=config.horizon,
+            min_target_ts=region_cal_boundary,
+        )
+        region_test_ds = DemandDataset(
+            region_full,
+            lookback=config.lookback,
+            horizon=config.horizon,
+            min_target_ts=region_val_end,
+        )
+        region_window_counts[region] = (
+            len(region_train_ds),
+            len(region_val_ds),
+            len(region_cal_ds),
+        )
+        train_parts.append(region_train_ds)
+        val_parts.append(region_val_ds)
+        cal_parts.append(region_cal_ds)
+        test_parts.append(region_test_ds)
+
+    log.info("train_model.region_window_counts", counts=region_window_counts)
+
+    train_ds: ConcatDataset[tuple[torch.Tensor, torch.Tensor]] = ConcatDataset(train_parts)
+    val_ds: ConcatDataset[tuple[torch.Tensor, torch.Tensor]] = ConcatDataset(val_parts)
+    cal_ds: ConcatDataset[tuple[torch.Tensor, torch.Tensor]] = ConcatDataset(cal_parts)
+    test_ds: ConcatDataset[tuple[torch.Tensor, torch.Tensor]] = ConcatDataset(test_parts)
 
     if len(train_ds) == 0 or len(val_ds) == 0 or len(cal_ds) == 0:
         raise ValueError(
             "not enough history to build train/val/calibration windows "
             f"(lookback={config.lookback}, horizon={config.horizon}) -- "
-            f"got {len(train_ds)}/{len(val_ds)}/{len(cal_ds)} windows"
+            f"got {len(train_ds)}/{len(val_ds)}/{len(cal_ds)} windows "
+            f"({region_window_counts})"
         )
 
     train_loader = DataLoader(
@@ -415,7 +525,9 @@ def train_model(
     if warm_start_state_dict is not None:
         model.load_state_dict(warm_start_state_dict)
     model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
+    optimizer = torch.optim.Adam(
+        model.parameters(), lr=config.lr, weight_decay=config.weight_decay
+    )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", patience=2
     )

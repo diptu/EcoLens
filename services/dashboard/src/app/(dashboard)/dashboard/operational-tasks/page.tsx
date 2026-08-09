@@ -108,16 +108,19 @@ import {
   triggerFeatureRebuild,
   pollLatestDbtBuild,
   fetchPublicPipelines,
+  fetchPublicRuns,
   monthToRange,
   dayToRange,
   formatRelativeTime,
   formatTimeUntil,
+  formatSource,
   TriggerIngestionError,
   type RunStatus,
   type TrainingRunLog,
   type BackfillTrigger,
   type BackfillProgress,
   type LivePipeline,
+  type PublicRun,
 } from "@/lib/ingestion";
 
 // ────────────────────────────────────────────────────────────────────
@@ -298,6 +301,9 @@ export default function OperationalTasksPage() {
   const [serviceHealth, setServiceHealth] = useState<ServiceHealth[] | null>(null);
   const [serviceHealthCheckedAt, setServiceHealthCheckedAt] = useState<string | null>(null);
   const [serviceHealthRefreshing, setServiceHealthRefreshing] = useState(false);
+  const [runLog, setRunLog] = useState<PublicRun[] | null>(null);
+  const [runLogRefreshKey, setRunLogRefreshKey] = useState(0);
+  const [runLogRefreshing, setRunLogRefreshing] = useState(false);
 
   // System Diagnostics card -- root TODO.md's "should show which system
   // are healthy and which are not": a persistent status grid, not just
@@ -354,6 +360,34 @@ export default function OperationalTasksPage() {
       cancelled = true;
     };
   }, []);
+
+  // Pipeline Run Log -- real rows straight from `meta._ingest_log` via
+  // `GET /v1/ingestion/public/runs` (`fetchPublicRuns`, already used
+  // elsewhere on this page for per-row poll state, just not rendered as
+  // its own persistent history table before). Unlike `pipelineRows`
+  // (`RowState`, reset on every page load, only ever populated by a
+  // "Run now"/backfill click *this session*), this is the actual
+  // cross-session history -- when a pipeline last ran whether or not
+  // anyone had this tab open, how many rows it landed, and whether a
+  // human or Celery Beat kicked it off (`trigger`: "manual"/"schedule"/
+  // "backfill"). Re-fetches whenever `runLogRefreshKey` changes (manual
+  // refresh button) -- no auto-poll interval, since this is a history
+  // list, not a live status the user is watching resolve.
+  useEffect(() => {
+    let cancelled = false;
+    setRunLogRefreshing(true);
+    fetchPublicRuns(20)
+      .then((r) => {
+        if (!cancelled) setRunLog(r.data);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setRunLogRefreshing(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [runLogRefreshKey]);
 
   // `type: "ingestion"`/`"transform"` rows synthesized from this same
   // page's own live `pollLatestRun`/`pollLatestDbtBuild`/
@@ -928,6 +962,34 @@ export default function OperationalTasksPage() {
         </Card>
       </div>
 
+      {/* Pipeline Run Log */}
+      <Card>
+        <div className="mb-3 flex items-center justify-between">
+          <div>
+            <h2 className="text-base font-semibold text-white">Pipeline Run Log</h2>
+            <p className="text-xs text-white/50">
+              Real history from <code className="rounded bg-black/30 px-1 font-mono">meta._ingest_log</code> —
+              last run per pipeline, records fetched, status, and whether a person or the
+              scheduler triggered it. Persists across page loads, unlike Pipeline Operations above.
+            </p>
+          </div>
+          <button
+            onClick={() => setRunLogRefreshKey((k) => k + 1)}
+            disabled={runLogRefreshing}
+            className={cn(
+              "inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium",
+              runLogRefreshing
+                ? "cursor-not-allowed border-white/10 bg-white/5 text-white/40"
+                : "border-emerald-200/30 bg-emerald-200/10 text-emerald-100 hover:bg-emerald-200/15",
+            )}
+          >
+            <RefreshCw className={cn("h-3 w-3", runLogRefreshing && "animate-spin")} />
+            Refresh
+          </button>
+        </div>
+        <RunLogTable runs={runLog} />
+      </Card>
+
       {/* Active Tasks + Training form */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <Card>
@@ -1475,6 +1537,108 @@ function ActiveTasksTable({ rows }: { rows: ActiveTask[] }) {
             <td className="py-2 pr-2 text-[11px] text-white/50">{t.started_at}</td>
             <td className="py-2 pr-2"><TaskStatusChip status={t.status} /></td>
             <td className="py-2"><ProgressBar value={t.progress} status={t.status} /></td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+/** `trigger` is `meta._ingest_log.triggered_by` verbatim -- "schedule"
+ * (Celery Beat), "public" (this dashboard's own "Run now"/backfill
+ * buttons, `POST /v1/data-sources/{id}/run|backfill` -- see
+ * `app/api/v1/datasources/routes.py`), "manual" (the CLI, `app/cli.py`'s
+ * own default), or "backfill" (the pipeline-internal backfill runner,
+ * `pipeline/backfill.py`). "public" and "manual" both read as "Manual"
+ * here -- a human caused the run either way, just from a different
+ * front door; the underlying value is preserved for anything else so an
+ * unrecognized trigger still renders instead of silently disappearing. */
+function RunTriggerBadge({ trigger }: { trigger: string }) {
+  const color: Record<string, string> = {
+    manual: "border-sky-300/40 bg-sky-300/10 text-sky-200",
+    public: "border-sky-300/40 bg-sky-300/10 text-sky-200",
+    schedule: "border-purple-300/40 bg-purple-300/10 text-purple-200",
+    backfill: "border-amber-300/40 bg-amber-300/10 text-amber-200",
+  };
+  const label: Record<string, string> = {
+    manual: "Manual",
+    public: "Manual",
+    schedule: "Cron",
+    backfill: "Backfill",
+  };
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[11px] font-medium",
+        color[trigger] ?? "border-white/10 bg-white/5 text-white/60",
+      )}
+    >
+      {label[trigger] ?? trigger}
+    </span>
+  );
+}
+
+/** Real per-pipeline run history from `GET /v1/ingestion/public/runs`
+ * (`meta._ingest_log`) -- root `TODO.md`'s "last run log (when last ran,
+ * how many data points fetched, status, trigger manual or cron)". Every
+ * real ingest attempt across all 5 sources, most recent first (already
+ * sorted that way server-side), not just this session's own trigger
+ * clicks (that's `PipelineTable`/`RowState` above). `records_fetched`
+ * is `rows_landed` (raw rows the source returned); `records_inserted`
+ * (`rows_loaded`, shown muted) is what actually made it into the
+ * warehouse after dedup -- both real, separate counts, not one number
+ * doing double duty. */
+function RunLogTable({ runs }: { runs: PublicRun[] | null }) {
+  if (runs === null) {
+    return <p className="py-6 text-center text-xs text-white/40">Loading run history…</p>;
+  }
+  if (runs.length === 0) {
+    return (
+      <div className="rounded-md border border-white/5 bg-white/[0.02] px-4 py-6 text-center text-xs text-white/50">
+        No ingestion runs have been logged yet.
+      </div>
+    );
+  }
+  return (
+    <table className="w-full text-left text-sm">
+      <thead className="border-b border-white/5 text-[11px] uppercase tracking-wide text-white/40">
+        <tr>
+          <th className="py-2">Pipeline</th>
+          <th className="py-2">Last Ran</th>
+          <th className="py-2">Trigger</th>
+          <th className="py-2">Status</th>
+          <th className="py-2 text-right">Records Fetched</th>
+          <th className="py-2 text-right">Duration</th>
+        </tr>
+      </thead>
+      <tbody className="divide-y divide-white/5">
+        {runs.map((r) => (
+          <tr key={r.id} className="text-white/85">
+            <td className="py-2 pr-2">{formatSource(r.source_id)}</td>
+            <td className="py-2 pr-2 text-white/60" title={new Date(r.started_at).toLocaleString()}>
+              {formatRelativeTime(r.started_at)}
+            </td>
+            <td className="py-2 pr-2">
+              <RunTriggerBadge trigger={r.trigger} />
+            </td>
+            <td className="py-2 pr-2">
+              <PipelineStatusChip status={r.status} />
+            </td>
+            <td className="py-2 text-right tabular-nums">
+              {r.records_fetched != null ? (
+                <>
+                  {r.records_fetched.toLocaleString()}
+                  {r.records_inserted != null && r.records_inserted !== r.records_fetched && (
+                    <span className="ml-1 text-white/40">({r.records_inserted.toLocaleString()} inserted)</span>
+                  )}
+                </>
+              ) : (
+                <span className="text-white/40">—</span>
+              )}
+            </td>
+            <td className="py-2 text-right text-white/60 tabular-nums">
+              {r.duration_ms != null ? `${(r.duration_ms / 1000).toFixed(1)}s` : "—"}
+            </td>
           </tr>
         ))}
       </tbody>

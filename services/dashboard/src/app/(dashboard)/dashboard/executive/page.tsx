@@ -5,30 +5,69 @@
  */
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import Link from "next/link";
 import { m, AnimatePresence, useReducedMotion } from "framer-motion";
 import {
-  ArrowDownRight, ArrowUpRight, Briefcase,
+  ArrowDownRight, ArrowUpRight, Briefcase, CalendarDays, Cloud, Globe, Info, Leaf,
+  Link2, RefreshCw, TrendingUp,
 } from "lucide-react";
 
 import { Card } from "@/components/dashboard/card";
+import { DetailModal, type DetailField } from "@/components/dashboard/detail-modal";
+import { EmissionsTrendV2 } from "@/components/dashboard/emissions-trend-v2";
 import { cn } from "@/lib/utils";
+import { formatRelativeTime } from "@/lib/ingestion";
 import {
-  getExecutiveKpis,
-  type ExecutiveKpi, type SourceSlice,
+  getExecutiveKpis, getEmissionsTrend, getEmissionsBySource,
+  type ExecutiveKpi,
 } from "@/lib/dashboards";
 import {
   fetchYtdEmissions, fetchCurrentEmissions, fetchEmissionsTimeseries,
   fetchGenerationMix, fetchDemandSummary, fetchDemandForecast,
-  fetchEmissionsForecast, formatFuelType, fuelColor,
 } from "@/lib/emissions";
 import { fetchPublicDataQualitySummary } from "@/lib/data-quality";
-import type { EmissionsTrendPoint } from "@/lib/admin-dashboard";
+import type { EmissionsTrendPoint, EmissionsTrendPointV2 } from "@/lib/admin-dashboard";
 
 function formatHourLabel(iso: string): string {
   return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
+
+// Richer date+time label for sparkline tooltips (see `Sparkline`'s
+// `fullLabels` prop) -- same local-timezone basis as `formatHourLabel`,
+// just with the date spelled out too, since a 24h/4h window can cross a
+// local midnight boundary and "14:30" alone doesn't say which day.
+function formatFullDateTime(iso: string): string {
+  return new Date(iso).toLocaleString([], {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+// Emissions Trend's real region selector -- "NEM" (no `region` param) is
+// the 5-region aggregate; the rest are the individual NEM regions the
+// backend can actually serve real emissions timeseries/forecast data
+// for. WEM isn't offered here -- its different native cadence means it
+// was never in scope for the demand-forecast model's region training
+// (root TODO.md's "NEM 5-region sum" item), so a WEM forecast segment
+// would always just show its own honest "unavailable" gap.
+const TREND_REGIONS = ["NEM", "NSW1", "QLD1", "VIC1", "SA1", "TAS1"] as const;
+
+// Emissions Trend's real x-axis extent: now-5*24h (actual + real hourly
+// spread) to now+{24 or 48}h (real forecast, wherever it reaches -- the
+// forecast-period selector controls this second number, `trendForecastDays`
+// state below, not a fixed constant). The model's real native forecast
+// horizon is only ~4h (confirmed live, `GET /v1/emissions/forecast`'s
+// own `horizon` field) -- there is no real 24-48h-ahead emissions
+// forecast available from any served model right now, so the chart
+// still only ever plots real forecast data out to that true horizon,
+// leaving a real, honest empty gap for the rest of the selected window
+// rather than inventing data to fill it.
+const TREND_HISTORY_DAYS = 5;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 type ForecastPreview = {
   current: number;
@@ -36,6 +75,7 @@ type ForecastPreview = {
   min: number;
   sparkline: number[];
   labels: string[];
+  fullLabels: string[];
   horizonLabel: string;
   scope: string;
 };
@@ -46,6 +86,7 @@ type EmissionsSnapshot = {
   renewablePct: number;
   sparkline: number[];
   labels: string[];
+  fullLabels: string[];
 };
 
 function KpiCard({ k, live }: { k: ExecutiveKpi; live: boolean }) {
@@ -98,12 +139,20 @@ export default function ExecutiveDashboardPage() {
   // own error separately so the empty state can say *why* (still
   // loading vs. the backend call actually failed), rather than an
   // unexplained blank forever.
-  const [source, setSource] = useState<SourceSlice[]>([]);
-  const [sourceError, setSourceError] = useState<string | null>(null);
-  const [sourceTotal, setSourceTotal] = useState<string | null>(null);
-  const [sourceHeading, setSourceHeading] = useState("Emissions by Source");
-
-  const [trend, setTrend] = useState<EmissionsTrendPoint[]>([]);
+  // `source`/`trend*` (Emissions by Source donut, Emissions Trend chart)
+  // are handled separately below -- both explicitly mock/demo, per
+  // direct request to reproduce a specific reference screenshot
+  // (`getEmissionsBySource()`/`EmissionsTrendV2` -- see their own call
+  // sites for the full disclosure). Not fetched here.
+  const [trendDetailPoint, setTrendDetailPoint] = useState<EmissionsTrendPointV2 | null>(null);
+  // Both pure/deterministic (no fetch) -- computed once, not re-derived
+  // on every render.
+  const compactTrend = useMemo(() => getEmissionsTrend(), []);
+  const emissionsBySource = useMemo(() => getEmissionsBySource(), []);
+  const emissionsBySourceTotal = useMemo(
+    () => emissionsBySource.reduce((sum, s) => sum + s.tco2e, 0).toLocaleString(),
+    [emissionsBySource],
+  );
 
   const [forecastPreview, setForecastPreview] = useState<ForecastPreview | null>(null);
   const [forecastError, setForecastError] = useState<string | null>(null);
@@ -197,84 +246,6 @@ export default function ExecutiveDashboardPage() {
       })
       .catch(() => {});
 
-    fetchGenerationMix()
-      .then((mix) => {
-        if (cancelled || mix.items.length === 0) return;
-        setSource(
-          mix.items.map((item) => ({
-            name: formatFuelType(item.fuel_type),
-            pct: mix.total_emissions_kgco2e
-              ? (item.total_emissions_kgco2e / mix.total_emissions_kgco2e) * 100
-              : 0,
-            tco2e: Math.round(item.total_emissions_kgco2e / 1000),
-            color: fuelColor(item.fuel_type),
-          })),
-        );
-        setSourceTotal(Math.round(mix.total_emissions_kgco2e / 1000).toLocaleString());
-        setSourceHeading("Grid Electricity by Fuel Type");
-      })
-      .catch((err) => {
-        if (!cancelled) setSourceError(err instanceof Error ? err.message : "failed to load");
-      });
-
-    fetchEmissionsTimeseries("day", 8)
-      .then((series) => {
-        // Need at least 2 points to draw a trend line at all -- `MiniChart`
-        // itself already renders an honest "not enough data" empty state
-        // below that threshold, so nothing here needs to fill the gap
-        // with anything but the real (possibly sparse) response.
-        if (cancelled || series.points.length < 2) return;
-        // Every historical point here is a measured fact, not a
-        // projection -- the band collapses to the actual value (no
-        // fabricated uncertainty range) for these. A real forward-looking
-        // point is appended below, once GET /v1/emissions/forecast
-        // resolves, carrying the model's actual P10/P90 band.
-        setTrend(
-          series.points.map((p) => {
-            const actual = Math.round((p.total_emissions_kgco2e ?? 0) / 1000);
-            return {
-              date: p.bucket.slice(0, 10),
-              actual,
-              forecast_p10: actual,
-              forecast_p50: actual,
-              forecast_p90: actual,
-            };
-          }),
-        );
-
-        // Real projected band: GET /v1/emissions/forecast (demand
-        // forecast x current carbon intensity, held constant across the
-        // horizon -- see that endpoint's own docstring). Tries the
-        // NEM-wide aggregate first; falls back to NSW1 alone if the
-        // aggregate 404s/503s (only NSW1 has a trained Production model
-        // right now -- the NEM path needs all 5 regions fitted). Scope is
-        // disclosed in the chart, never silently swapped for a wider
-        // claim than what was actually served.
-        fetchEmissionsForecast()
-          .catch(() => fetchEmissionsForecast("NSW1"))
-          .then((forecast) => {
-            if (cancelled || forecast.points.length === 0) return;
-            const toT = (kg: number) => Math.round(kg / 1000);
-            const p10 = toT(forecast.points.reduce((s, p) => s + p.p10_kgco2e, 0));
-            const p50 = toT(forecast.points.reduce((s, p) => s + p.p50_kgco2e, 0));
-            const p90 = toT(forecast.points.reduce((s, p) => s + p.p90_kgco2e, 0));
-            setTrend((prev) => [
-              ...prev.filter((p) => !p.isForecast),
-              {
-                date: `Next ${forecast.horizon}`,
-                actual: p50,
-                forecast_p10: p10,
-                forecast_p50: p50,
-                forecast_p90: p90,
-                isForecast: true,
-                forecastScope: forecast.region,
-              },
-            ]);
-          })
-          .catch(() => {});
-      })
-      .catch(() => {});
-
     // Emissions Snapshot's 3 mini-stats: `totalTco2e`/sparkline come from
     // the same 24h timeseries the chart line uses; `gridIntensity` is a
     // real weighted average (sum emissions / sum generation) over that
@@ -294,6 +265,7 @@ export default function ExecutiveDashboardPage() {
           renewablePct: 0,
           sparkline: series.points.map((p) => Math.round((p.total_emissions_kgco2e ?? 0) / 1000)),
           labels: series.points.map((p) => formatHourLabel(p.bucket)),
+          fullLabels: series.points.map((p) => formatFullDateTime(p.bucket)),
         });
 
         const untilIso = new Date().toISOString();
@@ -333,6 +305,7 @@ export default function ExecutiveDashboardPage() {
           min: Math.round(Math.min(...p50s)),
           sparkline: p50s,
           labels: forecast.points.map((p) => formatHourLabel(p.ts)),
+          fullLabels: forecast.points.map((p) => formatFullDateTime(p.ts)),
           horizonLabel: `next ${forecast.horizon}`,
           scope,
         });
@@ -346,7 +319,6 @@ export default function ExecutiveDashboardPage() {
     };
   }, []);
 
-  const forecastPoint = trend.find((p) => p.isForecast) ?? null;
 
   return (
     <div className="space-y-6">
@@ -400,9 +372,11 @@ export default function ExecutiveDashboardPage() {
               <Sparkline
                 data={forecastPreview.sparkline}
                 labels={forecastPreview.labels}
+                fullLabels={forecastPreview.fullLabels}
                 unit="MW"
                 strokeColor="#34d399"
                 testId="forecast-sparkline"
+                rotateLabels
               />
             </>
           )}
@@ -435,6 +409,7 @@ export default function ExecutiveDashboardPage() {
               <Sparkline
                 data={emissionsSnapshot.sparkline}
                 labels={emissionsSnapshot.labels}
+                fullLabels={emissionsSnapshot.fullLabels}
                 unit="tCO₂e/h"
                 strokeColor="#34d399"
                 testId="emissions-sparkline"
@@ -445,52 +420,81 @@ export default function ExecutiveDashboardPage() {
         </div>
       </Card>
 
+      {/* Emissions Trend v2 -- explicitly mock/demo (see EmissionsTrendV2's
+          own header comment and lib/admin-dashboard.ts's getEmissionsTrendV2
+          docstring for the full disclosure), ported per direct request to
+          reproduce a specific reference screenshot exactly. */}
+      <EmissionsTrendV2 onOpenDetails={setTrendDetailPoint} />
+
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <Card className="lg:col-span-2">
           <div className="mb-3 flex items-center justify-between">
             <div>
-              <h2 className="text-base font-semibold text-white">Emissions Trend</h2>
-              <p className="text-xs text-white/50">
-                8-day rolling tCO₂e, actual
-                {forecastPoint
-                  ? ` + real ${forecastPoint.date.replace("Next ", "")} forecast (${forecastPoint.forecastScope})`
-                  : ""}
-              </p>
+              <h2 className="text-base font-semibold text-white">Emissions Trend (compact)</h2>
+              <p className="text-xs text-white/50">8-day rolling tCO₂e (actual + P10-P90)</p>
             </div>
           </div>
-          <div className="mb-3 flex flex-wrap items-center gap-4 text-xs text-white/60">
+          <div className="mb-3 flex items-center gap-4 text-xs text-white/60">
             <span className="inline-flex items-center gap-1.5">
               <span className="h-1.5 w-3 rounded-full bg-emerald-300" /> Actual
             </span>
-            {forecastPoint && (
-              <>
-                <span className="inline-flex items-center gap-1.5">
-                  <span className="h-1.5 w-3 rounded-full border border-dashed border-emerald-200/70" /> Forecast (P50)
-                </span>
-                <span className="inline-flex items-center gap-1.5">
-                  <span className="h-1.5 w-3 rounded-full bg-emerald-300/15" /> P10–P90 band
-                </span>
-              </>
-            )}
+            <span className="inline-flex items-center gap-1.5">
+              <span className="h-1.5 w-3 rounded-full border border-dashed border-emerald-100/50" /> P10-P90
+            </span>
           </div>
-          <MiniChart data={trend} />
+          <CompactTrendChart data={compactTrend} />
         </Card>
 
         <Card>
-          <div className="mb-3 flex items-center justify-between">
-            <h2 className="text-base font-semibold text-white">{sourceHeading}</h2>
-          </div>
-          {source.length === 0 ? (
-            <p className="py-10 text-center text-xs text-white/40">
-              {sourceError ? `Unavailable — ${sourceError}` : "Loading…"}
-            </p>
-          ) : (
-            <DonutSimple slices={source} total={sourceTotal ?? "—"} unit="tCO₂e" />
-          )}
+          <h2 className="mb-3 text-base font-semibold text-white">Emissions by Source</h2>
+          <DonutSimple slices={emissionsBySource} total={emissionsBySourceTotal} unit="tCO₂e" />
         </Card>
       </div>
+
+      {trendDetailPoint && (
+        <DetailModal
+          open={trendDetailPoint !== null}
+          onClose={() => setTrendDetailPoint(null)}
+          title="Emissions Trend · Hour detail"
+          subtitle={`${trendDetailPoint.label} · ${trendDetailPoint.segment === "forecast" ? "Forecast window" : "Past (actual)"}`}
+          fields={trendDetailFieldsV2(trendDetailPoint)}
+        />
+      )}
     </div>
   );
+}
+
+/** Fields for the (explicitly mock/demo -- see `EmissionsTrendV2`'s own
+ * header comment) Emissions Trend chart's click-to-detail modal. Every
+ * value comes straight off the clicked `EmissionsTrendPointV2`. */
+function trendDetailFieldsV2(p: EmissionsTrendPointV2): DetailField[] {
+  const fields: DetailField[] = [
+    { label: "Datetime", value: p.ts.replace("T", " ").slice(0, 16) },
+    {
+      label: "Window",
+      value: p.segment === "past" ? "Past (Actual)" : p.segment === "now" ? "Now" : "Forecast",
+    },
+    { label: "Label", value: p.label },
+  ];
+  if (p.actual !== null) {
+    fields.push(
+      { label: "Actual (hourly)", value: `${p.actual.toLocaleString()} tCO₂e`, tone: "positive" },
+      { label: "Past P10", value: `${p.past_p10?.toLocaleString()} tCO₂e` },
+      { label: "Past P90", value: `${p.past_p90?.toLocaleString()} tCO₂e` },
+    );
+  }
+  if (p.segment === "forecast") {
+    fields.push(
+      { label: "Forecast P10", value: `${p.forecast_p10.toLocaleString()} tCO₂e` },
+      { label: "Forecast P50", value: `${p.forecast_p50.toLocaleString()} tCO₂e`, tone: "positive" },
+      { label: "Forecast P90", value: `${p.forecast_p90.toLocaleString()} tCO₂e` },
+      {
+        label: "Forecast Spread",
+        value: `${(p.forecast_p90 - p.forecast_p10).toLocaleString()} tCO₂e (P10–P90)`,
+      },
+    );
+  }
+  return fields;
 }
 
 function KpiCardWithDelay({ k, delay, live }: { k: ExecutiveKpi; delay: number; live: boolean }) {
@@ -509,17 +513,27 @@ function KpiCardWithDelay({ k, delay, live }: { k: ExecutiveKpi; delay: number; 
 function Sparkline({
   data,
   labels,
+  fullLabels,
   unit,
   strokeColor,
   testId,
   padLabels = false,
+  rotateLabels = false,
 }: {
   data: number[];
   labels: string[];
+  /** Richer date+time label per point, shown in the hover tooltip only --
+   * `labels` stays short (e.g. "14:30") for the always-visible axis row;
+   * this carries the full "Sat, Aug 9 · 14:30 UTC" version so hovering
+   * disambiguates which real day a point falls on (the Emissions
+   * Snapshot's 24h window can cross a midnight boundary). Falls back to
+   * `labels` when omitted. */
+  fullLabels?: string[];
   unit: string;
   strokeColor: string;
   testId?: string;
   padLabels?: boolean;
+  rotateLabels?: boolean;
 }) {
   const reduced = useReducedMotion();
   const w = 100, h = 60;
@@ -556,7 +570,7 @@ function Sparkline({
     };
   }, [data.length]);
 
-  const hoverLabel = hover ? labels[hover.idx] : null;
+  const hoverLabel = hover ? (fullLabels?.[hover.idx] ?? labels[hover.idx]) : null;
   const hoverValue = hover ? data[hover.idx] : 0;
 
   // Filter labels to avoid overlap
@@ -617,10 +631,22 @@ function Sparkline({
           />
         ))}
       </svg>
-      {/* Labels */}
-      <div className="mt-2 flex items-center justify-between text-[11px] text-white/50">
+      {/* Labels -- rotated 90° when the chart has many short-interval
+          steps (e.g. Demand Forecast Preview's "now/+30m/+1h/..."),
+          which crowd badly in a horizontal row at this card's width */}
+      <div
+        className={cn(
+          "mt-2 flex text-[11px] text-white/50",
+          rotateLabels ? "h-9 items-start justify-between" : "items-center justify-between",
+        )}
+      >
         {visibleLabels.map((l, i) => (
-          <span key={i}>{l}</span>
+          <span
+            key={i}
+            className={rotateLabels ? "origin-top-left translate-y-1 whitespace-nowrap rotate-90" : undefined}
+          >
+            {l}
+          </span>
         ))}
       </div>
       {/* Hover tooltip */}
@@ -653,48 +679,34 @@ function Sparkline({
 }
 
 /**
- * MiniChart — animated area chart with P10-P90 band, actual line, hover tooltip.
+ * CompactTrendChart — simple animated area chart (actual line + P10-P90
+ * band, index-spaced x-axis) for the "Emissions Trend (compact)" panel.
+ * Ported from the v18x prototype's own simple inline `MiniChart(data)`
+ * (`/Users/macbook/Downloads/executive-page-zip/page.tsx`) -- explicitly
+ * mock/demo, fed by `getEmissionsTrend()` (`@/lib/dashboards`), same
+ * disclosure as `EmissionsTrendV2` above. Distinct from that component's
+ * own, much more developed chart -- this one is deliberately simple
+ * (no region/horizon selectors, no smoothing), matching the reference
+ * screenshot's smaller bottom-left panel.
  */
-function MiniChart({ data }: { data: EmissionsTrendPoint[] }) {
+function CompactTrendChart({ data }: { data: EmissionsTrendPoint[] }) {
   const reduced = useReducedMotion();
   const w = 720, h = 200, padL = 40, padR = 8, padT = 8, padB = 28;
   const innerW = w - padL - padR, innerH = h - padT - padB;
-  // A real (non-mock) fetch can land fewer than 2 points -- e.g. a
-  // partially-stale warehouse where only one day in the requested window
-  // has any data at all. `stepX`'s `data.length - 1` divisor goes to 0
-  // (or negative) below 2 points, which turns every SVG coordinate below
-  // into NaN/Infinity -- not a thrown error, just an invisible chart:
-  // the card/title/legend around it still render fine, only the actual
-  // graph silently draws nothing. Guarded here (hooks below still run
-  // unconditionally either way -- only the JSX return branches on this)
-  // rather than upstream, so this component is safe regardless of what
-  // any caller passes.
-  const hasEnoughData = data.length >= 2;
-  const yMax = hasEnoughData
-    ? Math.max(...data.flatMap((d) => [d.actual, d.forecast_p90])) * 1.1
-    : 1;
-  const stepX = hasEnoughData ? innerW / (data.length - 1) : innerW;
+  const yMax = Math.max(...data.flatMap((d) => [d.actual, d.forecast_p90])) * 1.1;
+  const stepX = innerW / (data.length - 1);
   const x = (i: number) => padL + i * stepX;
   const y = (v: number) => padT + innerH - (v / yMax) * innerH;
-  // Split into a solid "measured" line and a dashed connector out to any
-  // appended forecast point(s) -- a forecast point's `actual` field holds
-  // forecast_p50, not a measurement, so it must never render as part of
-  // the solid "Actual" line.
-  const actualIdx = data.map((_, i) => i).filter((i) => !data[i].isForecast);
-  const forecastIdx = data.map((_, i) => i).filter((i) => data[i].isForecast);
-  const actualPath = actualIdx
-    .map((i, k) => `${k === 0 ? "M" : "L"} ${x(i).toFixed(1)} ${y(data[i].actual).toFixed(1)}`)
-    .join(" ");
-  const lastActualIdx = actualIdx.length ? actualIdx[actualIdx.length - 1] : null;
-  const forecastConnectorPaths = forecastIdx.map((i) => {
-    const fromIdx = lastActualIdx ?? i;
-    return `M ${x(fromIdx).toFixed(1)} ${y(data[fromIdx].actual).toFixed(1)} L ${x(i).toFixed(1)} ${y(data[i].actual).toFixed(1)}`;
-  });
+  const actualPath = data.map((d, i) => `${i === 0 ? "M" : "L"} ${x(i).toFixed(1)} ${y(d.actual).toFixed(1)}`).join(" ");
   const bandTop = data.map((d, i) => `${i === 0 ? "M" : "L"} ${x(i).toFixed(1)} ${y(d.forecast_p90).toFixed(1)}`).join(" ");
-  const bandBot = data.slice().reverse().map((d, i) => {
-    const j = data.length - 1 - i;
-    return `L ${x(j).toFixed(1)} ${y(d.forecast_p10).toFixed(1)}`;
-  }).join(" ");
+  const bandBot = data
+    .slice()
+    .reverse()
+    .map((d, i) => {
+      const j = data.length - 1 - i;
+      return `L ${x(j).toFixed(1)} ${y(d.forecast_p10).toFixed(1)}`;
+    })
+    .join(" ");
 
   const wrapRef = useRef<HTMLDivElement>(null);
   const [hover, setHover] = useState<{ x: number; y: number; idx: number } | null>(null);
@@ -704,11 +716,11 @@ function MiniChart({ data }: { data: EmissionsTrendPoint[] }) {
     if (!el) return;
     function onMove(e: MouseEvent) {
       const rect = el!.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      const y = e.clientY - rect.top;
-      const cx = (x / rect.width) * w;
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      const cx = (mx / rect.width) * w;
       const idx = Math.max(0, Math.min(data.length - 1, Math.round((cx - padL) / stepX)));
-      setHover({ x, y, idx });
+      setHover({ x: mx, y: my, idx });
     }
     function onLeave() {
       setHover(null);
@@ -724,48 +736,18 @@ function MiniChart({ data }: { data: EmissionsTrendPoint[] }) {
   const hoverPoint = hover ? data[hover.idx] : null;
   const hoverLabel = hoverPoint ? hoverPoint.date : null;
 
-  if (!hasEnoughData) {
-    return (
-      <div
-        ref={wrapRef}
-        className="flex h-48 w-full items-center justify-center rounded-lg border border-white/5 bg-white/[0.01]"
-        data-testid="emissions-trend-chart"
-      >
-        <p className="text-xs text-white/40">
-          {data.length === 0
-            ? "No emissions data available for this period yet."
-            : "Not enough recent data to draw a trend — only 1 day has data so far."}
-        </p>
-      </div>
-    );
-  }
-
   return (
-    <div ref={wrapRef} className="relative" data-testid="emissions-trend-chart">
+    <div ref={wrapRef} className="relative" data-testid="emissions-trend-compact-chart">
       <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" className="h-48 w-full">
-        {/* Y grid */}
         {[0, 0.25, 0.5, 0.75, 1].map((p, i) => (
           <g key={i}>
-            <line
-              x1={padL}
-              x2={w - padR}
-              y1={padT + p * innerH}
-              y2={padT + p * innerH}
-              stroke="rgba(255,255,255,0.05)"
-            />
-            <text
-              x={padL - 6}
-              y={padT + p * innerH + 3}
-              textAnchor="end"
-              fontSize="9"
-              fill="rgba(255,255,255,0.4)"
-            >
+            <line x1={padL} x2={w - padR} y1={padT + p * innerH} y2={padT + p * innerH} stroke="rgba(255,255,255,0.05)" />
+            <text x={padL - 6} y={padT + p * innerH + 3} textAnchor="end" fontSize="9" fill="rgba(255,255,255,0.4)">
               {Math.round((1 - p) * yMax / 1000).toLocaleString()}k
             </text>
           </g>
         ))}
 
-        {/* P10-P90 band */}
         <m.path
           d={`${bandTop} ${bandBot} Z`}
           fill="rgba(52,211,153,0.10)"
@@ -774,8 +756,6 @@ function MiniChart({ data }: { data: EmissionsTrendPoint[] }) {
           animate={{ opacity: 1 }}
           transition={{ duration: 0.6, delay: 0.2 }}
         />
-
-        {/* Actual line (measured points only) */}
         <m.path
           d={actualPath}
           fill="none"
@@ -787,103 +767,32 @@ function MiniChart({ data }: { data: EmissionsTrendPoint[] }) {
           animate={{ pathLength: 1 }}
           transition={{ duration: 1, ease: "easeInOut" }}
         />
-
-        {/* Forecast connector (dashed -- P50, not a measurement) */}
-        {forecastConnectorPaths.map((d, i) => (
-          <m.path
-            key={`fcst-${i}`}
-            d={d}
-            fill="none"
-            stroke="#34d399"
-            strokeWidth={2}
-            strokeDasharray="4 3"
-            strokeLinecap="round"
-            initial={reduced ? false : { pathLength: 0 }}
-            animate={{ pathLength: 1 }}
-            transition={{ duration: 0.6, delay: 0.4, ease: "easeInOut" }}
-          />
-        ))}
-
-        {/* Data points — staggered spring-in; forecast points render hollow */}
         {data.map((d, i) => (
           <m.circle
             key={d.date}
             cx={x(i)}
             cy={y(d.actual)}
-            r={d.isForecast ? 4 : 3}
-            fill={d.isForecast ? "#0a1410" : "#34d399"}
-            stroke={d.isForecast ? "#34d399" : "none"}
-            strokeWidth={d.isForecast ? 2 : 0}
-            strokeDasharray={d.isForecast ? "2 1.5" : undefined}
+            r={3}
+            fill="#34d399"
             initial={reduced ? false : { scale: 0, opacity: 0 }}
             animate={{ scale: 1, opacity: 1 }}
-            transition={{
-              type: "spring",
-              stiffness: 300,
-              damping: 20,
-              delay: reduced ? 0 : 0.6 + i * 0.06,
-            }}
+            transition={{ type: "spring", stiffness: 300, damping: 20, delay: reduced ? 0 : 0.6 + i * 0.06 }}
           />
         ))}
-
-        {/* X labels -- the first/last points sit at padL/(w - padR)
-            (`x(0)`/`x(data.length - 1)`), and `padR` (8) is nowhere near
-            half a "MM-DD" label's rendered width. Center-anchoring every
-            label let the last one's right half spill past the SVG
-            viewBox's right edge and get silently clipped (e.g. "08-04"
-            rendering as "08-0") -- anchoring the first label to its left
-            edge and the last to its right edge keeps both fully inside
-            the plotted area without needing to guess a wider padR. */}
         {data.map((d, i) => (
-          <text
-            key={d.date}
-            x={x(i)}
-            y={h - 8}
-            textAnchor={i === 0 ? "start" : i === data.length - 1 ? "end" : "middle"}
-            fontSize="10"
-            fill={d.isForecast ? "rgba(52,211,153,0.85)" : "rgba(255,255,255,0.5)"}
-          >
-            {d.isForecast ? d.date : d.date.slice(5)}
+          <text key={d.date} x={x(i)} y={h - 8} textAnchor="middle" fontSize="10" fill="rgba(255,255,255,0.5)">
+            {d.date.slice(5)}
           </text>
         ))}
-
-        {/* Hover crosshair */}
         {hover && hoverPoint && (
-          <m.g
-            initial={reduced ? false : { opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ duration: 0.1 }}
-          >
-            <line
-              x1={x(hover.idx)}
-              x2={x(hover.idx)}
-              y1={padT}
-              y2={padT + innerH}
-              stroke="rgba(132,204,22,0.4)"
-              strokeWidth={0.5}
-              strokeDasharray="2 2"
-            />
-            <circle
-              cx={x(hover.idx)}
-              cy={y(hoverPoint.actual)}
-              r={5}
-              fill="#34d399"
-              stroke="#0a1410"
-              strokeWidth={1.5}
-            />
-            <line
-              x1={x(hover.idx)}
-              x2={x(hover.idx)}
-              y1={y(hoverPoint.forecast_p90)}
-              y2={y(hoverPoint.forecast_p10)}
-              stroke="rgba(132,204,22,0.3)"
-              strokeWidth={2}
-            />
+          <m.g initial={reduced ? false : { opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.1 }}>
+            <line x1={x(hover.idx)} x2={x(hover.idx)} y1={padT} y2={padT + innerH} stroke="rgba(132,204,22,0.4)" strokeWidth={0.5} strokeDasharray="2 2" />
+            <circle cx={x(hover.idx)} cy={y(hoverPoint.actual)} r={5} fill="#34d399" stroke="#0a1410" strokeWidth={1.5} />
+            <line x1={x(hover.idx)} x2={x(hover.idx)} y1={y(hoverPoint.forecast_p90)} y2={y(hoverPoint.forecast_p10)} stroke="rgba(132,204,22,0.3)" strokeWidth={2} />
           </m.g>
         )}
       </svg>
 
-      {/* Hover tooltip */}
       <AnimatePresence>
         {hover && hoverPoint && hoverLabel && (
           <m.div
@@ -893,36 +802,23 @@ function MiniChart({ data }: { data: EmissionsTrendPoint[] }) {
             transition={{ duration: 0.12, ease: "easeOut" }}
             className="pointer-events-none absolute z-20 min-w-[180px] -translate-x-1/2 -translate-y-[calc(100%+10px)] rounded-md border border-white/10 bg-[#0a1410]/95 px-3 py-2 text-xs shadow-2xl backdrop-blur"
             style={{ left: hover.x, top: hover.y }}
-            data-testid="emissions-trend-tooltip"
+            data-testid="emissions-trend-compact-tooltip"
           >
-            <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-white/50">
-              {hoverLabel}
-            </div>
+            <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-white/50">{hoverLabel}</div>
             <div className="flex items-center gap-2 py-0.5">
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-300" />
-              <span className="text-white/65">{hoverPoint.isForecast ? "Forecast (P50)" : "Actual"}</span>
-              <span className="ml-auto font-mono font-medium text-white">
-                {hoverPoint.actual.toLocaleString()} tCO₂e
-              </span>
+              <span className="text-white/65">Actual</span>
+              <span className="ml-auto font-mono font-medium text-white">{hoverPoint.actual.toLocaleString()} tCO₂e</span>
             </div>
-            {hoverPoint.isForecast && hoverPoint.forecastScope && (
-              <div className="pb-0.5 text-[10px] text-amber-200/70">
-                Scope: {hoverPoint.forecastScope} only
-              </div>
-            )}
             <div className="flex items-center gap-2 py-0.5">
               <span className="h-1.5 w-1.5 rounded-full border border-emerald-100/50" />
               <span className="text-white/65">P10 (lower)</span>
-              <span className="ml-auto font-mono font-medium text-white/80">
-                {hoverPoint.forecast_p10.toLocaleString()}
-              </span>
+              <span className="ml-auto font-mono font-medium text-white/80">{hoverPoint.forecast_p10.toLocaleString()}</span>
             </div>
             <div className="flex items-center gap-2 py-0.5">
               <span className="h-1.5 w-1.5 rounded-full border border-emerald-100/50" />
               <span className="text-white/65">P90 (upper)</span>
-              <span className="ml-auto font-mono font-medium text-white/80">
-                {hoverPoint.forecast_p90.toLocaleString()}
-              </span>
+              <span className="ml-auto font-mono font-medium text-white/80">{hoverPoint.forecast_p90.toLocaleString()}</span>
             </div>
             <div className="mt-1 flex items-center gap-2 border-t border-white/5 pt-1 text-[10px] text-white/40">
               <span>Band: ±{Math.round((hoverPoint.forecast_p90 - hoverPoint.forecast_p10) / 2).toLocaleString()} tCO₂e</span>
@@ -1046,7 +942,7 @@ function DonutSimple({
             animate={{ opacity: 1, scale: 1 }}
             transition={{ duration: 0.5, delay: 0.3, ease: "easeOut" }}
           >
-            <div className="text-2xl font-bold text-white">{total}</div>
+            <div className="px-2 text-sm font-bold leading-tight text-white tabular-nums">{total}</div>
             <div className="text-[10px] text-white/50">{unit}</div>
           </m.div>
         </div>

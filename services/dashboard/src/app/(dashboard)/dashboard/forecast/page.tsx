@@ -11,11 +11,21 @@
  *
  * There's no Horizon selector here (unlike the old mock): v0's
  * `/v1/forecast` doesn't resample to an arbitrary requested horizon —
- * it always returns the model's own fixed native horizon/interval
- * (48 steps at whatever cadence the source region reports at, e.g. 4h
- * at 5-min steps for a NEM region, 24h at 30-min steps for WEM). The
+ * it always returns the model's own fixed native horizon/interval. The
  * page shows that real horizon/interval as read-only info instead of
  * pretending it's user-selectable.
+ *
+ * 2026-08-10: `lstm_demand` v6 unified the horizon across all 6 regions
+ * (previously 48 *steps* at each region's own native cadence — 4h for
+ * 5-min-native NEM regions, 24h for 30-min-native WEM, so "48" meant a
+ * different real timespan per region). It's now a genuine 48h/2-day
+ * horizon at a shared hourly grain for every region, including WEM
+ * (previously excluded entirely — its native 30-min cadence made a
+ * shared fixed-step window with NEM temporally incoherent; see
+ * `forecast-api/app/service/ml/data.py`'s hourly-resample comment). Not
+ * the originally-targeted 7-day horizon — real, measured NEM data
+ * volume (~14 days of live history per region) can't support a genuine
+ * held-out 7-day evaluation yet; see `TODO.md`.
  *
  * Visual structure:
  *   ┌─ Header (title, "as_of"/model) ────────────────────────────┐
@@ -59,19 +69,42 @@ import {
 
 const ALL_FORECAST_REGIONS: (Region | "NEM")[] = ["NEM", ...ALL_REGIONS];
 
-// Real, measured (not invented) result from a walk-forward backtest of
-// the currently-served model (lstm_demand v3) run 2026-08-09 --
-// `ecolens-forecast evaluate --version 3 --region TAS1`: 25.43% MAPE,
-// worse than the seasonal-naive baseline (8.69%). Every other NEM
-// region (NSW1/QLD1/VIC1/SA1) beats its baseline comfortably in the
-// same run -- TAS1 alone is a real, known weak spot in this model
-// version, not a UI-only guess. Static (not live-fetched) because a
-// walk-forward backtest is a deliberate, occasional evaluation run, not
-// something computed on every page load -- same "hardcoded but real"
-// convention CONFORMAL_ALPHA uses on /dashboard/performance/. Re-run
-// the evaluate command after any future retrain to keep this accurate.
-const TAS1_WALK_FORWARD_MAPE = 25.43;
-const TAS1_BASELINE_MAPE = 8.69;
+// Real, measured (not invented) walk-forward backtest of the
+// currently-served model (lstm_demand v6, promoted 2026-08-10) --
+// `ecolens-forecast evaluate --version 6`, all 6 regions. Unlike the
+// prior v3 disclosure (TAS1-only weak spot), v6's real evaluation shows
+// EVERY region currently underperforms the seasonal-naive baseline --
+// not a v6-introduced regression (v3 lost to naive too, by a wider
+// margin in every region that existed under it: see `TODO.md`'s
+// retrain entry for the full v3-vs-v6 comparison), but a real, honest
+// gap this page shouldn't hide. TAS1/WEM are the two clear outliers
+// (3.7x/4.7x worse than naive vs. 1.2x-1.5x for the other four).
+// Static (not live-fetched) for the same reason the old constants
+// were -- a walk-forward backtest is a deliberate, occasional
+// evaluation run, not something computed on every page load (same
+// "hardcoded but real" convention CONFORMAL_ALPHA uses on
+// /dashboard/performance/). Re-run `evaluate` after any future retrain
+// to keep this accurate.
+const WALK_FORWARD_MAPE: Record<Region, number> = {
+  NSW1: 8.5,
+  QLD1: 7.04,
+  VIC1: 11.88,
+  SA1: 18.81,
+  TAS1: 22.9,
+  WEM: 44.5,
+};
+const BASELINE_MAPE: Record<Region, number> = {
+  NSW1: 5.6,
+  QLD1: 5.54,
+  VIC1: 9.79,
+  SA1: 12.22,
+  TAS1: 6.14,
+  WEM: 9.5,
+};
+// Regions where the model is meaningfully worse than naive (>2x), not
+// just "technically loses" -- TAS1 (long-known weak region) and WEM
+// (never trained before v6; only ~44 days of live history at all).
+const NOTABLY_WEAK_REGIONS: Region[] = ["TAS1", "WEM"];
 
 function parseIntervalMinutes(interval: string): number {
   const m = /^(\d+)([mh])$/.exec(interval);
@@ -282,14 +315,27 @@ export default function ForecastPage() {
         />
       </div>
 
-      {(region === "TAS1" || region === "NEM") && (
+      {region !== "NEM" && (
         <div className="flex items-start gap-2 rounded-md border border-amber-300/20 bg-amber-300/5 px-3 py-2 text-xs text-amber-100/80">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-300/70" />
           <span>
-            {region === "TAS1" ? "TAS1 is a known weak spot for the currently-served model" : "NEM includes TAS1, a known weak spot for the currently-served model"} —
-            a real walk-forward backtest measured {TAS1_WALK_FORWARD_MAPE}% MAPE for TAS1, worse than
-            a seasonal-naive baseline ({TAS1_BASELINE_MAPE}%). Every other NEM region beats its baseline
-            comfortably in the same evaluation.
+            A real walk-forward backtest measured {WALK_FORWARD_MAPE[region]}% MAPE for {region},
+            worse than a seasonal-naive baseline ({BASELINE_MAPE[region]}%)
+            {NOTABLY_WEAK_REGIONS.includes(region)
+              ? ` — a notably weak spot for the currently-served model (${region === "WEM" ? "newest region in training, only ~44 days of live history" : "a known weak region"}).`
+              : ", though closer than most other regions to closing that gap."}
+          </span>
+        </div>
+      )}
+
+      {region === "NEM" && (
+        <div className="flex items-start gap-2 rounded-md border border-amber-300/20 bg-amber-300/5 px-3 py-2 text-xs text-amber-100/80">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-300/70" />
+          <span>
+            A real walk-forward backtest shows every NEM region currently underperforms its own
+            seasonal-naive baseline with the currently-served model — TAS1 most notably
+            ({WALK_FORWARD_MAPE.TAS1}% vs {BASELINE_MAPE.TAS1}% baseline). NSW1/QLD1/VIC1/SA1 are
+            closer (1.2x-1.5x the baseline); select a region above for its own real numbers.
           </span>
         </div>
       )}

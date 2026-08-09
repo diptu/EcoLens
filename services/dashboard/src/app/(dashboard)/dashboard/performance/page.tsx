@@ -17,8 +17,8 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import {
-  Activity, AlertTriangle, Bell, Box, Cpu, Database,
-  GitBranch, Radar, RefreshCw, Rocket, Sliders, Target,
+  Activity, AlertTriangle, ArrowDownRight, ArrowUpRight, Bell, Box, Cpu, Database,
+  GitBranch, Info, Radar, RefreshCw, Rocket, Sliders, Target,
   Workflow, Zap,
 } from "lucide-react";
 
@@ -85,6 +85,20 @@ function firstMetric(metrics: Record<string, number>, keys: string[]): number | 
     if (typeof metrics[k] === "number") return metrics[k];
   }
   return null;
+}
+
+// Real "latest epoch" value + % change vs the epoch before it, from a
+// per-epoch series already fetched for the chart itself -- not a
+// separately-invented summary stat. `null` (not 0) when there's under 2
+// real points to compare, so the stat box can honestly show "—" instead
+// of a fabricated 0% delta.
+function latestWithDelta(series: number[]): { value: number; deltaPct: number | null } | null {
+  if (series.length === 0) return null;
+  const value = series[series.length - 1];
+  if (series.length < 2) return { value, deltaPct: null };
+  const prev = series[series.length - 2];
+  const deltaPct = prev !== 0 ? ((value - prev) / prev) * 100 : null;
+  return { value, deltaPct };
 }
 
 const STAGE_COLORS: Record<string, string> = {
@@ -211,9 +225,13 @@ export default function PerformancePage() {
   // field existed).
   const valRmseSeries = lossCurvePoints.map((p) => p.val_rmse ?? 0);
   const valMaeSeries = lossCurvePoints.map((p) => p.val_mae ?? 0);
+  const trainLossLatest = hasTrainLoss ? latestWithDelta(trainLossSeries) : null;
+  const valLossLatest = hasValLoss ? latestWithDelta(valLossSeries) : null;
   const hasValRmseMae = lossCurvePoints.some(
     (p) => p.val_rmse !== null && p.val_mae !== null,
   );
+  const valRmseLatest = hasValRmseMae ? latestWithDelta(valRmseSeries) : null;
+  const valMaeLatest = hasValRmseMae ? latestWithDelta(valMaeSeries) : null;
 
   const mape = production ? firstMetric(production.metrics, MAPE_KEYS) : null;
   const rmse = production ? firstMetric(production.metrics, RMSE_KEYS) : null;
@@ -398,32 +416,55 @@ export default function PerformancePage() {
       <Card
         title={
           <span className="flex items-center gap-2">
-            <Activity className="h-4 w-4 text-emerald-200" /> Training vs validation loss
+            <TitleIcon icon={Activity} /> Training vs validation loss
           </span>
         }
         subtitle={
-          lossCurveVersion
-            ? `Real per-epoch train_loss/val_loss for ${architecture} v${lossCurveVersion.version} (${lossCurveVersion.stage}) -- GET /v1/model/versions/{version}/loss-curve`
-            : "Real per-epoch train_loss/val_loss, once a version exists -- GET /v1/model/versions/{version}/loss-curve"
+          <>
+            <span>
+              Real per-epoch train_loss/val_loss for {architecture}
+              {lossCurveVersion ? ` v${lossCurveVersion.version} (${lossCurveVersion.stage})` : ""}
+            </span>
+            <br />
+            <span className="font-mono text-white/35">GET /v1/model/versions/&#123;version&#125;/loss-curve</span>
+          </>
         }
         actions={
-          // Version deletion lives on the Model Registry page only
-          // (/dashboard/models) -- this page is a read-only training
-          // diagnostic view, not where destructive registry actions
-          // belong.
-          versions && versions.length > 1 ? (
-            <select
-              value={lossCurveVersion?.version ?? ""}
-              onChange={(e) => setSelectedLossCurveVersion(e.target.value || null)}
-              className="rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-[11px] text-white/70 hover:bg-white/10"
-            >
-              {versions.map((v) => (
-                <option key={v.version} value={v.version} className="bg-[#0a1410]">
-                  v{v.version} ({v.stage})
-                </option>
-              ))}
-            </select>
-          ) : undefined
+          <div className="flex items-center gap-2">
+            {(trainLossLatest || valLossLatest) && (
+              <div className="flex gap-2">
+                <MetricStatBox
+                  label="Train Loss"
+                  value={trainLossLatest?.value ?? null}
+                  deltaPct={trainLossLatest?.deltaPct ?? null}
+                  color="rgba(132,204,22,0.95)"
+                />
+                <MetricStatBox
+                  label="Val Loss"
+                  value={valLossLatest?.value ?? null}
+                  deltaPct={valLossLatest?.deltaPct ?? null}
+                  color="rgba(56,189,248,0.95)"
+                />
+              </div>
+            )}
+            {/* Version deletion lives on the Model Registry page only
+                (/dashboard/models) -- this page is a read-only training
+                diagnostic view, not where destructive registry actions
+                belong. */}
+            {versions && versions.length > 1 && (
+              <select
+                value={lossCurveVersion?.version ?? ""}
+                onChange={(e) => setSelectedLossCurveVersion(e.target.value || null)}
+                className="rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-[11px] text-white/70 hover:bg-white/10"
+              >
+                {versions.map((v) => (
+                  <option key={v.version} value={v.version} className="bg-[#0a1410]">
+                    v{v.version} ({v.stage})
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
         }
       >
         {!lossCurveLoaded ? (
@@ -440,6 +481,10 @@ export default function PerformancePage() {
           </p>
         ) : (
           <>
+            <div className="mb-1 flex items-center justify-between text-[10px] text-white/40">
+              <span>Loss</span>
+              <span>Epoch</span>
+            </div>
             <LineChart
               series={[
                 {
@@ -476,6 +521,16 @@ export default function PerformancePage() {
                 </div>
               )}
             />
+            <div className="mt-3 flex items-center justify-center gap-4 text-[11px] text-white/60">
+              <span className="flex items-center gap-1.5">
+                <span className="h-1.5 w-3 rounded-full bg-lime-100" /> Train Loss
+              </span>
+              {hasValLoss && (
+                <span className="flex items-center gap-1.5">
+                  <span className="inline-block h-0.5 w-4 border-t-2 border-dashed" style={{ borderColor: "rgba(56,189,248,0.95)" }} /> Validation Loss
+                </span>
+              )}
+            </div>
             {!hasValLoss && (
               <p className="mt-2 text-center text-[10px] text-white/35">
                 v{lossCurveVersion.version} has no val_loss logged (trained before
@@ -491,13 +546,38 @@ export default function PerformancePage() {
       <Card
         title={
           <span className="flex items-center gap-2">
-            <Target className="h-4 w-4 text-emerald-200" /> Validation RMSE & MAE
+            <TitleIcon icon={Target} /> Validation RMSE & MAE
           </span>
         }
         subtitle={
-          lossCurveVersion
-            ? `Real per-epoch val_rmse/val_mae (MW) for ${architecture} v${lossCurveVersion.version} (${lossCurveVersion.stage}) -- GET /v1/model/versions/{version}/loss-curve`
-            : "Real per-epoch val_rmse/val_mae (MW), once a version exists -- GET /v1/model/versions/{version}/loss-curve"
+          <>
+            <span>
+              Real per-epoch val_rmse/val_mae (MW) for {architecture}
+              {lossCurveVersion ? ` v${lossCurveVersion.version} (${lossCurveVersion.stage})` : ""}
+            </span>
+            <br />
+            <span className="font-mono text-white/35">GET /v1/model/versions/&#123;version&#125;/loss-curve</span>
+          </>
+        }
+        actions={
+          (valRmseLatest || valMaeLatest) && (
+            <div className="flex gap-2">
+              <MetricStatBox
+                label="RMSE"
+                value={valRmseLatest?.value ?? null}
+                deltaPct={valRmseLatest?.deltaPct ?? null}
+                decimals={2}
+                color="rgba(244,63,94,0.9)"
+              />
+              <MetricStatBox
+                label="MAE"
+                value={valMaeLatest?.value ?? null}
+                deltaPct={valMaeLatest?.deltaPct ?? null}
+                decimals={2}
+                color="rgba(250,204,21,0.9)"
+              />
+            </div>
+          )
         }
       >
         {!lossCurveLoaded ? (
@@ -512,38 +592,57 @@ export default function PerformancePage() {
             2026-08-05, when these per-epoch error metrics were added).
           </p>
         ) : (
-          <LineChart
-            series={[
-              {
-                name: "val_rmse",
-                data: valRmseSeries,
-                color: "rgba(244,63,94,0.9)",
-                fill: true,
-              },
-              {
-                name: "val_mae",
-                data: valMaeSeries,
-                color: "rgba(250,204,21,0.9)",
-                dashed: true,
-              },
-            ]}
-            labels={lossCurveLabels}
-            height={200}
-            formatTooltip={(label, values) => (
-              <div>
-                <div className="mb-1 text-white/50">Epoch {label}</div>
-                {values.map((v) => (
-                  <div key={v.name} className="flex items-center gap-2 py-0.5">
-                    <span className="h-1.5 w-1.5 rounded-full" style={{ background: v.color }} />
-                    <span className="text-white/65">{v.name}</span>
-                    <span className="ml-auto font-mono font-medium text-white">
-                      {v.value.toFixed(1)} MW
-                    </span>
-                  </div>
-                ))}
+          <>
+            <div className="mb-1 flex items-center justify-between text-[10px] text-white/40">
+              <span>MW</span>
+              <span>Epoch</span>
+            </div>
+            <LineChart
+              series={[
+                {
+                  name: "val_rmse",
+                  data: valRmseSeries,
+                  color: "rgba(244,63,94,0.9)",
+                  fill: true,
+                },
+                {
+                  name: "val_mae",
+                  data: valMaeSeries,
+                  color: "rgba(250,204,21,0.9)",
+                  fill: true,
+                },
+              ]}
+              labels={lossCurveLabels}
+              height={200}
+              formatTooltip={(label, values) => (
+                <div>
+                  <div className="mb-1 text-white/50">Epoch {label}</div>
+                  {values.map((v) => (
+                    <div key={v.name} className="flex items-center gap-2 py-0.5">
+                      <span className="h-1.5 w-1.5 rounded-full" style={{ background: v.color }} />
+                      <span className="text-white/65">{v.name}</span>
+                      <span className="ml-auto font-mono font-medium text-white">
+                        {v.value.toFixed(1)} MW
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            />
+            <div className="mt-3 flex items-center justify-between text-[11px] text-white/60">
+              <div className="flex items-center gap-4">
+                <span className="flex items-center gap-1.5">
+                  <span className="h-1.5 w-3 rounded-full" style={{ background: "rgba(244,63,94,0.9)" }} /> RMSE (MW)
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span className="h-1.5 w-3 rounded-full" style={{ background: "rgba(250,204,21,0.9)" }} /> MAE (MW)
+                </span>
               </div>
-            )}
-          />
+              <span className="flex items-center gap-1 text-white/35" title="Lower RMSE/MAE means smaller real forecast error">
+                Lower is better <Info className="h-3 w-3" />
+              </span>
+            </div>
+          </>
         )}
       </Card>
 
@@ -799,6 +898,64 @@ function Stat({ label, value }: { label: string; value: string }) {
     <div className="rounded-md border border-white/5 bg-white/[0.02] p-3">
       <div className="text-[9px] font-semibold uppercase tracking-wider text-white/40">{label}</div>
       <div className="mt-0.5 text-lg font-bold text-white">{value}</div>
+    </div>
+  );
+}
+
+/** Icon in a small colored rounded-square box, for a card title. */
+function TitleIcon({ icon: Icon }: { icon: React.ComponentType<{ className?: string }> }) {
+  return (
+    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-emerald-300/10">
+      <Icon className="h-3.5 w-3.5 text-emerald-200" />
+    </span>
+  );
+}
+
+/** "<Label> (latest)" stat box with a real per-epoch % change vs the
+ * previous epoch -- every metric this backs (loss/RMSE/MAE) is "lower is
+ * better", so a decrease is shown green/down and an increase red/up,
+ * the opposite convention a KPI like "revenue" would use. `deltaPct
+ * === null` (fewer than 2 real epochs to compare, or a same-value
+ * baseline) shows no arrow/delta rather than a fabricated 0%. */
+function MetricStatBox({
+  label,
+  value,
+  deltaPct,
+  decimals = 4,
+  color,
+}: {
+  label: string;
+  value: number | null;
+  deltaPct: number | null;
+  decimals?: number;
+  color: string;
+}) {
+  const improved = deltaPct !== null && deltaPct < 0;
+  const worsened = deltaPct !== null && deltaPct > 0;
+  return (
+    <div className="rounded-md border border-white/5 bg-white/[0.02] px-3 py-2">
+      <div className="flex items-center gap-1.5 text-[10px] font-medium text-white/50">
+        <span className="h-1.5 w-1.5 rounded-full" style={{ background: color }} />
+        {label} (latest)
+      </div>
+      <div className="mt-0.5 text-base font-bold text-white">
+        {value !== null ? value.toFixed(decimals) : "—"}
+      </div>
+      {deltaPct !== null && (
+        <div
+          className={cn(
+            "mt-0.5 flex items-center gap-0.5 text-[10px] font-medium",
+            improved ? "text-emerald-300" : worsened ? "text-rose-300" : "text-white/40",
+          )}
+        >
+          {improved ? (
+            <ArrowDownRight className="h-3 w-3" />
+          ) : worsened ? (
+            <ArrowUpRight className="h-3 w-3" />
+          ) : null}
+          {Math.abs(deltaPct).toFixed(1)}%
+        </div>
+      )}
     </div>
   );
 }

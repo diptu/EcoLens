@@ -26,6 +26,33 @@
  */
 import { FORECAST_API_URL } from "./env";
 
+// Plain `fetch()` has no default timeout -- if the backend process
+// hangs (not down, just unresponsive; happened for real during dev
+// server restarts) the browser's fetch promise never resolves or
+// rejects, so a page's own "Loading…" state can get stuck indefinitely
+// with no way to recover short of a manual page reload. Every fetch in
+// this file goes through this instead so a hung backend surfaces as a
+// real, catchable timeout error after `timeoutMs` (15s -- generous for
+// a live request, well under "the user thinks it's broken").
+async function fetchWithTimeout(
+  input: string,
+  init: RequestInit = {},
+  timeoutMs = 15000,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error(`Request timed out after ${timeoutMs / 1000}s: ${input}`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export type EmissionRegion = "NSW1" | "QLD1" | "VIC1" | "SA1" | "TAS1" | "WEM";
 export const ALL_EMISSION_REGIONS: EmissionRegion[] = ["NSW1", "QLD1", "VIC1", "SA1", "TAS1", "WEM"];
 
@@ -46,7 +73,7 @@ export type YtdEmissions = {
  * network failure so callers (e.g. the Executive Dashboard KPI) can
  * fall back to a placeholder rather than show a wrong number. */
 export async function fetchYtdEmissions(): Promise<YtdEmissions> {
-  const res = await fetch(`${FORECAST_API_URL}/emissions/ytd`);
+  const res = await fetchWithTimeout(`${FORECAST_API_URL}/emissions/ytd`);
   if (!res.ok) {
     throw new Error(`GET /v1/emissions/ytd failed: ${res.status}`);
   }
@@ -67,7 +94,7 @@ export type CurrentEmissions = {
  * region's own latest hour. Backs the "Carbon Intensity" KPI and the
  * "Emissions Snapshot" preview card. */
 export async function fetchCurrentEmissions(): Promise<CurrentEmissions> {
-  const res = await fetch(`${FORECAST_API_URL}/emissions/current`);
+  const res = await fetchWithTimeout(`${FORECAST_API_URL}/emissions/current`);
   if (!res.ok) {
     throw new Error(`GET /v1/emissions/current failed: ${res.status}`);
   }
@@ -107,7 +134,7 @@ export async function fetchEmissionsTimeseries(
 ): Promise<LiveEmissionsTimeseries> {
   const params = new URLSearchParams({ bucket, days: String(days) });
   if (region) params.set("region", region);
-  const res = await fetch(`${FORECAST_API_URL}/emissions/timeseries?${params}`);
+  const res = await fetchWithTimeout(`${FORECAST_API_URL}/emissions/timeseries?${params}`);
   if (!res.ok) {
     throw new Error(`GET /v1/emissions/timeseries failed: ${res.status}`);
   }
@@ -147,7 +174,7 @@ export async function fetchGenerationMix(
   if (sinceIso) params.set("since", sinceIso);
   if (untilIso) params.set("until", untilIso);
   const qs = params.toString();
-  const res = await fetch(`${FORECAST_API_URL}/generation-mix${qs ? `?${qs}` : ""}`);
+  const res = await fetchWithTimeout(`${FORECAST_API_URL}/generation-mix${qs ? `?${qs}` : ""}`);
   if (!res.ok) {
     throw new Error(`GET /v1/generation-mix failed: ${res.status}`);
   }
@@ -178,7 +205,7 @@ export async function fetchDemandSummary(
   if (sinceIso) params.set("since", sinceIso);
   if (untilIso) params.set("until", untilIso);
   const qs = params.toString();
-  const res = await fetch(`${FORECAST_API_URL}/demand/summary${qs ? `?${qs}` : ""}`);
+  const res = await fetchWithTimeout(`${FORECAST_API_URL}/demand/summary${qs ? `?${qs}` : ""}`);
   if (!res.ok) {
     throw new Error(`GET /v1/demand/summary failed: ${res.status}`);
   }
@@ -202,7 +229,7 @@ export type EmissionsForecast = {
  * server-side. Near-term only (the model's native horizon — a few
  * hours), not a multi-day projection. */
 export async function fetchEmissionsForecast(region?: string): Promise<EmissionsForecast> {
-  const res = await fetch(
+  const res = await fetchWithTimeout(
     `${FORECAST_API_URL}/emissions/forecast${region ? `?region=${region}` : ""}`,
   );
   if (!res.ok) {
@@ -237,7 +264,7 @@ export type EmissionsTrace = {
  * failure — same policy as every other emissions endpoint on this
  * page once wired to real data. */
 export async function fetchEmissionsTrace(region: string, limit = 5): Promise<EmissionsTrace> {
-  const res = await fetch(`${FORECAST_API_URL}/emissions/trace?region=${region}&limit=${limit}`);
+  const res = await fetchWithTimeout(`${FORECAST_API_URL}/emissions/trace?region=${region}&limit=${limit}`);
   if (!res.ok) {
     throw new Error(`GET /v1/emissions/trace failed: ${res.status}`);
   }
@@ -259,7 +286,7 @@ export type DemandForecast = {
  * server-side; see forecast-api's `_run_nem_aggregate_forecast`). Backs
  * the Executive Dashboard's "Demand Forecast Preview" card. */
 export async function fetchDemandForecast(region: string = "NEM"): Promise<DemandForecast> {
-  const res = await fetch(`${FORECAST_API_URL}/forecast?region=${region}`);
+  const res = await fetchWithTimeout(`${FORECAST_API_URL}/forecast?region=${region}`);
   if (!res.ok) {
     const body = await res.json().catch(() => null);
     const err = new Error(
@@ -292,7 +319,7 @@ export type ModelInfo = {
  * architecture specifics (layer count, hidden size, param count) with
  * only what the model registry actually reports. */
 export async function fetchModelInfo(): Promise<ModelInfo> {
-  const res = await fetch(`${FORECAST_API_URL}/model`);
+  const res = await fetchWithTimeout(`${FORECAST_API_URL}/model`);
   if (!res.ok) {
     throw new Error(`GET /v1/model failed: ${res.status}`);
   }
@@ -344,7 +371,7 @@ export async function fetchModelVersions(
   const url = modelName
     ? `${FORECAST_API_URL}/model/versions?model_name=${encodeURIComponent(modelName)}`
     : `${FORECAST_API_URL}/model/versions`;
-  const res = await fetch(url);
+  const res = await fetchWithTimeout(url);
   if (!res.ok) {
     const body = await res.json().catch(() => null);
     throw new Error(
@@ -367,7 +394,7 @@ export async function promoteModelVersion(
   stage: "Production" | "Staging" | "Archived",
   modelName?: string,
 ): Promise<ModelVersion> {
-  const res = await fetch(`${FORECAST_API_URL}/model/versions/${version}/promote`, {
+  const res = await fetchWithTimeout(`${FORECAST_API_URL}/model/versions/${version}/promote`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ stage, model_name: modelName ?? null }),
@@ -396,7 +423,7 @@ export async function deleteModelVersion(
   const url = modelName
     ? `${FORECAST_API_URL}/model/versions/${version}?model_name=${encodeURIComponent(modelName)}`
     : `${FORECAST_API_URL}/model/versions/${version}`;
-  const res = await fetch(url, { method: "DELETE" });
+  const res = await fetchWithTimeout(url, { method: "DELETE" });
   if (!res.ok) {
     const body = await res.json().catch(() => null);
     throw new Error(
@@ -441,7 +468,7 @@ export async function fetchLossCurve(
   const url = modelName
     ? `${FORECAST_API_URL}/model/versions/${encodeURIComponent(version)}/loss-curve?model_name=${encodeURIComponent(modelName)}`
     : `${FORECAST_API_URL}/model/versions/${encodeURIComponent(version)}/loss-curve`;
-  const res = await fetch(url);
+  const res = await fetchWithTimeout(url);
   if (!res.ok) {
     const body = await res.json().catch(() => null);
     throw new Error(
@@ -466,7 +493,7 @@ export type MlflowExperiment = {
  * experiments (`lstm_demand_v8_hptune`, `rf_baseline`, etc., none of
  * which correspond to anything real). */
 export async function fetchMlflowExperiments(): Promise<MlflowExperiment[]> {
-  const res = await fetch(`${FORECAST_API_URL}/model/experiments`);
+  const res = await fetchWithTimeout(`${FORECAST_API_URL}/model/experiments`);
   if (!res.ok) {
     const body = await res.json().catch(() => null);
     throw new Error(
@@ -493,7 +520,7 @@ export type MlflowRun = {
  * even though they share one experiment -- replaces `dashboards.
  * getMlflowRuns()`'s fabricated sample runs. */
 export async function fetchMlflowRuns(limit = 8): Promise<MlflowRun[]> {
-  const res = await fetch(`${FORECAST_API_URL}/model/mlflow-runs?limit=${limit}`);
+  const res = await fetchWithTimeout(`${FORECAST_API_URL}/model/mlflow-runs?limit=${limit}`);
   if (!res.ok) {
     const body = await res.json().catch(() => null);
     throw new Error(
@@ -526,11 +553,17 @@ export type TuneTriggerResult = {
  * 202-queued trigger the way `/model/train` is -- there's no separate
  * worker process this hands off to. */
 export async function triggerTune(regions?: string[]): Promise<TuneTriggerResult> {
-  const res = await fetch(`${FORECAST_API_URL}/model/tune`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ regions: regions ?? null }),
-  });
+  const res = await fetchWithTimeout(
+    `${FORECAST_API_URL}/model/tune`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ regions: regions ?? null }),
+    },
+    // Real, synchronous grid search -- ~75s measured, not a hung
+    // request; the default 15s timeout would wrongly abort this one.
+    180000,
+  );
   if (!res.ok) {
     const body = await res.json().catch(() => null);
     throw new Error(body?.error?.message ?? `POST /v1/model/tune failed: ${res.status}`);
@@ -552,7 +585,7 @@ export type TuningRun = {
  * itself with this tag) -- replaces the old mock's 4 hardcoded sample
  * trial rows. */
 export async function fetchTuningRuns(limit = 20): Promise<TuningRun[]> {
-  const res = await fetch(`${FORECAST_API_URL}/model/tuning-runs?limit=${limit}`);
+  const res = await fetchWithTimeout(`${FORECAST_API_URL}/model/tuning-runs?limit=${limit}`);
   if (!res.ok) {
     throw new Error(`GET /v1/model/tuning-runs failed: ${res.status}`);
   }
@@ -588,7 +621,7 @@ export async function fetchDrift(modelName?: string): Promise<DriftReport[]> {
   const url = modelName
     ? `${FORECAST_API_URL}/model/drift?model_name=${encodeURIComponent(modelName)}`
     : `${FORECAST_API_URL}/model/drift`;
-  const res = await fetch(url);
+  const res = await fetchWithTimeout(url);
   if (!res.ok) {
     const body = await res.json().catch(() => null);
     throw new Error(

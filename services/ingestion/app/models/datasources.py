@@ -125,7 +125,7 @@ CATALOG: tuple[DataSourceDef, ...] = (
             "BoM observations (temperature, radiation) — one station per "
             "NEM region plus WEM, 30-min."
         ),
-        url="http://www.bom.gov.au/climate/data/",
+        url="https://www.bom.gov.au/climate/data/",
         license="CC BY 3.0 AU",
         auth_type="api_key",
         cron="*/30 * * * *",

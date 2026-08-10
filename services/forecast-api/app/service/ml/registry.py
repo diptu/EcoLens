@@ -276,7 +276,13 @@ class RegionEvaluation:
     mape: float
     rmse: float
     coverage: float
+    interval_width: float
     n_origins: int
+    # `None` for a real evaluation run logged before these two metrics
+    # existed (`_EVAL_METRIC_SUFFIXES`/`ml/evaluate.py`'s own note) --
+    # not fabricated as 0/NaN.
+    mae: float | None = None
+    mean_error: float | None = None
 
 
 @dataclass
@@ -293,10 +299,13 @@ _EVAL_METRIC_SUFFIXES = (
     "eval_mape",
     "eval_rmse",
     "eval_coverage",
+    "eval_interval_width",
     "eval_n_origins",
     "eval_pinball_p10",
     "eval_pinball_p50",
     "eval_pinball_p90",
+    "eval_mae",
+    "eval_mean_error",
 )
 
 
@@ -340,11 +349,31 @@ def _parse_evaluation_metrics(metrics: dict[str, float]) -> list[RegionEvaluatio
                 mape=vals["eval_mape"],
                 rmse=vals.get("eval_rmse", float("nan")),
                 coverage=vals.get("eval_coverage", float("nan")),
+                interval_width=vals.get("eval_interval_width", float("nan")),
                 n_origins=int(vals["eval_n_origins"]),
+                mae=vals.get("eval_mae"),
+                mean_error=vals.get("eval_mean_error"),
             )
         )
     out.sort(key=lambda r: (r.region, r.candidate))
     return out
+
+
+def _evaluation_runs_filter(model_name: str, version: str) -> str:
+    """Shared MLflow filter-string builder for both `get_latest_evaluation`
+    and `get_evaluation_history` -- `model_name`/`version` come from a
+    caller-controlled path/query param, escaped before interpolation into
+    MLflow's filter-string DSL so a stray `'` can't break out of the
+    quoted literal (this only ever scopes a read against this service's
+    own MLflow instance, not a SQL injection into the real warehouse, but
+    there's no reason to build the filter string unescaped anyway)."""
+    safe_model_name = model_name.replace("'", "\\'")
+    safe_version = str(version).replace("'", "\\'")
+    return (
+        "tags.evaluation = 'true' and "
+        f"tags.evaluated_model = '{safe_model_name}' and "
+        f"tags.evaluated_version = '{safe_version}'"
+    )
 
 
 async def get_latest_evaluation(model_name: str, version: str) -> EvaluationSummary | None:
@@ -377,21 +406,9 @@ async def get_latest_evaluation(model_name: str, version: str) -> EvaluationSumm
         if not experiments:
             return None
         exp_ids = [exp.experiment_id for exp in experiments]
-        # `model_name`/`version` come from a caller-controlled path/query
-        # param -- escaped before interpolation into MLflow's filter-string
-        # DSL so a stray `'` can't break out of the quoted literal (this
-        # only ever scopes a read against this service's own MLflow
-        # instance, not a SQL injection into the real warehouse, but
-        # there's no reason to build the filter string unescaped anyway).
-        safe_model_name = model_name.replace("'", "\\'")
-        safe_version = str(version).replace("'", "\\'")
         runs = client.search_runs(
             exp_ids,
-            filter_string=(
-                "tags.evaluation = 'true' and "
-                f"tags.evaluated_model = '{safe_model_name}' and "
-                f"tags.evaluated_version = '{safe_version}'"
-            ),
+            filter_string=_evaluation_runs_filter(model_name, version),
             order_by=["start_time DESC"],
             max_results=1,
         )
@@ -407,6 +424,57 @@ async def get_latest_evaluation(model_name: str, version: str) -> EvaluationSumm
             n_origins=int(float(run.data.params.get("n_origins", 0))),
             regions=regions,
         )
+
+    return await asyncio.to_thread(_fetch)
+
+
+async def get_evaluation_history(
+    model_name: str, version: str, limit: int = 50
+) -> list[EvaluationSummary]:
+    """Every real walk-forward evaluation run ever logged for `version`
+    (`get_latest_evaluation`'s identical query, without the `max_results
+    =1`/`DESC`-only restriction), oldest first -- the real data source
+    for a genuine "has this version's accuracy drifted over time" signal
+    (dashboard Model Comparison page's "Stability" metric): compare the
+    earliest run's `eval_mape` against the most recent one's, computed by
+    the caller from real, independently-timestamped backtests, not a
+    fabricated single "drift score" stored here. `[]` (not `None`) when
+    `evaluate` has never been run for this version, or has only been run
+    once -- both real, honest states a drift comparison simply can't be
+    made from yet, same "empty is expected, not an error" convention
+    `get_latest_evaluation` already follows.
+    """
+
+    def _fetch() -> list[EvaluationSummary]:
+        tracking_uri = get_settings().mlflow_tracking_uri
+        mlflow.set_tracking_uri(tracking_uri)
+        client = MlflowClient(tracking_uri=tracking_uri)
+        experiments = client.search_experiments()
+        if not experiments:
+            return []
+        exp_ids = [exp.experiment_id for exp in experiments]
+        runs = client.search_runs(
+            exp_ids,
+            filter_string=_evaluation_runs_filter(model_name, version),
+            order_by=["start_time ASC"],
+            max_results=limit,
+        )
+        summaries = []
+        for run in runs:
+            regions = _parse_evaluation_metrics(dict(run.data.metrics))
+            if not regions:
+                continue
+            summaries.append(
+                EvaluationSummary(
+                    run_id=run.info.run_id,
+                    evaluated_at=datetime.fromtimestamp(
+                        run.info.start_time / 1000, tz=UTC
+                    ),
+                    n_origins=int(float(run.data.params.get("n_origins", 0))),
+                    regions=regions,
+                )
+            )
+        return summaries
 
     return await asyncio.to_thread(_fetch)
 

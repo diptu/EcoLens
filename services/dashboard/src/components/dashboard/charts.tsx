@@ -650,4 +650,195 @@ export function ProgressBar({
   );
 }
 
+/**
+ * RadarChart — N-axis polygon comparison (2-4 series). Every axis is
+ * expected to already be normalized to the same `maxValue`-scaled,
+ * higher-is-better range before it reaches this component (this chart
+ * has no opinion on units -- it draws whatever 0..maxValue numbers it's
+ * given). Same visual language as the rest of this file (PALETTE,
+ * framer-motion draw-on, prefers-reduced-motion aware, hover tooltip).
+ */
+export function RadarChart({
+  axes,
+  series,
+  size = 280,
+  maxValue = 100,
+  formatTooltip,
+}: {
+  axes: string[];
+  series: { name: string; color?: string; values: number[] }[];
+  size?: number;
+  maxValue?: number;
+  formatTooltip?: (
+    axis: string,
+    values: Array<{ name: string; value: number; color: string }>,
+  ) => React.ReactNode;
+}) {
+  const reduced = useReducedMotion();
+  const cx = size / 2;
+  const cy = size / 2;
+  const r = size / 2 - 46; // leaves room for axis labels
+  const n = axes.length;
+
+  const angleFor = (i: number) => (Math.PI * 2 * i) / n - Math.PI / 2;
+  const pointFor = (i: number, frac: number): [number, number] => {
+    const a = angleFor(i);
+    const rr = r * Math.max(0, Math.min(1, frac));
+    return [cx + rr * Math.cos(a), cy + rr * Math.sin(a)];
+  };
+
+  const ringFracs = [0.25, 0.5, 0.75, 1];
+
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const [hover, setHover] = useState<{ x: number; y: number; idx: number } | null>(null);
+
+  useChartHover(wrapRef, (x, y) => {
+    if (x < 0 || n < 1) {
+      setHover(null);
+      return;
+    }
+    const rect = wrapRef.current!.getBoundingClientRect();
+    const px = (x / rect.width) * size - cx;
+    const py = (y / rect.height) * size - cy;
+    let angle = Math.atan2(py, px) + Math.PI / 2;
+    if (angle < 0) angle += Math.PI * 2;
+    const idx = Math.round(angle / ((Math.PI * 2) / n)) % n;
+    setHover({ x, y, idx });
+  });
+
+  const axisLabel = hover ? axes[hover.idx] : null;
+  const axisValues = hover
+    ? series.map((s) => ({
+        name: s.name,
+        value: s.values[hover.idx] ?? 0,
+        color: s.color ?? PALETTE.lime,
+      }))
+    : [];
+
+  return (
+    <div
+      ref={wrapRef}
+      className="relative"
+      style={{ width: size, height: size }}
+      data-testid="radar-chart"
+    >
+      <svg
+        viewBox={`0 0 ${size} ${size}`}
+        className="h-full w-full"
+        style={{ overflow: "visible" }}
+      >
+        {/* Grid rings */}
+        {ringFracs.map((frac, ri) => (
+          <polygon
+            key={ri}
+            points={axes.map((_, i) => pointFor(i, frac).join(",")).join(" ")}
+            fill="none"
+            stroke="rgba(255,255,255,0.07)"
+            strokeWidth={1}
+          />
+        ))}
+        {/* Spokes */}
+        {axes.map((_, i) => {
+          const [x, y] = pointFor(i, 1);
+          return (
+            <line
+              key={i}
+              x1={cx}
+              y1={cy}
+              x2={x}
+              y2={y}
+              stroke="rgba(255,255,255,0.07)"
+              strokeWidth={1}
+            />
+          );
+        })}
+        {/* Axis labels -- anchor follows which side of center the label
+            falls on (a label sitting exactly on the horizontal axis
+            centered on its own point would overlap the series markers
+            at that same axis, since `text-anchor="middle"` extends the
+            word in both directions from the point). */}
+        {axes.map((label, i) => {
+          const [x, y] = pointFor(i, 1.28);
+          const dx = x - cx;
+          const anchor = Math.abs(dx) < 4 ? "middle" : dx > 0 ? "start" : "end";
+          return (
+            <text
+              key={i}
+              x={x}
+              y={y}
+              textAnchor={anchor}
+              dominantBaseline="middle"
+              fontSize="9.5"
+              fill="rgba(255,255,255,0.55)"
+            >
+              {label}
+            </text>
+          );
+        })}
+        {/* Series polygons */}
+        {series.map((s, si) => {
+          const color = s.color ?? PALETTE.lime;
+          const points = axes.map((_, i) => pointFor(i, (s.values[i] ?? 0) / maxValue));
+          const pointsAttr = points.map((p) => p.join(",")).join(" ");
+          return (
+            <g key={si}>
+              <m.polygon
+                points={pointsAttr}
+                fill={color.replace("0.95", "0.16")}
+                stroke={color}
+                strokeWidth={1.6}
+                strokeLinejoin="round"
+                initial={reduced ? false : { opacity: 0, scale: 0.85 }}
+                animate={{ opacity: 1, scale: 1 }}
+                style={{ transformOrigin: `${cx}px ${cy}px` }}
+                transition={{ duration: 0.6, delay: si * 0.1, ease: "easeOut" }}
+              />
+              {points.map((p, i) => (
+                <m.circle
+                  key={i}
+                  cx={p[0]}
+                  cy={p[1]}
+                  r={hover?.idx === i ? 4 : 2.75}
+                  fill={color}
+                  stroke="#0a1410"
+                  strokeWidth={1}
+                  initial={reduced ? false : { scale: 0, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  transition={{
+                    type: "spring",
+                    stiffness: 320,
+                    damping: 22,
+                    delay: 0.4 + si * 0.1 + i * 0.04,
+                  }}
+                />
+              ))}
+            </g>
+          );
+        })}
+      </svg>
+
+      {hover && axisLabel && (
+        <ChartTooltip pos={hover}>
+          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-white/50">
+            {axisLabel}
+          </div>
+          {formatTooltip ? (
+            formatTooltip(axisLabel, axisValues)
+          ) : (
+            axisValues.map((v, i) => (
+              <div key={i} className="flex items-center gap-2 py-0.5">
+                <span className="h-1.5 w-1.5 rounded-full" style={{ background: v.color }} />
+                <span className="text-white/65">{v.name}</span>
+                <span className="ml-auto font-mono font-medium text-white">
+                  {v.value.toFixed(1)}
+                </span>
+              </div>
+            ))
+          )}
+        </ChartTooltip>
+      )}
+    </div>
+  );
+}
+
 export { PALETTE };

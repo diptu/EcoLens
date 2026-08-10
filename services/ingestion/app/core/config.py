@@ -139,6 +139,20 @@ class Settings(BaseSettings):
     aemo_request_timeout_seconds: float = 10.0
     default_lookback_minutes: int = 30
 
+    # `app.core.response_cache` (2026-08-11, real fix for several
+    # endpoints confirmed live at 2-4s/call with no caching at all --
+    # not per-endpoint compute, just this service's own real Postgres
+    # round-trip cost paid fresh on every request). Short (5s): these
+    # back live status polling (backfill/run progress, `pollBackfill
+    # Summary`'s own 3s client poll interval) -- a bounded few-second
+    # staleness window is a real, disclosed tradeoff for guaranteeing a
+    # fast response, not fabricated data.
+    public_status_cache_ttl_seconds: int = 5
+    # Feature-selection results change only when a rebuild completes
+    # (minutes-to-hours apart in practice, not seconds) -- safe to cache
+    # much longer than the live-status endpoints above.
+    feature_rebuild_runs_cache_ttl_seconds: int = 60
+
     # JWT bearer auth, verification-only (`app.core.security`) -- this
     # service never issues tokens (no `meta.api_users`/`POST /v1/auth/
     # token` here, unlike data-pipeline): it only verifies tokens someone

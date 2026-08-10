@@ -24,14 +24,34 @@
 -- fueltechs, e.g. coal_black/coal_brown, gas_ccgt/gas_ocgt/gas_steam/
 -- gas_recip/gas_wcmg, into these during `_pivot_long_to_wide`) -- only
 -- solar (utility + rooftop) and "other" (hydro + biomass + distillate +
--- pumped_hydro + battery_discharge -- everything real generation that
--- isn't one of the 4 named buckets) need summing here. Matters for
--- regions like SA1 (zero coal) and TAS1 (~100% hydro, per services/
--- ingestion/TODO.md's live-verified per-region averages) -- without an
--- "other" catch-all, reconciling generation to demand would silently
--- smear their real hydro/storage share across coal/gas/wind/solar,
--- which don't represent it. `battery_charge_mw` (negative, load not
--- generation) is deliberately excluded from "other".
+-- pumped_hydro + battery_discharge + battery_charge -- everything real
+-- generation that isn't one of the 4 named buckets) need summing here.
+-- Matters for regions like SA1 (zero coal) and TAS1 (~100% hydro, per
+-- services/ingestion/TODO.md's live-verified per-region averages) --
+-- without an "other" catch-all, reconciling generation to demand would
+-- silently smear their real hydro/storage share across coal/gas/wind/
+-- solar, which don't represent it.
+--
+-- `battery_charge_mw` IS included here (fixed 2026-08-10, was
+-- previously excluded on the assumption it's "negative, load not
+-- generation" -- real, confirmed wrong: `ingest_openelectricity.py`'s
+-- `_FUEL_COLUMNS` stores it as a positive magnitude, and
+-- `total_generation_mw` immediately below is ITSELF `sum(_FUEL_COLUMNS)`
+-- in our own raw ingestion, `battery_charge_mw` included -- not an
+-- independently-reported OpenElectricity figure the way the two
+-- `assert_generation_mix_sums_near_total`/comments here previously
+-- assumed. Excluding it from "other" while `total_generation_mw`
+-- included it made every row with real battery-charging activity fail
+-- that reconciliation test by exactly the charging amount -- a
+-- persistent, deterministic gap (confirmed live: 8,425 real rows
+-- failing on every `dbt build` attempt since at least 2026-08-10
+-- 06:30, silently skipping `fct_energy_demand`'s rebuild every time),
+-- not the "minor provider-side rounding" the test's own comment
+-- assumed. This bucket is a demand-forecast feature, not the carbon/
+-- emissions pipeline (that's `int_fuel_emissions`/`fct_carbon_intensity`,
+-- untouched by this), so folding charging load into it here doesn't
+-- affect any real emissions number shown anywhere in this platform.
+--
 -- Same nullability contract as total_renewable_mw immediately below:
 -- null only when total_generation_mw itself is null (no mix data for
 -- that row at all), 0-substituted per missing individual fuel reading
@@ -136,6 +156,7 @@ generation as (
                 + coalesce(distillate_mw, 0)
                 + coalesce(pumped_hydro_mw, 0)
                 + coalesce(battery_discharge_mw, 0)
+                + coalesce(battery_charge_mw, 0)
         end as other_mw
     from {{ ref('stg_openelectricity_mix') }}
 )
@@ -204,5 +225,12 @@ left join lateral (
     limit 1
 ) g on true
 {% if is_incremental() %}
-where d.ts > (select coalesce(max(ts), '1900-01-01'::timestamptz) from {{ this }}) - interval '2 days'
+-- `backfill_lookback_days` (default 2, matching the prior hardcoded
+-- window) -- a `dbt build --vars '{backfill_lookback_days: N}'` widens
+-- this one run's re-processed trailing window so a real historical
+-- backfill's newly-landed `raw.*` rows (older than the normal 2-day
+-- trailing window) actually reach this mart, without a `--full-refresh`
+-- (which would drop this model's own accumulated history older than
+-- `raw.*`'s 60-day retention -- see this file's own header comment).
+where d.ts > (select coalesce(max(ts), '1900-01-01'::timestamptz) from {{ this }}) - interval '{{ var("backfill_lookback_days", 2) }} days'
 {% endif %}

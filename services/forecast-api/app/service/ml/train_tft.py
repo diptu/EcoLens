@@ -365,6 +365,12 @@ def train_tft_model(
             "test_coverage_calibrated": empirical_coverage(
                 y_test, lo_calibrated, hi_calibrated
             ),
+            # Same real interval-width signal `ml/train.py`'s identical
+            # block logs -- see its own comment for why.
+            "test_interval_width_raw_mw": float(np.mean(p90_test - p10_test)),
+            "test_interval_width_calibrated_mw": float(
+                np.mean(hi_calibrated - lo_calibrated)
+            ),
         }
 
     return TrainResult(

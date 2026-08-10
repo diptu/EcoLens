@@ -52,6 +52,18 @@ class Settings(BaseSettings):
     model_reload_interval_seconds: float = 60.0
 
     forecast_cache_ttl_seconds: int = 60
+    # `GET /v1/model/drift` -- `compute_drift` re-scans two chronological
+    # slices of real training data per call (confirmed live: 7-8s,
+    # uncached, before 2026-08-11). Real feature distributions don't
+    # meaningfully shift on a sub-minute cadence, so 5 minutes is honest,
+    # not stale in any way the dashboard's own drift alert cares about.
+    model_drift_cache_ttl_seconds: int = 300
+
+    # `app.service.cache_warmer` -- both comfortably shorter than the
+    # respective TTL above, so a background refresh always lands before
+    # a real request could ever hit an expired (cold) entry.
+    emissions_forecast_warmer_interval_seconds: float = 45.0
+    model_drift_warmer_interval_seconds: float = 240.0
 
     # `TODO.md` Forecasting Phase 4's "Self-Correction & Fallback
     # Mechanism" -- `service/ml/forecast_reconciliation.py`'s background

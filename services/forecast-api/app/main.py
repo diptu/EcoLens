@@ -24,6 +24,7 @@ from app.core.middleware import CacheControlMiddleware
 from app.core.tracing import configure_tracing
 from app.db.session import dispose, get_engine, get_session
 from app.db.redis import get_redis
+from app.service.cache_warmer import run_emissions_forecast_warmer, run_model_drift_warmer
 from app.service.ml.energy_registry import EnergyModelRegistry
 from app.service.ml.forecast_reconciliation import watch_and_reconcile
 from app.service.ml.registry import ModelRegistry
@@ -105,6 +106,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
     )
 
+    # `app.service.cache_warmer` -- keeps the two most expensive cached
+    # endpoints (`GET /v1/emissions/forecast?region=NEM`, `GET /v1/model/
+    # drift`) perpetually warm so a real user request never has to pay
+    # their real ~10-14s cold-compute cost itself (see that module's own
+    # docstring for the full reasoning).
+    emissions_warmer_task = asyncio.create_task(
+        run_emissions_forecast_warmer(
+            get_redis(),
+            get_session,
+            registry,
+            settings,
+            settings.emissions_forecast_warmer_interval_seconds,
+        )
+    )
+    drift_warmer_task = asyncio.create_task(
+        run_model_drift_warmer(
+            get_redis(), settings, settings.model_drift_warmer_interval_seconds
+        )
+    )
+
     logger.info(
         "forecast_api_startup",
         model_loaded=registry.bundle is not None,
@@ -116,6 +137,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         watch_task.cancel()
         energy_watch_task.cancel()
         reconcile_task.cancel()
+        emissions_warmer_task.cancel()
+        drift_warmer_task.cancel()
         await dispose()
         logger.info("forecast_api_shutdown")
 

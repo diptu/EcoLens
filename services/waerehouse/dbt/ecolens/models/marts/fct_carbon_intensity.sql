@@ -38,7 +38,15 @@
 with detail as (
     select * from {{ ref('int_carbon_intensity') }}
     {% if is_incremental() %}
-    where ts > (select coalesce(max(hour), '1900-01-01'::timestamptz) from {{ this }}) - interval '2 days'
+    -- Same `backfill_lookback_days` var as `int_demand_with_weather`/
+    -- `fct_energy_demand`'s own output filters (their header comments
+    -- have the full reasoning) -- a `dbt build --vars
+    -- '{backfill_lookback_days: N}'` widens this one run's reprocessed
+    -- window so a real historical backfill upstream in `raw.*` actually
+    -- reaches this mart, without a `--full-refresh` (which would drop
+    -- this model's own accumulated history older than `raw.*`'s
+    -- retention -- see `fct_energy_demand.sql`'s header comment).
+    where ts > (select coalesce(max(hour), '1900-01-01'::timestamptz) from {{ this }}) - interval '{{ var("backfill_lookback_days", 2) }} days'
     {% endif %}
 ),
 

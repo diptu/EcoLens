@@ -688,6 +688,18 @@ def train_model(
             "test_coverage_calibrated": empirical_coverage(
                 y_test, lo_calibrated, hi_calibrated
             ),
+            # Real "Consistency" signal (2026-08-10, dashboard Model
+            # Comparison page's "Interval Width" metric) -- mean MW-unit
+            # P10-P90 width on the test split, both before and after
+            # conformal calibration. `_raw` is the model's own quantile
+            # heads; `_calibrated` is what a real forecast actually
+            # serves (`ml/evaluate.py`'s `EvaluationReport.
+            # mean_interval_width` is this same real quantity computed
+            # over the harder walk-forward backtest instead).
+            "test_interval_width_raw_mw": float(np.mean(p90_test - p10_test)),
+            "test_interval_width_calibrated_mw": float(
+                np.mean(hi_calibrated - lo_calibrated)
+            ),
         }
 
     return TrainResult(

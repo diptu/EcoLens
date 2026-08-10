@@ -298,6 +298,58 @@ export async function fetchDemandForecast(region: string = "NEM"): Promise<Deman
   return res.json();
 }
 
+/** Shape of forecast-api's `RecentBacktestResponse`
+ * (`GET /v1/forecast/recent-actual-vs-predicted`). `actual` is `null` for
+ * a real step the warehouse hasn't landed demand for yet (a genuine gap,
+ * not an error) -- the predicted fields are still real for that step. */
+export type RecentBacktest = {
+  region: string;
+  model: string;
+  generated_at: string;
+  horizon_hours: number;
+  interval: string;
+  days_requested: number;
+  points: {
+    ts: string;
+    actual: number | null;
+    p10: number;
+    p50: number;
+    p90: number;
+    step_hours: number;
+    unit: "MW";
+  }[];
+};
+
+/** Live call to `GET /v1/forecast/recent-actual-vs-predicted` — a real
+ * walk-forward re-forecast of the currently-served model against real
+ * actual demand for roughly the last `days` days, ending at the model's
+ * own most recent real origin (see forecast-api's `evaluate_recent_
+ * actual_vs_predicted` for the full reasoning). Built on demand from
+ * real history every call (nothing in this platform persists a rolling
+ * history of past predictions to read back instead) -- the NEM aggregate
+ * in particular runs this 5 times server-side (once per NEM region) and
+ * sums, so it's real but not fast; a generous timeout here, not
+ * `fetchWithTimeout`'s normal 15s default. */
+export async function fetchRecentBacktest(
+  region: string = "NEM",
+  days: number = 7,
+): Promise<RecentBacktest> {
+  const res = await fetchWithTimeout(
+    `${FORECAST_API_URL}/forecast/recent-actual-vs-predicted?region=${region}&days=${days}`,
+    {},
+    45000,
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    const err = new Error(
+      body?.error?.message ?? `GET /v1/forecast/recent-actual-vs-predicted failed: ${res.status}`,
+    );
+    (err as Error & { code?: string }).code = body?.error?.code;
+    throw err;
+  }
+  return res.json();
+}
+
 /** Shape of forecast-api's `ModelInfo` (`GET /v1/model`). */
 export type ModelInfo = {
   status: "loaded" | "not_loaded";
@@ -484,7 +536,19 @@ export type RegionEvaluation = {
   mape: number;
   rmse: number;
   coverage: number;
+  /** Real mean P10-P90 width (MW) over this candidate's scored origins
+   * (`ml/evaluate.py`'s `EvaluationReport.mean_interval_width`, added
+   * 2026-08-10) -- the Model Comparison page's "Consistency" metric. */
+  interval_width: number;
   n_origins: number;
+  /** Real MAE (MW). `null` for an evaluation run logged before this
+   * field existed (`ml/evaluate.py`'s `EvaluationReport.mae`, added
+   * 2026-08-10) -- not fabricated as 0. */
+  mae: number | null;
+  /** Real mean signed error / bias (MW, `p50 - actual`) -- positive
+   * means this candidate tends to over-forecast, negative under-forecast.
+   * Same `null`-for-pre-existing-runs caveat as `mae`. */
+  mean_error: number | null;
 };
 
 export type EvaluationSummary = {
@@ -520,6 +584,41 @@ export async function fetchModelEvaluation(
     const body = await res.json().catch(() => null);
     throw new Error(
       body?.error?.message ?? `GET /v1/model/versions/${version}/evaluation failed: ${res.status}`,
+    );
+  }
+  return res.json();
+}
+
+export type EvaluationHistory = {
+  model_name: string;
+  version: string;
+  runs: EvaluationSummary[];
+};
+
+/** Live call to `GET /v1/model/versions/{version}/evaluation-history` --
+ * every real walk-forward evaluation run ever logged for `version`,
+ * oldest first (`ml/registry.py`'s `get_evaluation_history`, added
+ * 2026-08-10). Unlike `fetchModelEvaluation` (latest only), this is the
+ * real time series a genuine "has this version's real accuracy drifted
+ * since it was last evaluated" comparison needs -- the Model Comparison
+ * page's "Stability (Performance Drift)" metric is computed client-side
+ * from this (earliest vs. latest run's `mape`), not a fabricated single
+ * score. `runs: []` (not an error) when `evaluate` has never been run
+ * for this version, or only once -- both real states a drift comparison
+ * simply can't be made from yet. */
+export async function fetchModelEvaluationHistory(
+  version: string,
+  modelName?: string,
+): Promise<EvaluationHistory> {
+  const url = modelName
+    ? `${FORECAST_API_URL}/model/versions/${encodeURIComponent(version)}/evaluation-history?model_name=${encodeURIComponent(modelName)}`
+    : `${FORECAST_API_URL}/model/versions/${encodeURIComponent(version)}/evaluation-history`;
+  const res = await fetchWithTimeout(url);
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(
+      body?.error?.message ??
+        `GET /v1/model/versions/${version}/evaluation-history failed: ${res.status}`,
     );
   }
   return res.json();

@@ -57,6 +57,7 @@ from app.service.ml.features import (
     FEATURE_COLUMNS,
     TARGET_COLUMN,
     add_calendar_features,
+    add_region_dummies,
     build_features,
 )
 from app.service.ml.train import mape
@@ -235,6 +236,15 @@ class TFTForecaster:
         future_df = add_calendar_features(
             pd.DataFrame({"ts": future_ts, "region": region}), holidays=self.holidays
         )
+        # `DECODER_COLUMNS` (`KNOWN_FUTURE_COLUMNS`) includes the region
+        # one-hot block (`ml/features.py`'s `_REGION_COLUMNS`) alongside
+        # the calendar block `add_calendar_features` alone produces --
+        # without this, `future_df[list(DECODER_COLUMNS)]` below raised a
+        # real `KeyError` on every actual `TFTForecaster.predict` call
+        # (confirmed live, 2026-08-10: `evaluate-tft` failed 100% of the
+        # time with "['region_NSW1', ...] not in index"), not something
+        # data volume or region coverage could ever fix.
+        future_df = add_region_dummies(future_df)
         x_dec = future_df[list(DECODER_COLUMNS)].to_numpy(dtype=np.float32)
         if np.isnan(x_dec).any():
             return nan_result
@@ -274,6 +284,27 @@ class EvaluationReport:
     pinball_loss_50: float
     pinball_loss_90: float
     empirical_coverage: float
+    # Real "Consistency" signal (2026-08-10, dashboard Model Comparison
+    # page): mean `p90 - p10` in MW over every scored origin -- the
+    # actual width of the interval this candidate served, whichever
+    # candidate it is (a `_raw` forecaster's uncalibrated width, a
+    # calibrated one's post-conformal width, or the seasonal baseline's).
+    # Narrower for the same coverage is genuinely "more confident," which
+    # is what a real Consistency comparison between architectures needs
+    # -- nothing here approximates or fabricates it from another metric.
+    mean_interval_width: float
+    # `mae`/`mean_error` (2026-08-10, dashboard Model Performance page):
+    # real MAE (mean absolute error, MW) and real ME/bias (mean signed
+    # error, `p50 - actual`, MW -- positive means this candidate tends to
+    # over-forecast, negative under-forecast) over every scored origin.
+    # Same `pred50`/`actual` arrays `rmse` already reduces, just a
+    # different real reduction -- not a second, separately-fetched
+    # metric. `rmse`/`mape` alone can't answer "is this candidate
+    # systematically biased" (RMSE is magnitude-only, squared-error-
+    # weighted; MAPE is magnitude-only, percentage-scaled) -- ME is the
+    # one real signed signal for that.
+    mae: float
+    mean_error: float
 
     def as_mlflow_metrics(self) -> dict[str, float]:
         return {
@@ -283,7 +314,10 @@ class EvaluationReport:
             "eval_pinball_p50": self.pinball_loss_50,
             "eval_pinball_p90": self.pinball_loss_90,
             "eval_coverage": self.empirical_coverage,
+            "eval_interval_width": self.mean_interval_width,
             "eval_n_origins": float(self.n_origins),
+            "eval_mae": self.mae,
+            "eval_mean_error": self.mean_error,
         }
 
 
@@ -332,6 +366,9 @@ def evaluate_walk_forward(
             pinball_loss_50=float("nan"),
             pinball_loss_90=float("nan"),
             empirical_coverage=float("nan"),
+            mean_interval_width=float("nan"),
+            mae=float("nan"),
+            mean_error=float("nan"),
         )
 
     span = last_valid_origin - first_valid_origin + 1
@@ -369,6 +406,9 @@ def evaluate_walk_forward(
             pinball_loss_50=float("nan"),
             pinball_loss_90=float("nan"),
             empirical_coverage=float("nan"),
+            mean_interval_width=float("nan"),
+            mae=float("nan"),
+            mean_error=float("nan"),
         )
 
     pred10 = np.stack(pred10s)
@@ -387,7 +427,96 @@ def evaluate_walk_forward(
         pinball_loss_50=_pinball_loss(pred50, actual, 0.5),
         pinball_loss_90=_pinball_loss(pred90, actual, 0.9),
         empirical_coverage=empirical_coverage(actual, pred10, pred90),
+        mean_interval_width=float(np.mean(pred90 - pred10)),
+        mae=float(np.mean(np.abs(pred50 - actual))),
+        mean_error=float(np.mean(pred50 - actual)),
     )
+
+
+@dataclass
+class RecentBacktestPoint:
+    ts: pd.Timestamp
+    actual: float | None
+    p10: float
+    p50: float
+    p90: float
+    #: Real, not derived client-side -- 1-indexed hours-ahead-of-its-own-
+    #: origin this point was predicted at (the horizon step of the real
+    #: walk-forward window it came from). Lets a caller build a genuine
+    #: "accuracy by horizon" breakdown (error at 1h-ahead vs. 24h-ahead
+    #: vs. 48h-ahead) from real per-step data instead of only the
+    #: aggregate `evaluate_walk_forward` report.
+    step_hours: int
+
+
+def evaluate_recent_actual_vs_predicted(
+    forecaster: Forecaster,
+    df: pd.DataFrame,
+    horizon: int,
+    *,
+    days_back: float = 7,
+    min_history: int = 1,
+) -> list[RecentBacktestPoint]:
+    """Real walk-forward re-forecast covering roughly the last `days_back`
+    days of `df` (`build_features`'s output for ONE region), ending at
+    the last real origin `df` actually has -- same "as fresh as the real
+    data allows, never pretend to reach wall-clock now" honesty
+    `RealEmissionsTrend`'s (services/dashboard) forecast band already
+    follows for the live forecast.
+
+    Unlike `evaluate_walk_forward` just above (one aggregate MAPE/RMSE/
+    coverage report), this returns the real per-step `(ts, actual, p10,
+    p50, p90)` tuples a chart needs. Origins walk backward from the most
+    recent valid one in non-overlapping `horizon`-sized windows -- so the
+    predicted curve is one continuous real line ending at the same real
+    point the actual line does, not `evaluate_walk_forward`'s evenly-
+    spread sampling across the *whole* history (which would leave real
+    gaps between scored windows, wrong for a continuous trend chart).
+
+    A step whose real actual value is missing (a genuine warehouse gap --
+    same real-gap reality this platform already discloses elsewhere
+    rather than papering over) still keeps its real predicted point;
+    `actual` is `None` for that one step, not the whole origin dropped --
+    a partial real gap shouldn't blank out days of real, valid
+    predictions around it.
+    """
+    df = df.sort_values("ts").reset_index(drop=True)
+    n = len(df)
+    last_valid_origin = n - horizon - 1
+    first_valid_origin = min_history - 1
+    if last_valid_origin < first_valid_origin:
+        return []
+
+    cutoff_ts = df["ts"].iloc[-1] - pd.Timedelta(days=days_back)
+    origins: list[int] = []
+    o = last_valid_origin
+    while o >= first_valid_origin:
+        origins.append(o)
+        if df["ts"].iloc[o] <= cutoff_ts:
+            break
+        o -= horizon
+    origins.sort()
+
+    points: list[RecentBacktestPoint] = []
+    for origin in origins:
+        history = df.iloc[: origin + 1]
+        p10, p50, p90 = forecaster.predict(history, horizon)
+        if np.isnan(p50).any():
+            continue
+        window = df.iloc[origin + 1 : origin + 1 + horizon]
+        for i, (_, row) in enumerate(window.iterrows()):
+            actual = row[TARGET_COLUMN]
+            points.append(
+                RecentBacktestPoint(
+                    ts=row["ts"],
+                    actual=None if pd.isna(actual) else float(actual),
+                    p10=float(p10[i]),
+                    p50=float(p50[i]),
+                    p90=float(p90[i]),
+                    step_hours=i + 1,
+                )
+            )
+    return points
 
 
 def _infer_period_steps(df: pd.DataFrame, ts_col: str = "ts") -> int:

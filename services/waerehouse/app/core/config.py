@@ -68,6 +68,16 @@ class Settings(BaseSettings):
         default=None, validation_alias="RAW_MARTS_DATABASE_URL"
     )
 
+    # Redis -- new 2026-08-11 (`app.core.response_cache`), this service
+    # previously had no caching layer at all (RabbitMQ-only, unlike
+    # `services/ingestion`'s Redis-backed circuit breaker/backfill lock).
+    # Same shared local instance the other two services already use, same
+    # decomposed-fields-with-URL-override shape as `database_url` below.
+    redis_url_env: str | None = Field(default=None, validation_alias="REDIS_URL")
+    redis_host: str = "localhost"
+    redis_port: int = 6379
+    redis_db: int = 0
+
     # How long `raw_marts.*` rows stay in the *primary* database before
     # being archived to `raw_marts_database_url` and pruned. Defaults to
     # `retention_days` for consistency with `raw.*`'s own window, but
@@ -75,6 +85,15 @@ class Settings(BaseSettings):
     # individually (aggregated, not raw per-reading) -- an operator may
     # reasonably want to keep more days of marts locally than raw.
     marts_local_retention_days: int = 60
+
+    # `app.core.response_cache` (2026-08-11, real fix: `GET /v1/dbt/
+    # build/last`/`/build/runs` confirmed live at ~2.3-2.7s/call with no
+    # caching at all -- this service's own real Postgres round-trip
+    # cost, not per-endpoint compute). Short: these back the dashboard's
+    # live dbt-build-status polling -- a bounded few-second staleness
+    # window is a real, disclosed tradeoff for a fast response, not
+    # fabricated data.
+    dbt_build_status_cache_ttl_seconds: int = 5
 
     # RabbitMQ (Phase 1's "RabbitMQ Consumer Framework") -- consume-only,
     # the mirror image of ingestion's publish-only `rabbitmq_url`/
@@ -232,6 +251,18 @@ class Settings(BaseSettings):
             f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
+
+    @property
+    def redis_url(self) -> str:
+        """`redis://` DSN for the async Redis client.
+
+        Uses `REDIS_URL` verbatim if set, else assembles one from the
+        decomposed `redis_*` fields -- same shape as `database_url` above
+        and as `services/ingestion`'s identical property.
+        """
+        if self.redis_url_env:
+            return self.redis_url_env
+        return f"redis://{self.redis_host}:{self.redis_port}/{self.redis_db}"
 
     @property
     def raw_marts_archive_configured(self) -> bool:

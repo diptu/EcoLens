@@ -26,7 +26,9 @@
 with detail as (
     select * from {{ ref('int_fuel_emissions') }}
     {% if is_incremental() %}
-    where ts > (select coalesce(max(hour), '1900-01-01'::timestamptz) from {{ this }}) - interval '2 days'
+    -- Same `backfill_lookback_days` var as the other marts' own output
+    -- filters -- `fct_energy_demand.sql`'s header has the full reasoning.
+    where ts > (select coalesce(max(hour), '1900-01-01'::timestamptz) from {{ this }}) - interval '{{ var("backfill_lookback_days", 2) }} days'
     {% endif %}
 ),
 

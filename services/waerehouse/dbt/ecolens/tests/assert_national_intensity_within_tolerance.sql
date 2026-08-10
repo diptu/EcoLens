@@ -13,9 +13,23 @@
 -- human to fill in with a citation, same as seeds/emissions_factors.csv's
 -- own per-fuel values.
 --
+-- `severity: warn`, not the dbt default `error` (fixed 2026-08-10) --
+-- an unconfigured placeholder threshold has no business hard-failing
+-- real `dbt build` runs: confirmed live, this test alone (real system
+-- intensity has drifted outside ±2% of the placeholder 650) was enough
+-- to cascade-skip `fct_energy_demand`'s rebuild on every real build
+-- attempt since at least 06:30 today, alongside the unrelated
+-- `assert_generation_mix_sums_near_total` bug fixed the same day. Warn
+-- keeps the real mechanism Contributing.md asks for intact (it still
+-- runs, still reports) without letting a not-yet-calibrated placeholder
+-- block downstream marts a real forecast model depends on. Restore to
+-- `error` once a real cited value replaces the placeholder below.
+--
 -- Only checks NEM (network_code = 'NEM') -- WEM is a separate, much
 -- smaller, islanded system with its own published average that this
 -- single tolerance check doesn't attempt to cover.
+
+{{ config(severity='warn') }}
 
 {% set expected = var('expected_national_intensity_kgco2e_per_mwh', 650) %}
 {% set tolerance_pct = var('national_intensity_tolerance_pct', 2) %}

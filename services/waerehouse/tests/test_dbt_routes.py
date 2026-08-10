@@ -70,6 +70,29 @@ def _override_db(client, fake_db):
     client.app.dependency_overrides[deps.get_db] = fake_get_db
 
 
+class _FakeRedis:
+    """Per-test-isolated fake -- `GET /v1/dbt/build/last`/`/build/runs`
+    gained real caching 2026-08-11 (`app.core.response_cache`, this
+    service's first use of Redis at all). Without this override these
+    tests fall through to the real shared local Redis, which both leaks
+    a cached response across tests and hits a real network client tied
+    to a since-closed event loop between tests (same fix `services/
+    forecast-api`'s equivalent cached-endpoint tests already apply)."""
+
+    def __init__(self):
+        self.store: dict[str, str] = {}
+
+    async def get(self, key):
+        return self.store.get(key)
+
+    async def set(self, key, value, ex=None):
+        self.store[key] = value
+
+
+def _override_redis(client):
+    client.app.dependency_overrides[deps.get_redis_client] = lambda: _FakeRedis()
+
+
 async def _fake_publish_triggers(*, triggered_by):
     return []
 
@@ -234,6 +257,7 @@ class TestLastDbtBuild:
         }
         fake_db = _FakeDb(select_row=row)
         _override_db(client, fake_db)
+        _override_redis(client)
 
         response = client.get("/v1/dbt/build/last")
 
@@ -245,11 +269,13 @@ class TestLastDbtBuild:
     def test_returns_null_when_no_build_has_ever_run(self, client):
         fake_db = _FakeDb(select_row=None)
         _override_db(client, fake_db)
+        _override_redis(client)
 
         response = client.get("/v1/dbt/build/last")
 
         assert response.status_code == 200
         assert response.json() is None
+        client.app.dependency_overrides.clear()
 
 
 class TestListDbtBuildRuns:
@@ -273,6 +299,7 @@ class TestListDbtBuildRuns:
         rows = [self._row(id="run-2", status="running", finished_at=None), self._row(id="run-1")]
         fake_db = _FakeDb(select_rows=rows)
         _override_db(client, fake_db)
+        _override_redis(client)
 
         response = client.get("/v1/dbt/build/runs")
 
@@ -285,6 +312,7 @@ class TestListDbtBuildRuns:
     def test_empty_before_any_build_has_ever_run(self, client):
         fake_db = _FakeDb(select_rows=[])
         _override_db(client, fake_db)
+        _override_redis(client)
 
         response = client.get("/v1/dbt/build/runs")
 
@@ -295,6 +323,7 @@ class TestListDbtBuildRuns:
     def test_limit_query_param_is_forwarded(self, client):
         fake_db = _FakeDb(select_rows=[self._row()])
         _override_db(client, fake_db)
+        _override_redis(client)
 
         response = client.get("/v1/dbt/build/runs?limit=5")
 
@@ -306,10 +335,10 @@ class TestListDbtBuildRuns:
     def test_requires_no_auth(self, client):
         fake_db = _FakeDb(select_rows=[])
         _override_db(client, fake_db)
+        _override_redis(client)
 
         response = client.get("/v1/dbt/build/runs")
 
         assert response.status_code != 401
         assert response.status_code != 403
-        client.app.dependency_overrides.clear()
         client.app.dependency_overrides.clear()

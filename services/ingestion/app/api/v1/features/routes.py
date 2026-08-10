@@ -16,11 +16,14 @@ reasoning `GET /v1/dbt/build/runs` uses.
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
+from redis.asyncio import Redis
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_db
+from app.api.v1.deps import get_app_settings, get_db, get_redis_client
+from app.core.config import Settings
 from app.core.errors import ApiError
+from app.core.response_cache import cached_response
 from app.schemas.features import (
     FeatureRebuildRunOut,
     FeatureRebuildRunsListResponse,
@@ -34,6 +37,7 @@ router = APIRouter(prefix="/v1/features", tags=["features"])
 @router.post("/rebuild", response_model=FeatureRebuildTriggerResponse)
 async def trigger_feature_rebuild(
     db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis_client),
 ) -> FeatureRebuildTriggerResponse:
     try:
         result = await rebuild_features(db, triggered_by="dashboard")
@@ -54,6 +58,11 @@ async def trigger_feature_rebuild(
         )
     )
     run_id = str(rows.scalar_one())
+    # A real rebuild just landed a real new row -- invalidate rather than
+    # let `GET /rebuild/runs`' real cache (below) keep serving the
+    # pre-rebuild list for up to its own TTL.
+    async for key in redis.scan_iter(match="ingestion:feature_rebuild_runs:v1:*"):
+        await redis.delete(key)
     return FeatureRebuildTriggerResponse(
         run_id=run_id, status="success", n_selected=len(result["selected_features"])
     )
@@ -63,16 +72,27 @@ async def trigger_feature_rebuild(
 async def list_feature_rebuild_runs(
     limit: int = Query(default=20, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis_client),
+    settings: Settings = Depends(get_app_settings),
 ) -> FeatureRebuildRunsListResponse:
-    result = await db.execute(
-        text(
-            "SELECT id, triggered_by, status, started_at, finished_at, "
-            "n_selected, result, error "
-            "FROM meta._feature_selection_log ORDER BY started_at DESC LIMIT :limit"
-        ),
-        {"limit": limit},
-    )
-    rows = result.mappings().all()
-    return FeatureRebuildRunsListResponse(
-        data=[FeatureRebuildRunOut(**{**dict(r), "id": str(r["id"])}) for r in rows]
+    async def _load() -> FeatureRebuildRunsListResponse:
+        result = await db.execute(
+            text(
+                "SELECT id, triggered_by, status, started_at, finished_at, "
+                "n_selected, result, error "
+                "FROM meta._feature_selection_log ORDER BY started_at DESC LIMIT :limit"
+            ),
+            {"limit": limit},
+        )
+        rows = result.mappings().all()
+        return FeatureRebuildRunsListResponse(
+            data=[FeatureRebuildRunOut(**{**dict(r), "id": str(r["id"])}) for r in rows]
+        )
+
+    return await cached_response(
+        redis,
+        f"ingestion:feature_rebuild_runs:v1:{limit}",
+        settings.feature_rebuild_runs_cache_ttl_seconds,
+        FeatureRebuildRunsListResponse,
+        _load,
     )

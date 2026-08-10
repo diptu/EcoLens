@@ -22,7 +22,19 @@ class RegionEvaluationOut(AppBaseModel):
     mape: float
     rmse: float
     coverage: float
+    # Real mean P10-P90 width in MW over this candidate's scored origins
+    # (`ml/evaluate.py`'s `EvaluationReport.mean_interval_width`) -- the
+    # dashboard Model Comparison page's "Consistency" metric.
+    interval_width: float
     n_origins: int
+    # `mae`/`mean_error` (2026-08-10, dashboard Model Performance page) --
+    # `ml/evaluate.py`'s `EvaluationReport.mae`/`.mean_error`. `None` for
+    # any real evaluation run logged before this field was added (the
+    # underlying MLflow run simply never logged `eval_mae`/
+    # `eval_mean_error` -- not an error, a real "this predates the field"
+    # state, same as every other optional metric on this page).
+    mae: float | None = None
+    mean_error: float | None = None
 
 
 class EvaluationSummaryOut(AppBaseModel):
@@ -32,3 +44,16 @@ class EvaluationSummaryOut(AppBaseModel):
     evaluated_at: datetime
     n_origins: int
     regions: list[RegionEvaluationOut]
+
+
+class EvaluationHistoryOut(AppBaseModel):
+    """`GET /v1/model/versions/{version}/evaluation-history` -- every
+    real evaluation run ever logged for one version, oldest first
+    (`ml/registry.py`'s `get_evaluation_history`). The dashboard computes
+    a "Stability (Performance Drift)" comparison from this directly
+    (earliest vs. latest `eval_mape`) rather than this service
+    pre-computing and storing a single drift score server-side."""
+
+    model_name: str
+    version: str
+    runs: list[EvaluationSummaryOut]

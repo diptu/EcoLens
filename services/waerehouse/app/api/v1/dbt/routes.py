@@ -21,15 +21,26 @@ own docstring for the full lock/staleness reasoning.
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
+from redis.asyncio import Redis
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_db
+from app.api.v1.deps import get_app_settings, get_db, get_redis_client
+from app.core.config import Settings
 from app.core.errors import ApiError
+from app.core.response_cache import cached_response
 from app.dbt.scheduler import run_build
 from app.schemas.dbt import DbtBuildRunOut, DbtBuildRunsListResponse, DbtRunResponse
 
 router = APIRouter(prefix="/v1/dbt", tags=["dbt"])
+
+# `DbtBuildRunOut | None` (`GET /build/last`) doesn't fit `app.core.
+# response_cache.cached_response`'s non-optional `model_cls` signature --
+# a real "no build has ever run" `None` needs its own sentinel to
+# round-trip through Redis (a bare empty string would be indistinguishable
+# from "not cached yet"), so that one endpoint below caches inline instead
+# of through the shared helper.
+_NO_BUILD_SENTINEL = "__none__"
 
 
 @router.post("/build", response_model=DbtRunResponse)
@@ -49,13 +60,31 @@ async def trigger_dbt_build(db: AsyncSession = Depends(get_db)) -> DbtRunRespons
 
 
 @router.get("/build/last", response_model=DbtBuildRunOut | None)
-async def last_dbt_build(db: AsyncSession = Depends(get_db)) -> DbtBuildRunOut | None:
+async def last_dbt_build(
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis_client),
+    settings: Settings = Depends(get_app_settings),
+) -> DbtBuildRunOut | None:
     """Most recent `meta._dbt_build_log` row, any `subcommand` -- backs
     the Pipeline Operations tab's dbt-warehouse-transform row (last
     run/status). `GET /build/runs` below is the full history list --
     this stays a thin, single-row convenience wrapper over it rather
     than being removed, since it's cheaper for a caller that only ever
-    wants "what's the current state" to not have to slice a list."""
+    wants "what's the current state" to not have to slice a list.
+
+    Cached (2026-08-11, real fix for a real measured problem): confirmed
+    live at ~2.5s/call with no caching at all before this -- see
+    `app.core.response_cache`'s own module docstring for why. Short TTL
+    (`dbt_build_status_cache_ttl_seconds`, 5s): this backs live
+    build-status polling, so a bounded few-second staleness window is
+    the real, disclosed tradeoff for a fast response here, not
+    fabricated data.
+    """
+    cache_key = "waerehouse:dbt_build_last:v1"
+    cached = await redis.get(cache_key)
+    if cached is not None:
+        return None if cached == _NO_BUILD_SENTINEL else DbtBuildRunOut.model_validate_json(cached)
+
     result = await db.execute(
         text(
             "SELECT id, subcommand, target, trigger, triggered_by, status, "
@@ -65,14 +94,19 @@ async def last_dbt_build(db: AsyncSession = Depends(get_db)) -> DbtBuildRunOut |
     )
     row = result.mappings().first()
     if row is None:
+        await redis.set(cache_key, _NO_BUILD_SENTINEL, ex=settings.dbt_build_status_cache_ttl_seconds)
         return None
-    return DbtBuildRunOut(**{**dict(row), "id": str(row["id"])})
+    response = DbtBuildRunOut(**{**dict(row), "id": str(row["id"])})
+    await redis.set(cache_key, response.model_dump_json(), ex=settings.dbt_build_status_cache_ttl_seconds)
+    return response
 
 
 @router.get("/build/runs", response_model=DbtBuildRunsListResponse)
 async def list_dbt_build_runs_endpoint(
     limit: int = Query(default=20, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis_client),
+    settings: Settings = Depends(get_app_settings),
 ) -> DbtBuildRunsListResponse:
     """Real `meta._dbt_build_log` history, newest first -- the same real
     "is a build in flight right now" signal (a `status == "running"`
@@ -83,19 +117,31 @@ async def list_dbt_build_runs_endpoint(
     (`services/waerehouse/TODO.md`'s own note on that gap). Open, no
     auth -- same reasoning `GET /build/last` and `GET /v1/model/
     training-runs` already use: read access to run history isn't the
-    privileged part."""
-    result = await db.execute(
-        text(
-            "SELECT id, subcommand, target, trigger, triggered_by, status, "
-            "started_at, finished_at, exit_code, error "
-            "FROM meta._dbt_build_log ORDER BY started_at DESC LIMIT :limit"
-        ),
-        {"limit": limit},
-    )
-    rows = result.mappings().all()
-    return DbtBuildRunsListResponse(
-        data=[
-            DbtBuildRunOut(**{**dict(row), "id": str(row["id"])})
-            for row in rows
-        ]
+    privileged part.
+
+    Cached, same real reasoning/TTL as `GET /build/last` above.
+    """
+    async def _load() -> DbtBuildRunsListResponse:
+        result = await db.execute(
+            text(
+                "SELECT id, subcommand, target, trigger, triggered_by, status, "
+                "started_at, finished_at, exit_code, error "
+                "FROM meta._dbt_build_log ORDER BY started_at DESC LIMIT :limit"
+            ),
+            {"limit": limit},
+        )
+        rows = result.mappings().all()
+        return DbtBuildRunsListResponse(
+            data=[
+                DbtBuildRunOut(**{**dict(row), "id": str(row["id"])})
+                for row in rows
+            ]
+        )
+
+    return await cached_response(
+        redis,
+        f"waerehouse:dbt_build_runs:v1:{limit}",
+        settings.dbt_build_status_cache_ttl_seconds,
+        DbtBuildRunsListResponse,
+        _load,
     )

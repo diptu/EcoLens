@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from app.schemas.model.create import PromoteModelRequest, TrainRequest
 from app.schemas.model.drift import DriftListResponse, DriftReportOut
-from app.schemas.model.evaluation import EvaluationSummaryOut, RegionEvaluationOut
+from app.schemas.model.evaluation import (
+    EvaluationHistoryOut,
+    EvaluationSummaryOut,
+    RegionEvaluationOut,
+)
 from app.schemas.model.experiments import (
     ExperimentOut,
     ExperimentsListResponse,
@@ -28,6 +32,7 @@ from app.schemas.model.versions import ModelVersionOut, ModelVersionsListRespons
 __all__ = [
     "DriftListResponse",
     "DriftReportOut",
+    "EvaluationHistoryOut",
     "EvaluationSummaryOut",
     "ExperimentOut",
     "ExperimentsListResponse",

@@ -10,9 +10,28 @@ from datetime import UTC, datetime
 
 import pytest
 
-from app.api.v1.deps import get_db
+from app.api.v1.deps import get_db, get_redis_client
 from app.main import app
 from app.service.model import actions
+
+
+class _FakeRedis:
+    """Same fake `test_forecast.py` already uses for its own cached
+    endpoints -- `GET /v1/model/training-runs` gained real inline
+    caching 2026-08-11, so its tests need the same per-test-isolated
+    fake the rest of this codebase's cached-endpoint tests already rely
+    on, not the real shared local Redis (which would otherwise leak a
+    cached response across these tests, and hit a real network client
+    tied to a since-closed event loop between tests)."""
+
+    def __init__(self):
+        self.store: dict[str, str] = {}
+
+    async def get(self, key):
+        return self.store.get(key)
+
+    async def set(self, key, value, ex=None):
+        self.store[key] = value
 
 
 class _FakeResult:
@@ -135,6 +154,7 @@ def _training_log_row(**overrides):
 
 def test_training_runs_returns_real_rows(client):
     app.dependency_overrides[get_db] = lambda: _FakeDbSession([_training_log_row()])
+    app.dependency_overrides[get_redis_client] = lambda: _FakeRedis()
     try:
         response = client.get("/v1/model/training-runs")
     finally:
@@ -156,6 +176,7 @@ def test_training_runs_normalises_regions_when_the_driver_returns_a_json_string(
     app.dependency_overrides[get_db] = lambda: _FakeDbSession(
         [_training_log_row(regions='["QLD1", "VIC1"]')]
     )
+    app.dependency_overrides[get_redis_client] = lambda: _FakeRedis()
     try:
         response = client.get("/v1/model/training-runs")
     finally:
@@ -167,6 +188,7 @@ def test_training_runs_normalises_regions_when_the_driver_returns_a_json_string(
 
 def test_training_runs_empty_before_any_training_has_ever_run(client):
     app.dependency_overrides[get_db] = lambda: _FakeDbSession([])
+    app.dependency_overrides[get_redis_client] = lambda: _FakeRedis()
     try:
         response = client.get("/v1/model/training-runs")
     finally:

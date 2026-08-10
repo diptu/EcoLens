@@ -29,7 +29,7 @@ from datetime import UTC, datetime, timedelta
 import numpy as np
 import pandas as pd
 import torch
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -43,11 +43,22 @@ from app.core.errors import ApiError
 from app.core.logging import get_logger
 from app.core.metrics import forecast_predictions_total, forecast_prediction_latency_seconds
 from app.core.tracing import get_tracer
-from app.schemas.forecast import ForecastPoint, ForecastResponse
+from app.schemas.forecast import (
+    ForecastPoint,
+    ForecastResponse,
+    RecentBacktestPointOut,
+    RecentBacktestResponse,
+)
 from app.core.config import Settings
 from app.service.ml.adaptive_calibration import get_calibration_scale
 from app.service.ml.data import load_holidays, load_latest_window
-from app.service.ml.evaluate import BaselineForecaster, _infer_period_steps
+from app.service.ml.evaluate import (
+    BaselineForecaster,
+    LSTMForecaster,
+    RecentBacktestPoint,
+    _infer_period_steps,
+    evaluate_recent_actual_vs_predicted,
+)
 from app.service.ml.features import (
     FEATURE_COLUMNS,
     NUMERIC_COLUMNS,
@@ -331,6 +342,157 @@ async def _run_baseline_fallback_forecast(
     response.model = forecaster.name
     response.served_by = "baseline_fallback"
     return response
+
+
+# Same real constraint `_run_baseline_fallback_forecast` above documents
+# for its own history pool, times 2 for headroom -- the largest real
+# `days` this endpoint accepts (30) at hourly cadence is 720 rows, well
+# under this.
+_RECENT_BACKTEST_MAX_DAYS = 30
+
+
+async def _run_recent_backtest_single_region(
+    db: AsyncSession, bundle: ModelBundle, region: str, days_back: int
+) -> list[RecentBacktestPoint]:
+    """Real walk-forward re-forecast of the currently-served model
+    against `region`'s own real recent history -- same cross-region
+    feature-context fetch `_run_inference` (the live-forecast path)
+    already uses, so this scores the model under the same real feature
+    conditions it's actually served under, not a simplified stand-in."""
+    cross_regions = [r for r in bundle.feature_scalers if r != region]
+    hours_needed = days_back * 24 + bundle.horizon
+    n_rows = bundle.lookback + _FEATURE_WARMUP_ROWS + hours_needed
+    raw_df = await load_latest_window(db, region, n_rows, cross_regions=cross_regions)
+    own_rows = int((raw_df["region"] == region).sum())
+    if own_rows < bundle.lookback + _FEATURE_WARMUP_ROWS + bundle.horizon + 1:
+        # Not enough real history yet for even one scored origin -- a
+        # real, expected state for a newly-onboarded region (same
+        # "empty is a real state, not an error" convention `GET .../
+        # evaluation` etc. already follow), not raised as a 503 here
+        # since the caller (NEM aggregate or single-region response)
+        # can still return a real (if short/empty) `points: []`.
+        return []
+
+    holidays = await load_holidays(db)
+    engineered = build_features(raw_df, holidays=holidays)
+    region_df = engineered[engineered["region"] == region].reset_index(drop=True)
+
+    forecaster = LSTMForecaster(
+        model=bundle.model,
+        feature_scalers=bundle.feature_scalers,
+        target_scaler=bundle.target_scaler,
+        lookback=bundle.lookback,
+        calibration=bundle.calibration,
+    )
+    return evaluate_recent_actual_vs_predicted(
+        forecaster, region_df, bundle.horizon, days_back=days_back
+    )
+
+
+async def _run_recent_backtest_nem(
+    db: AsyncSession, bundle: ModelBundle, days_back: int
+) -> list[RecentBacktestPoint]:
+    """Sums the 5 NEM regions' own real recent backtests point-for-point
+    -- same "same 5-min AEMO dispatch clock" real assumption
+    `_forecast_arrays_nem` above already relies on for the live forecast,
+    just aligned by real `ts` (not array index) since each region's own
+    walk-forward can land slightly different real gaps. A timestamp only
+    becomes a real NEM total once all 5 regions actually scored a real
+    point for it -- a partial 4-of-5 sum would silently understate the
+    real total rather than honestly showing nothing for that step.
+    """
+    per_region = {
+        region: await _run_recent_backtest_single_region(db, bundle, region, days_back)
+        for region in _NEM_AGGREGATE_REGIONS
+    }
+
+    by_ts: dict[pd.Timestamp, list[RecentBacktestPoint]] = {}
+    for pts in per_region.values():
+        for p in pts:
+            by_ts.setdefault(p.ts, []).append(p)
+
+    merged: list[RecentBacktestPoint] = []
+    for ts in sorted(by_ts):
+        group = by_ts[ts]
+        if len(group) != len(_NEM_AGGREGATE_REGIONS):
+            continue
+        actuals = [g.actual for g in group]
+        merged.append(
+            RecentBacktestPoint(
+                ts=ts,
+                actual=None if any(a is None for a in actuals) else sum(actuals),
+                p10=sum(g.p10 for g in group),
+                p50=sum(g.p50 for g in group),
+                p90=sum(g.p90 for g in group),
+                # Real, from whichever region's own walk-forward produced
+                # this ts (they usually agree -- same shared clock -- but
+                # aren't guaranteed to if two regions' real gaps caused
+                # their own origin selection to diverge slightly; taking
+                # the first is a real value either way, never invented).
+                step_hours=group[0].step_hours,
+            )
+        )
+    return merged
+
+
+@router.get(
+    "/forecast/recent-actual-vs-predicted", response_model=RecentBacktestResponse
+)
+async def get_recent_actual_vs_predicted(
+    region: str,
+    days: int = Query(default=7, ge=1, le=_RECENT_BACKTEST_MAX_DAYS),
+    db: AsyncSession = Depends(get_db),
+    registry: ModelRegistry = Depends(get_model_registry),
+    settings: Settings = Depends(get_app_settings),
+) -> RecentBacktestResponse:
+    """Real walk-forward re-forecast of the currently-served Production
+    model against real actual demand for roughly the last `days` days,
+    ending at the most recent real origin the warehouse has (see
+    `service/ml/evaluate.py`'s `evaluate_recent_actual_vs_predicted` for
+    the full reasoning). Built on demand from real history every request
+    -- nothing in this platform persists a rolling history of past
+    predictions to read back later (`service/ml/forecast_reconciliation.py`'s
+    own served-forecast log is Redis-backed, ~48h TTL, and deletes each
+    entry once reconciled -- a transient breaker signal, not a durable
+    audit trail this could read from instead).
+    """
+    bundle = registry.bundle
+    if bundle is None:
+        raise ApiError(
+            503, "model_not_loaded", "No Production model version is loaded yet"
+        )
+
+    if region == "NEM":
+        points = await _run_recent_backtest_nem(db, bundle, days)
+    elif region in bundle.feature_scalers:
+        points = await _run_recent_backtest_single_region(db, bundle, region, days)
+    else:
+        raise ApiError(
+            503,
+            "model_not_trained_for_region",
+            f"The currently-served model has no fitted feature scaler for region '{region}' "
+            "(it wasn't trained on this region)",
+        )
+
+    return RecentBacktestResponse(
+        region=region,
+        model=f"{settings.mlflow_registry_model_name}@{bundle.stage.lower()}",
+        generated_at=datetime.now(UTC),
+        horizon_hours=bundle.horizon,
+        interval="1h",
+        days_requested=days,
+        points=[
+            RecentBacktestPointOut(
+                ts=pd.Timestamp(p.ts).to_pydatetime(),
+                actual=p.actual,
+                p10=round(p.p10, 1),
+                p50=round(p.p50, 1),
+                p90=round(p.p90, 1),
+                step_hours=p.step_hours,
+            )
+            for p in points
+        ],
+    )
 
 
 @router.get("/forecast", response_model=ForecastResponse)

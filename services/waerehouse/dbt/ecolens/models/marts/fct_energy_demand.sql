@@ -54,5 +54,9 @@ select
 from base b
 left join anomalies a on b.ts = a.ts and b.region = a.region
 {% if is_incremental() %}
-where b.ts > (select coalesce(max(ts), '1900-01-01'::timestamptz) from {{ this }}) - interval '2 days'
+-- Same `backfill_lookback_days` var as `int_demand_with_weather`'s own
+-- output filter (its header comment has the full reasoning) -- both
+-- have to widen together for a backfilled gap upstream in `raw.*` to
+-- actually reach this mart in one run, not just its intermediate input.
+where b.ts > (select coalesce(max(ts), '1900-01-01'::timestamptz) from {{ this }}) - interval '{{ var("backfill_lookback_days", 2) }} days'
 {% endif %}

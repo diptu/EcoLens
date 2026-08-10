@@ -17,13 +17,15 @@ import math
 
 from fastapi import APIRouter, Depends, Query
 from mlflow.exceptions import MlflowException
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_app_settings, get_db, get_model_registry
+from app.api.v1.deps import get_app_settings, get_db, get_model_registry, get_redis_client
 from app.core.errors import ApiError
 from app.schemas.model import (
     DriftListResponse,
     DriftReportOut,
+    EvaluationHistoryOut,
     EvaluationSummaryOut,
     ExperimentOut,
     ExperimentsListResponse,
@@ -54,6 +56,7 @@ from app.service.ml.registry import (
     ModelRegistry,
     PromotionRejected,
     delete_model_version,
+    get_evaluation_history,
     get_latest_evaluation,
     get_loss_curve,
     list_versions,
@@ -76,9 +79,24 @@ async def trigger_training_endpoint(
 async def get_training_runs(
     limit: int = Query(default=20, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis_client),
+    settings: Settings = Depends(get_app_settings),
 ) -> TrainingRunsListResponse:
+    # Cached (2026-08-11, real fix for a real measured problem): a plain
+    # `meta._training_log` read, but confirmed live at ~1.7-1.8s *every*
+    # call against this service's remote Postgres -- no caching existed
+    # here before. Training runs don't land more than a few times a day
+    # in practice, so `forecast_cache_ttl_seconds` (60s, same TTL
+    # `GET /v1/forecast` already uses) is honest, not stale in any way
+    # that matters for a log view.
+    cache_key = f"model:training_runs:v1:{limit}"
+    cached = await redis.get(cache_key)
+    if cached is not None:
+        return TrainingRunsListResponse.model_validate_json(cached)
     runs = await list_training_runs(db, limit)
-    return TrainingRunsListResponse(data=runs)
+    response = TrainingRunsListResponse(data=runs)
+    await redis.set(cache_key, response.model_dump_json(), ex=settings.forecast_cache_ttl_seconds)
+    return response
 
 
 @router.post("/model/tune", response_model=TuneTriggerResponse)
@@ -191,22 +209,17 @@ def _none_if_nan(value: float) -> float | None:
     return None if math.isnan(value) else value
 
 
-@router.get("/model/drift", response_model=DriftListResponse)
-async def get_model_drift(
-    model_name: str | None = None,
-    region: list[str] | None = Query(default=None),
-    settings: Settings = Depends(get_app_settings),
-) -> DriftListResponse:
-    """Real per-feature PSI/KS drift (`mlops/live_drift.py`) -- top 10
-    features by PSI between an older and a more recent slice of the same
-    real training data. `[]` when there isn't enough real data on both
-    sides yet (this environment's empty Postgres marts for `lstm_demand`/
-    `lstm_demand_tft` today) -- a real, expected state, not an error.
-    See `live_drift.py`'s own docstring for the real, disclosed
-    limitation this comparison has (chronological split of one dataset,
-    not training-vs-live-serving)."""
-    model_name = model_name or settings.mlflow_registry_model_name
-    regions = region or settings.model_default_regions
+def model_drift_cache_key(model_name: str, regions: list[str]) -> str:
+    """Shared with `app.service.cache_warmer` so the warmer writes to the
+    exact key this route reads from -- one real definition, not two that
+    could drift."""
+    return f"model:drift:v1:{model_name}:{','.join(sorted(regions))}"
+
+
+async def _compute_model_drift(model_name: str, regions: list[str]) -> DriftListResponse:
+    """Real compute for `GET /v1/model/drift` -- extracted (2026-08-11)
+    so `app.service.cache_warmer`'s background pre-warm pass calls the
+    exact same logic the route handler does, not a second copy of it."""
     reports = await compute_drift(model_name, regions)
     return DriftListResponse(
         data=[
@@ -222,6 +235,47 @@ async def get_model_drift(
             for r in reports
         ]
     )
+
+
+@router.get("/model/drift", response_model=DriftListResponse)
+async def get_model_drift(
+    model_name: str | None = None,
+    region: list[str] | None = Query(default=None),
+    settings: Settings = Depends(get_app_settings),
+    redis: Redis = Depends(get_redis_client),
+) -> DriftListResponse:
+    """Real per-feature PSI/KS drift (`mlops/live_drift.py`) -- top 10
+    features by PSI between an older and a more recent slice of the same
+    real training data. `[]` when there isn't enough real data on both
+    sides yet (this environment's empty Postgres marts for `lstm_demand`/
+    `lstm_demand_tft` today) -- a real, expected state, not an error.
+    See `live_drift.py`'s own docstring for the real, disclosed
+    limitation this comparison has (chronological split of one dataset,
+    not training-vs-live-serving).
+
+    Cached (2026-08-11, real fix for a real measured problem):
+    `compute_drift` re-scans two chronological slices of real training
+    data and recomputes PSI/KS per feature from scratch -- confirmed
+    live at 7-8s per call, *every* call, since this endpoint had no
+    caching at all before this. `app.service.cache_warmer` also
+    proactively refreshes the default `(model_name, regions)` combo in
+    the background on an interval shorter than
+    `model_drift_cache_ttl_seconds`, so a real dashboard request should
+    never actually hit the cold path in practice.
+    """
+    model_name = model_name or settings.mlflow_registry_model_name
+    regions = region or settings.model_default_regions
+
+    cache_key = model_drift_cache_key(model_name, regions)
+    cached = await redis.get(cache_key)
+    if cached is not None:
+        return DriftListResponse.model_validate_json(cached)
+
+    response = await _compute_model_drift(model_name, regions)
+    await redis.set(
+        cache_key, response.model_dump_json(), ex=settings.model_drift_cache_ttl_seconds
+    )
+    return response
 
 
 def _registry_error(exc: MlflowException, *, not_found_message: str) -> ApiError:
@@ -371,9 +425,62 @@ async def get_model_version_evaluation(
                 mape=r.mape,
                 rmse=r.rmse,
                 coverage=r.coverage,
+                interval_width=r.interval_width,
                 n_origins=r.n_origins,
+                mae=r.mae,
+                mean_error=r.mean_error,
             )
             for r in summary.regions
+        ],
+    )
+
+
+@router.get(
+    "/model/versions/{version}/evaluation-history", response_model=EvaluationHistoryOut
+)
+async def get_model_version_evaluation_history(
+    version: str,
+    model_name: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    settings: Settings = Depends(get_app_settings),
+) -> EvaluationHistoryOut:
+    """Every real walk-forward evaluation run ever logged for `version`,
+    oldest first (`ml/registry.py`'s `get_evaluation_history`) -- unlike
+    `GET .../evaluation` (latest only), this is the real time series a
+    genuine "has this version's real accuracy drifted since it was
+    evaluated last" comparison needs (dashboard Model Comparison page's
+    "Stability" metric). `runs: []` (not a 404) when `evaluate` has
+    never been run for this version, or only once -- both real states a
+    drift comparison can't be made from yet, same "empty is expected"
+    convention `GET .../evaluation` already follows for `null`."""
+    model_name = model_name or settings.mlflow_registry_model_name
+    history = await get_evaluation_history(model_name, version, limit=limit)
+    return EvaluationHistoryOut(
+        model_name=model_name,
+        version=version,
+        runs=[
+            EvaluationSummaryOut(
+                model_name=model_name,
+                version=version,
+                run_id=summary.run_id,
+                evaluated_at=summary.evaluated_at,
+                n_origins=summary.n_origins,
+                regions=[
+                    RegionEvaluationOut(
+                        region=r.region,
+                        candidate=r.candidate,
+                        mape=r.mape,
+                        rmse=r.rmse,
+                        coverage=r.coverage,
+                        interval_width=r.interval_width,
+                        n_origins=r.n_origins,
+                        mae=r.mae,
+                        mean_error=r.mean_error,
+                    )
+                    for r in summary.regions
+                ],
+            )
+            for summary in history
         ],
     )
 

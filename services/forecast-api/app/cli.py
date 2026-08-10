@@ -980,6 +980,212 @@ def evaluate_timesfm(
         )
 
 
+@main.command("train-timesfm-correction")
+@click.option(
+    "--region",
+    "regions",
+    multiple=True,
+    help="Region(s) to train on (repeatable). Defaults to Settings.model_default_regions.",
+)
+@click.option(
+    "--model-name",
+    default="timesfm_demand_correction",
+    show_default=True,
+    help="MLflow registered model name -- deliberately NOT lstm_demand/lstm_demand_tft: "
+    "this is a Ridge regression's weights, not a comparable version of either.",
+)
+@click.option(
+    "--horizon",
+    type=int,
+    default=6,
+    show_default=True,
+    help="Forecast horizon in steps -- same reasoning as evaluate-timesfm's --horizon.",
+)
+@click.option(
+    "--n-origins-per-region",
+    type=int,
+    default=60,
+    show_default=True,
+    help="Walk-forward origins per region used to build the correction training set. "
+    "Real cost warning: each origin costs 1 + max(--lag-window) real TimesFM "
+    "inference calls.",
+)
+@click.option(
+    "--lag-window",
+    "lag_windows",
+    type=int,
+    multiple=True,
+    default=None,
+    help="Recent-error lookback window(s), in steps (repeatable). Defaults to (1, 3).",
+)
+@click.option(
+    "--ridge-alpha",
+    type=float,
+    default=None,
+    help="Ridge L2 strength. Default: cross-validated per horizon-step target "
+    "(RidgeCV over app.service.ml.timesfm_correction.DEFAULT_RIDGE_ALPHAS) "
+    "instead of one guessed value.",
+)
+@click.option(
+    "--conformal-alpha",
+    type=float,
+    default=0.2,
+    show_default=True,
+    help="Miscoverage target for the corrected P10-P90 interval.",
+)
+@click.option(
+    "--since",
+    default=None,
+    help="ISO date (YYYY-MM-DD) -- scope training data to ts >= this date.",
+)
+@click.option(
+    "--no-register",
+    is_flag=True,
+    default=False,
+    help="Log to MLflow but skip registering a model version.",
+)
+@click.option(
+    "--source",
+    "data_source",
+    type=click.Choice(["fct_energy_demand", "r2_master"]),
+    default="fct_energy_demand",
+    show_default=True,
+    help="fct_energy_demand: live Postgres marts (~60-day retention). "
+    "r2_master: master.duckdb's real ~1-year bootstrap history, never touches Postgres.",
+)
+def train_timesfm_correction(
+    regions: tuple[str, ...],
+    model_name: str,
+    horizon: int,
+    n_origins_per_region: int,
+    lag_windows: tuple[int, ...],
+    ridge_alpha: float | None,
+    conformal_alpha: float,
+    since: str | None,
+    no_register: bool,
+    data_source: str,
+) -> None:
+    """Train a lightweight Ridge correction model on top of frozen
+    TimesFM's own historical point-forecast errors, and log (+ register)
+    it in MLflow under its own timesfm_demand_correction registry entry.
+    TimesFM's real ~200M-param checkpoint itself never trains (it can't
+    be fine-tuned) -- only the correction layer does."""
+    import pandas as pd
+
+    from app.service.ml.timesfm_correction import (
+        CorrectionConfig,
+        DEFAULT_LAG_WINDOWS,
+        train_and_register_correction,
+    )
+
+    settings = get_settings()
+    resolved_regions = list(regions) or settings.model_default_regions
+    resolved_since = pd.Timestamp(since, tz="UTC") if since else None
+    config = CorrectionConfig(
+        horizon=horizon,
+        n_origins_per_region=n_origins_per_region,
+        lag_windows=tuple(lag_windows) or DEFAULT_LAG_WINDOWS,
+        ridge_alpha=ridge_alpha,
+        conformal_alpha=conformal_alpha,
+    )
+
+    try:
+        result = asyncio.run(
+            train_and_register_correction(
+                model_name,
+                resolved_regions,
+                settings=settings,
+                config=config,
+                register=not no_register,
+                since=resolved_since,
+                data_source=data_source,
+            )
+        )
+    except Exception as exc:
+        click.echo(f"train-timesfm-correction: failed — {exc}", err=True)
+        sys.exit(1)
+
+    registration = (
+        f"registered as {model_name} v{result.model_version}"
+        if result.model_version
+        else "not registered (--no-register)"
+    )
+    click.echo(f"train-timesfm-correction: run {result.run_id} logged, {registration}")
+    if result.metrics:
+        click.echo(
+            "  raw_test_mape={:.2f} corrected_test_mape={:.2f} mape_lift_pct={:.1f} "
+            "corrected_test_coverage_calibrated={:.2f}".format(
+                result.metrics.get("raw_test_mape", float("nan")),
+                result.metrics.get("corrected_test_mape", float("nan")),
+                result.metrics.get("mape_lift_pct", float("nan")),
+                result.metrics.get("corrected_test_coverage_calibrated", float("nan")),
+            )
+        )
+
+
+@main.command("evaluate-timesfm-correction")
+@click.option("--model-name", default="timesfm_demand_correction", show_default=True)
+@click.option("--version", required=True, help="Registered timesfm_demand_correction version.")
+@click.option(
+    "--region",
+    "regions",
+    multiple=True,
+    help="Region(s) to evaluate on (repeatable). Defaults to Settings.model_default_regions.",
+)
+@click.option("--horizon", type=int, default=None, help="Defaults to the version's own trained horizon.")
+@click.option(
+    "--n-origins",
+    type=int,
+    default=10,
+    show_default=True,
+    help="Number of rolling-origin forecasts to walk forward over, per region.",
+)
+def evaluate_timesfm_correction(
+    model_name: str,
+    version: str,
+    regions: tuple[str, ...],
+    horizon: int | None,
+    n_origins: int,
+) -> None:
+    """Real walk-forward backtest of a registered TimesFM correction
+    version against the raw (uncorrected) TimesFM model and the
+    seasonal-naive baseline, over the same rolling origins -- did the
+    correction layer actually help, logged to MLflow tagged
+    `evaluation`."""
+    from app.service.ml.timesfm_correction import evaluate_timesfm_correction_and_log
+
+    settings = get_settings()
+    resolved_regions = list(regions) or settings.model_default_regions
+
+    try:
+        result = asyncio.run(
+            evaluate_timesfm_correction_and_log(
+                model_name,
+                version,
+                resolved_regions,
+                settings=settings,
+                horizon=horizon,
+                n_origins=n_origins,
+            )
+        )
+    except Exception as exc:
+        click.echo(f"evaluate-timesfm-correction: failed — {exc}", err=True)
+        sys.exit(1)
+
+    click.echo(f"evaluate-timesfm-correction: run {result.run_id} logged")
+    for report in result.reports:
+        click.echo(
+            "  {}/{}: mape={:.2f} rmse={:.1f} coverage={:.2f} (n_origins={})".format(
+                report.region,
+                report.model_name,
+                report.mape,
+                report.rmse,
+                report.empirical_coverage,
+                report.n_origins,
+            )
+        )
+
+
 @main.command("train-worker")
 def train_worker() -> None:
     """Run the training-trigger consumer (RabbitMQ -> warm-started

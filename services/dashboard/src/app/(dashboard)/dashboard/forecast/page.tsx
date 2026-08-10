@@ -51,6 +51,7 @@ import {
 } from "lucide-react";
 
 import { Card } from "@/components/dashboard/card";
+import { RecentBacktestChart, type RecentBacktestPoint } from "@/components/dashboard/recent-backtest-chart";
 import { FanChart, Sparkline } from "@/components/dashboard/fan-chart";
 import { cn } from "@/lib/utils";
 import {
@@ -63,9 +64,13 @@ import {
 import {
   fetchDemandForecast,
   fetchModelInfo,
+  fetchRecentBacktest,
   type DemandForecast,
   type ModelInfo,
+  type RecentBacktest,
 } from "@/lib/emissions";
+
+const RECENT_BACKTEST_DAYS = 7;
 
 const ALL_FORECAST_REGIONS: (Region | "NEM")[] = ["NEM", ...ALL_REGIONS];
 
@@ -170,6 +175,30 @@ export default function ForecastPage() {
     };
   }, [region]);
 
+  // Real "Actual vs Predicted" for the selected region -- a real
+  // walk-forward re-forecast of the currently-served model against real
+  // actual demand for the last `RECENT_BACKTEST_DAYS` days, both series
+  // ending at the same real point (see `recent-backtest-chart.tsx`'s own
+  // header comment for how this differs from the live-forecast-based
+  // `DemandForecastChart` the Executive Dashboard still uses).
+  const [recentBacktest, setRecentBacktest] = useState<RecentBacktest | null>(null);
+  const [recentBacktestFailed, setRecentBacktestFailed] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    setRecentBacktest(null);
+    setRecentBacktestFailed(false);
+    fetchRecentBacktest(region, RECENT_BACKTEST_DAYS)
+      .then((r) => {
+        if (!cancelled) setRecentBacktest(r);
+      })
+      .catch(() => {
+        if (!cancelled) setRecentBacktestFailed(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [region]);
+
   useEffect(() => {
     let cancelled = false;
     fetchModelInfo()
@@ -202,6 +231,23 @@ export default function ForecastPage() {
     const idx = forecast.points.findIndex((p) => p.ts === summary.peak.ts);
     return idx >= 0 ? idx + 1 : undefined;
   }, [forecast, summary]);
+
+  // `RecentBacktestChart` needs `tMs` too (for gap-splitting/sorting) --
+  // map the raw forecast-api response shape once here.
+  const recentBacktestPoints: RecentBacktestPoint[] = useMemo(
+    () =>
+      recentBacktest
+        ? recentBacktest.points.map((p) => ({
+            ts: p.ts,
+            tMs: new Date(p.ts).getTime(),
+            actualMw: p.actual !== null ? Math.round(p.actual) : null,
+            p10Mw: p.p10,
+            p50Mw: p.p50,
+            p90Mw: p.p90,
+          }))
+        : [],
+    [recentBacktest],
+  );
 
   return (
     <div className="space-y-6">
@@ -503,6 +549,34 @@ export default function ForecastPage() {
           </Card>
         </div>
       </div>
+
+      {/* ── Actual vs Predicted: a real walk-forward backtest, not the
+          live forecast -- `evaluate_recent_actual_vs_predicted`
+          (forecast-api) re-forecasts from real historical origins across
+          the last RECENT_BACKTEST_DAYS days and scores each against what
+          actually happened, so both series cover the SAME real window
+          and end at the SAME real point ("Now"), unlike the live-
+          forecast-based `DemandForecastChart` (Executive Dashboard's
+          Demand Forecast Preview) where actual and forecast are two
+          adjacent, non-overlapping regions. */}
+      <Card title={`Actual vs Predicted — ${region}`}>
+        <p className="mb-3 text-xs text-white/50">
+          A real walk-forward re-forecast of the currently-served model: what it actually would
+          have predicted (P10–P50–P90) at each of several real points over the last{" "}
+          {RECENT_BACKTEST_DAYS} days, against real actual demand for those same real timestamps
+          — not the live forecast repositioned to look retrospective.
+        </p>
+        {recentBacktest === null ? (
+          <p className="py-8 text-center text-xs text-white/40">
+            {recentBacktestFailed ? "Backtest unavailable." : "Running real walk-forward backtest…"}
+          </p>
+        ) : (
+          <RecentBacktestChart
+            points={recentBacktestPoints}
+            testId="forecast-page-actual-vs-predicted"
+          />
+        )}
+      </Card>
     </div>
   );
 }

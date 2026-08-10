@@ -236,11 +236,11 @@ function ProgressBar({ value, status }: { value: number; status: TaskStatus }) {
     failed:    "bg-rose-300",
   }[status];
   return (
-    <div className="flex items-center gap-1.5">
-      <div className="h-1 w-20 overflow-hidden rounded-full bg-white/5">
+    <div className="flex items-center gap-1">
+      <div className="h-1 w-12 overflow-hidden rounded-full bg-white/5">
         <div className={cn("h-full rounded-full transition-all", color)} style={{ width: `${value}%` }} />
       </div>
-      <span className="w-8 text-right text-[10px] tabular-nums text-white/65">{value}%</span>
+      <span className="w-7 text-right text-[9px] tabular-nums text-white/65">{value}%</span>
     </div>
   );
 }
@@ -992,18 +992,18 @@ export default function OperationalTasksPage() {
 
       {/* Active Tasks + Training form */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <Card>
-          <div className="mb-3">
-            <h2 className="text-base font-semibold text-white">Active Tasks</h2>
-            <p className="text-xs text-white/50">Real-time view of running and queued tasks.</p>
+        <Card className="min-w-0">
+          <div className="mb-2.5">
+            <h2 className="text-sm font-semibold text-white">Active Tasks</h2>
+            <p className="text-[11px] text-white/50">Real-time view of running and queued tasks.</p>
           </div>
-          <div className="mb-3 flex flex-wrap items-center gap-1">
+          <div className="mb-2.5 flex flex-wrap items-center gap-1">
             {TASK_TAB_LABELS.map((t) => (
               <button
                 key={t.value}
                 onClick={() => setTab(t.value)}
                 className={cn(
-                  "rounded-md border px-2.5 py-1 text-xs",
+                  "rounded-md border px-2 py-0.5 text-[11px]",
                   tab === t.value
                     ? "border-emerald-200/40 bg-emerald-200/10 text-emerald-100"
                     : "border-white/10 bg-white/[0.02] text-white/60 hover:border-white/20",
@@ -1014,28 +1014,28 @@ export default function OperationalTasksPage() {
             ))}
           </div>
           <ActiveTasksTable rows={tasks} />
-          <button className="mt-3 inline-flex w-full items-center justify-center gap-1 text-xs text-emerald-100 hover:underline">
+          <button className="mt-2.5 inline-flex w-full items-center justify-center gap-1 text-[11px] text-emerald-100 hover:underline">
             View all tasks <ChevronDown className="h-3 w-3" />
           </button>
         </Card>
 
-        <Card>
-          <div className="mb-3">
-            <h2 className="text-base font-semibold text-white">Model Training &amp; Tuning</h2>
-            <p className="text-xs text-white/50">
+        <Card className="min-w-0">
+          <div className="mb-2.5">
+            <h2 className="text-sm font-semibold text-white">Model Training &amp; Tuning</h2>
+            <p className="text-[11px] text-white/50">
               Publishes a real training-trigger event to forecast-api's train-worker --
               only the incremental fine-tune path exists (see the Model Registry page's
               Train tab for the still-unbuilt full-retrain path).
             </p>
           </div>
-          <div className="space-y-3">
+          <div className="space-y-2.5">
             <Field label="Regions (optional)">
               <input
                 type="text"
                 value={trainRegionsInput}
                 onChange={(e) => setTrainRegionsInput(e.target.value)}
                 placeholder="e.g. NSW1, QLD1 -- blank uses the server default"
-                className="w-full rounded-md border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-white placeholder:text-white/35 focus:border-emerald-200/60 focus:outline-none"
+                className="w-full rounded-md border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs text-white placeholder:text-white/35 focus:border-emerald-200/60 focus:outline-none"
               />
             </Field>
             <Field label="Window (hours)">
@@ -1045,17 +1045,17 @@ export default function OperationalTasksPage() {
                 max={720}
                 value={trainWindowHours}
                 onChange={(e) => setTrainWindowHours(parseInt(e.target.value, 10) || 1)}
-                className="w-full rounded-md border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-white focus:border-emerald-200/60 focus:outline-none"
+                className="w-full rounded-md border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs text-white focus:border-emerald-200/60 focus:outline-none"
               />
             </Field>
             {trainStatus.state === "queued" && (
-              <p className="text-xs text-sky-300">Queued — waiting for the worker to pick it up.</p>
+              <p className="text-[11px] text-sky-300">Queued — waiting for the worker to pick it up.</p>
             )}
             {trainStatus.state === "polling" && (
-              <p className="text-xs text-sky-300">Waiting for a new registered version — this can take a few minutes.</p>
+              <p className="text-[11px] text-sky-300">Waiting for a new registered version — this can take a few minutes.</p>
             )}
             {trainStatus.state === "error" && (
-              <p className="text-xs text-rose-300">{trainStatus.message}</p>
+              <p className="text-[11px] text-rose-300">{trainStatus.message}</p>
             )}
             <button
               onClick={() => {
@@ -1064,13 +1064,13 @@ export default function OperationalTasksPage() {
               }}
               disabled={trainStatus.state === "queued" || trainStatus.state === "polling"}
               className={cn(
-                "inline-flex w-full items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-semibold",
+                "inline-flex w-full items-center justify-center gap-2 rounded-md px-4 py-1.5 text-xs font-semibold",
                 trainStatus.state === "queued" || trainStatus.state === "polling"
                   ? "cursor-not-allowed bg-white/10 text-white/40"
                   : "bg-emerald-200 text-black hover:bg-emerald-100",
               )}
             >
-              <Play className="h-4 w-4" />
+              <Play className="h-3.5 w-3.5" />
               Start Fine-tune
             </button>
           </div>
@@ -1515,32 +1515,34 @@ function ActiveTasksTable({ rows }: { rows: ActiveTask[] }) {
     );
   }
   return (
-    <table className="w-full text-left text-sm">
-      <thead className="border-b border-white/5 text-[11px] uppercase tracking-wide text-white/40">
-        <tr>
-          <th className="py-2">Task ID</th>
-          <th className="py-2">Type</th>
-          <th className="py-2">Target</th>
-          <th className="py-2">Triggered By</th>
-          <th className="py-2">Started</th>
-          <th className="py-2">Status</th>
-          <th className="py-2">Progress</th>
-        </tr>
-      </thead>
-      <tbody className="divide-y divide-white/5">
-        {rows.map((t) => (
-          <tr key={t.id} className="text-white/85">
-            <td className="py-2 pr-2 font-mono text-[11px] text-white/70">{t.id}</td>
-            <td className="py-2 pr-2 text-white/70">{t.type.replace("_", " ")}</td>
-            <td className="py-2 pr-2">{t.target}</td>
-            <td className="py-2 pr-2 text-white/60">{t.triggered_by}</td>
-            <td className="py-2 pr-2 text-[11px] text-white/50">{t.started_at}</td>
-            <td className="py-2 pr-2"><TaskStatusChip status={t.status} /></td>
-            <td className="py-2"><ProgressBar value={t.progress} status={t.status} /></td>
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[420px] text-left text-xs">
+        <thead className="border-b border-white/5 text-[10px] uppercase tracking-wide text-white/40">
+          <tr>
+            <th className="py-1.5 pr-2">Task ID</th>
+            <th className="py-1.5 pr-2">Type</th>
+            <th className="py-1.5 pr-2">Target</th>
+            <th className="py-1.5 pr-2">Triggered By</th>
+            <th className="py-1.5 pr-2">Started</th>
+            <th className="py-1.5 pr-2">Status</th>
+            <th className="py-1.5">Progress</th>
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody className="divide-y divide-white/5">
+          {rows.map((t) => (
+            <tr key={t.id} className="text-white/85">
+              <td className="py-1.5 pr-2 font-mono text-[10px] text-white/70">{t.id}</td>
+              <td className="py-1.5 pr-2 text-white/70">{t.type.replace("_", " ")}</td>
+              <td className="py-1.5 pr-2">{t.target}</td>
+              <td className="py-1.5 pr-2 text-white/60">{t.triggered_by}</td>
+              <td className="py-1.5 pr-2 text-[10px] text-white/50">{t.started_at}</td>
+              <td className="py-1.5 pr-2"><TaskStatusChip status={t.status} /></td>
+              <td className="py-1.5"><ProgressBar value={t.progress} status={t.status} /></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 

@@ -27,6 +27,19 @@
  * No fabricated P10-P90 band on the *actual* segment either -- a
  * measured historical reading has no real uncertainty to show; only the
  * forecast segment (a real prediction) has one.
+ *
+ * **7D/30D/90D actual-range toggle (2026-08-10)**: `fetchEmissionsForecast`
+ * is near-term only by design (its own docstring: "a few hours", not a
+ * multi-day projection) -- there is no real multi-day forecast anywhere
+ * in this platform to back a 30D/90D *prediction*. So the range toggle
+ * below only widens the real **actual** window (`GET /v1/emissions/
+ * timeseries`); the real P10-P90 band still only ever covers its own
+ * real near-term horizon, same as before, regardless of which range is
+ * selected. A caption makes that explicit rather than letting a wide
+ * "90D" selection imply a 90-day-out prediction that doesn't exist.
+ * 7D keeps hourly buckets (matches the model's own native cadence); 30D
+ * and 90D switch to daily buckets -- 30-90 days of hourly points would
+ * be both an unreadable chart and needless payload for a trend view.
  */
 "use client";
 
@@ -53,7 +66,23 @@ const REGIONS: Array<{ value: TrendRegion; label: string }> = [
   { value: "TAS1", label: "TAS1" },
 ];
 
-const HISTORY_DAYS = 5;
+export type RangeDays = 7 | 30 | 90;
+
+const RANGES: Array<{ value: RangeDays; label: string }> = [
+  { value: 7, label: "7D" },
+  { value: 30, label: "30D" },
+  { value: 90, label: "90D" },
+];
+
+const DEFAULT_RANGE_DAYS: RangeDays = 7;
+
+/** 7D matches the model's own native hourly cadence; 30D/90D would be
+ * 720-2160 hourly points -- unreadable and unnecessary for a trend
+ * view, so those switch to daily buckets (backend-supported, see
+ * `fetchEmissionsTimeseries`'s own `bucket` param). */
+function bucketFor(days: RangeDays): "hour" | "day" {
+  return days <= 7 ? "hour" : "day";
+}
 
 export type TrendPoint = {
   ts: string;
@@ -67,21 +96,24 @@ export type TrendPoint = {
   p90Tco2e: number | null;
 };
 
-function hourLabel(ts: string): string {
-  return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+function pointLabel(ts: string, bucket: "hour" | "day"): string {
+  const d = new Date(ts);
+  return bucket === "day"
+    ? d.toLocaleDateString([], { month: "short", day: "numeric" })
+    : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
-function fullLabel(ts: string): string {
+function fullLabel(ts: string, bucket: "hour" | "day"): string {
   return new Date(ts).toLocaleString([], {
     weekday: "short",
     month: "short",
     day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
+    ...(bucket === "hour" ? { hour: "2-digit" as const, minute: "2-digit" as const } : {}),
   });
 }
 
 type LoadedTrend = {
   points: TrendPoint[];
+  bucket: "hour" | "day";
   latestActualTco2e: number | null;
   forecastP50AvgTco2e: number | null;
   forecastP10AvgTco2e: number | null;
@@ -90,20 +122,21 @@ type LoadedTrend = {
   forecastLagHours: number | null;
 };
 
-async function loadTrend(region: TrendRegion): Promise<LoadedTrend> {
+async function loadTrend(region: TrendRegion, rangeDays: RangeDays): Promise<LoadedTrend> {
   const regionParam = region === "NEM" ? undefined : region;
+  const bucket = bucketFor(rangeDays);
   const [actual, forecast] = await Promise.all([
-    fetchEmissionsTimeseries("hour", HISTORY_DAYS, regionParam),
+    fetchEmissionsTimeseries(bucket, rangeDays, regionParam),
     fetchEmissionsForecast(regionParam).catch((): EmissionsForecast | null => null),
   ]);
 
-  const points: TrendPoint[] = actual.points
+  const actualPoints: TrendPoint[] = actual.points
     .filter((p) => p.total_emissions_kgco2e !== null)
     .map((p) => ({
       ts: p.bucket,
       tMs: new Date(p.bucket).getTime(),
-      label: hourLabel(p.bucket),
-      fullLabel: fullLabel(p.bucket),
+      label: pointLabel(p.bucket, bucket),
+      fullLabel: fullLabel(p.bucket, bucket),
       segment: "actual" as const,
       actualTco2e: p.total_emissions_kgco2e! / 1000,
       p10Tco2e: null,
@@ -111,19 +144,28 @@ async function loadTrend(region: TrendRegion): Promise<LoadedTrend> {
       p90Tco2e: null,
     }));
 
+  // Real "Latest Actual" stat -- from the FULL, untrimmed actual
+  // history (below, `points` only keeps what's *plotted*, which is
+  // trimmed to end at the forecast's own real start -- see that
+  // trimming's own comment for why). This stat isn't tied to a specific
+  // chart pixel, so it stays the honestly-most-recent real hour
+  // regardless of where the chart itself stops drawing.
+  const lastActual = [...actualPoints].reverse()[0] ?? null;
+
   let forecastP50AvgTco2e: number | null = null;
   let forecastP10AvgTco2e: number | null = null;
   let forecastP90AvgTco2e: number | null = null;
   let forecastHorizonLabel = "unavailable";
   let forecastLagHours: number | null = null;
+  const forecastPoints: TrendPoint[] = [];
 
   if (forecast && forecast.points.length > 0) {
     for (const p of forecast.points) {
-      points.push({
+      forecastPoints.push({
         ts: p.ts,
         tMs: new Date(p.ts).getTime(),
-        label: hourLabel(p.ts),
-        fullLabel: fullLabel(p.ts),
+        label: pointLabel(p.ts, "hour"),
+        fullLabel: fullLabel(p.ts, "hour"),
         segment: "forecast",
         actualTco2e: null,
         p10Tco2e: p.p10_kgco2e / 1000,
@@ -144,12 +186,28 @@ async function loadTrend(region: TrendRegion): Promise<LoadedTrend> {
     forecastLagHours = lagMs > 0 ? lagMs / 3_600_000 : null;
   }
 
-  points.sort((a, b) => a.tMs - b.tMs);
+  // Two distinct, non-overlapping regions -- "Actual" ending exactly
+  // where the real forecast begins, not wherever wall-clock "now"
+  // happens to fall. Real forecast serving lag (observed, up to ~21h)
+  // means the forecast's own real timestamps sit *within* the actual
+  // history's own span, not cleanly after it -- sorting both by real ts
+  // on one shared axis (the previous approach) let the forecast band
+  // visually cut into the middle of the actual line instead of sitting
+  // after a single "Now" boundary. Trimming actual to end at the
+  // forecast's own first real point (same real-boundary-alignment fix
+  // `DemandForecastChart`, services/dashboard's executive page, already
+  // uses) fixes *where the two regions sit relative to each other*,
+  // not what's real -- the lag itself stays disclosed separately via
+  // `forecastLagHours` above, computed against true wall-clock time.
+  const forecastStartMs = forecastPoints.length > 0 ? forecastPoints[0].tMs : null;
+  const trimmedActualPoints =
+    forecastStartMs !== null ? actualPoints.filter((p) => p.tMs < forecastStartMs) : actualPoints;
 
-  const lastActual = [...points].reverse().find((p) => p.segment === "actual");
+  const points = [...trimmedActualPoints, ...forecastPoints].sort((a, b) => a.tMs - b.tMs);
 
   return {
     points,
+    bucket,
     latestActualTco2e: lastActual?.actualTco2e ?? null,
     forecastP50AvgTco2e,
     forecastP10AvgTco2e,
@@ -159,12 +217,9 @@ async function loadTrend(region: TrendRegion): Promise<LoadedTrend> {
   };
 }
 
-export function RealEmissionsTrend({
-  onOpenDetails,
-}: {
-  onOpenDetails?: (point: TrendPoint | null) => void;
-}) {
+export function RealEmissionsTrend() {
   const [region, setRegion] = useState<TrendRegion>("NEM");
+  const [rangeDays, setRangeDays] = useState<RangeDays>(DEFAULT_RANGE_DAYS);
   const [data, setData] = useState<LoadedTrend | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -172,7 +227,7 @@ export function RealEmissionsTrend({
     let cancelled = false;
     setData(null);
     setError(null);
-    loadTrend(region)
+    loadTrend(region, rangeDays)
       .then((d) => {
         if (!cancelled) setData(d);
       })
@@ -182,7 +237,7 @@ export function RealEmissionsTrend({
     return () => {
       cancelled = true;
     };
-  }, [region]);
+  }, [region, rangeDays]);
 
   return (
     <Card className="overflow-hidden" data-testid="emissions-trend-v2">
@@ -199,7 +254,7 @@ export function RealEmissionsTrend({
               <button
                 type="button"
                 className="text-white/40 transition hover:text-white/80"
-                title={`Real ${HISTORY_DAYS}-day actual (hourly, GET /v1/emissions/timeseries) + real demand-forecast-derived P10/P50/P90 (GET /v1/emissions/forecast)`}
+                title={`Real ${rangeDays}-day actual (${bucketFor(rangeDays)}ly, GET /v1/emissions/timeseries) + real demand-forecast-derived P10/P50/P90 (GET /v1/emissions/forecast, near-term horizon only)`}
                 aria-label="More info"
                 data-testid="emissions-trend-info"
               >
@@ -207,11 +262,12 @@ export function RealEmissionsTrend({
               </button>
             </div>
             <p className="mt-0.5 text-xs text-white/55">
-              Real {HISTORY_DAYS}-day actual + real forecast (P10-P90), region-scoped
+              Real {rangeDays}-day actual + real forecast confidence band (P10-P90), region-scoped
             </p>
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <RangeToggle value={rangeDays} onChange={setRangeDays} />
           <PillSelect
             icon={<Globe className="h-3.5 w-3.5" />}
             value={region}
@@ -251,7 +307,7 @@ export function RealEmissionsTrend({
               label="Latest Actual"
               value={data.latestActualTco2e !== null ? fmtKt(data.latestActualTco2e) : "—"}
               unit="tCO₂e"
-              sub="most recent real hour"
+              sub={`most recent real ${data.bucket}`}
             />
             <KpiMiniTile
               label="Forecast (P50) Avg"
@@ -271,14 +327,22 @@ export function RealEmissionsTrend({
             />
           </div>
 
-          <TrendChart points={data.points} onOpenDetails={onOpenDetails} />
+          <TrendChart points={data.points} bucket={data.bucket} />
 
           {data.forecastLagHours !== null && data.forecastLagHours > 1 && (
             <p className="mt-3 flex items-center gap-1.5 text-[11px] text-amber-200/80">
               <Info className="h-3 w-3" />
-              The forecast&apos;s most recent real point is ~{Math.round(data.forecastLagHours)}h
-              behind live — the serving model&apos;s own lookback data lags current ingestion by
-              that much right now, not a display artifact.
+              The &quot;Now&quot; line marks the real forecast&apos;s own start, not this instant —
+              the serving model&apos;s own lookback data is ~{Math.round(data.forecastLagHours)}h
+              behind live ingestion right now, not a display artifact.
+            </p>
+          )}
+          {rangeDays > 7 && (
+            <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-white/40">
+              <Info className="h-3 w-3" />
+              The confidence band only covers the model&apos;s real near-term horizon
+              (real horizon: {data.forecastHorizonLabel}) — there is no {rangeDays}-day-out
+              prediction to show, only {rangeDays} days of real actuals plus that near-term band.
             </p>
           )}
           <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-white/40">
@@ -298,10 +362,10 @@ export function RealEmissionsTrend({
 
 function TrendChart({
   points,
-  onOpenDetails,
+  bucket,
 }: {
   points: TrendPoint[];
-  onOpenDetails?: (point: TrendPoint | null) => void;
+  bucket: "hour" | "day";
 }) {
   const reduced = useReducedMotion();
   const w = 1200, h = 360;
@@ -329,8 +393,13 @@ function TrendChart({
   // artifact) -- a single continuous smoothed path across a real 29h gap
   // draws a plausible-looking curve through a span with zero real data,
   // which is worse than no line at all. Splitting on any real time jump
-  // bigger than 1.5 real hourly steps breaks the line there instead.
-  const actualSegments = splitOnGaps(actualPts).map((seg) =>
+  // bigger than 1.5 real steps (of whichever bucket this range actually
+  // fetched -- an hourly 7D or a daily 30D/90D) breaks the line there
+  // instead. Using the fixed hourly threshold for a daily-bucketed
+  // range would treat every single real ~24h step as a "gap" and never
+  // draw a connected line at all.
+  const actualGapThresholdMs = bucket === "day" ? 36 * 60 * 60 * 1000 : GAP_THRESHOLD_MS;
+  const actualSegments = splitOnGaps(actualPts, actualGapThresholdMs).map((seg) =>
     smoothPath(seg.map((p) => [x(p.tMs), y(p.actualTco2e!)])),
   );
   const fcP50Segments = splitOnGaps(fcPts).map((seg) =>
@@ -342,8 +411,26 @@ function TrendChart({
       seg.map((p) => [x(p.tMs), y(p.p10Tco2e!)]),
     ),
   );
+  // Explicit P10/P90 edge lines -- the real interval is often narrow
+  // relative to the chart's y-range (actual emissions swing far more
+  // than the forecast's own uncertainty), so a fill alone can shrink to
+  // a near-invisible sliver. Tracing both edges keeps the band legible
+  // as a band even when it's only a few px tall.
+  const fcP10Segments = splitOnGaps(fcPts).map((seg) =>
+    smoothPath(seg.map((p) => [x(p.tMs), y(p.p10Tco2e!)])),
+  );
+  const fcP90Segments = splitOnGaps(fcPts).map((seg) =>
+    smoothPath(seg.map((p) => [x(p.tMs), y(p.p90Tco2e!)])),
+  );
 
-  const nowMs = Date.now();
+  // The "Now" line marks the real boundary between the two regions --
+  // where the trimmed real actual history stops and the real forecast
+  // begins (see `loadTrend`'s own comment) -- not literally
+  // `Date.now()` at render time, which the real forecast can lag well
+  // behind (disclosed separately via the caption below `TrendChart`,
+  // which *does* compare against true wall-clock time). Falls back to
+  // `Date.now()` only when there's no forecast to anchor to at all.
+  const nowMs = fcPts.length > 0 ? fcPts[0].tMs : Date.now();
   const nowInRange = nowMs >= tMin && nowMs <= tMax;
 
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -419,13 +506,19 @@ function TrendChart({
           <m.path
             key={`fcband-${i}`}
             d={d}
-            fill="rgba(56,189,248,0.12)"
+            fill="rgba(56,189,248,0.22)"
             stroke="none"
             initial={reduced ? false : { opacity: 0 }}
             animate={{ opacity: 1 }}
             transition={{ duration: 0.7, delay: 0.4 }}
             data-testid="emissions-trend-forecast-band"
           />
+        ))}
+        {fcP90Segments.map((d, i) => (
+          <path key={`fcp90-${i}`} d={d} fill="none" stroke="rgba(125,211,252,0.5)" strokeWidth={1} strokeDasharray="3 3" />
+        ))}
+        {fcP10Segments.map((d, i) => (
+          <path key={`fcp10-${i}`} d={d} fill="none" stroke="rgba(125,211,252,0.5)" strokeWidth={1} strokeDasharray="3 3" />
         ))}
         {fcP50Segments.map((d, i) => (
           <m.path
@@ -516,14 +609,6 @@ function TrendChart({
                 />
               </>
             )}
-            <button
-              type="button"
-              onClick={() => onOpenDetails?.(hoverPoint)}
-              className="pointer-events-auto mt-1.5 w-full rounded border border-emerald-100/30 bg-emerald-100/10 px-2 py-1 text-[10px] font-medium text-emerald-100 hover:bg-emerald-100/20"
-              data-testid="emissions-trend-tooltip-details"
-            >
-              View details →
-            </button>
           </m.div>
         )}
       </AnimatePresence>
@@ -534,6 +619,42 @@ function TrendChart({
 // ────────────────────────────────────────────────────────────────────
 // Small bits
 // ────────────────────────────────────────────────────────────────────
+
+function RangeToggle({
+  value,
+  onChange,
+}: {
+  value: RangeDays;
+  onChange: (v: RangeDays) => void;
+}) {
+  return (
+    <div
+      className="inline-flex items-center gap-0.5 rounded-lg border border-white/10 bg-white/5 p-0.5"
+      role="tablist"
+      aria-label="Actual history range"
+      data-testid="emissions-trend-range"
+    >
+      {RANGES.map((r) => (
+        <button
+          key={r.value}
+          type="button"
+          role="tab"
+          aria-selected={value === r.value}
+          onClick={() => onChange(r.value)}
+          data-testid={`emissions-trend-range-${r.value}`}
+          className={cn(
+            "rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors",
+            value === r.value
+              ? "bg-emerald-200/15 text-emerald-100"
+              : "text-white/60 hover:text-white",
+          )}
+        >
+          {r.label}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 function PillSelect<T extends string>({
   icon, value, options, onChange, testId,
@@ -652,16 +773,19 @@ function smoothBandPath(topPts: Array<[number, number]>, botPts: Array<[number, 
   return `${top} ${bottomReversed} Z`;
 }
 
+/** Smallest "nice" 1/2/2.5/5/10 × 10^n value that's still >= `v` with
+ * ~10% headroom -- guarantees `niceY(v) >= v`, unlike the old formula's
+ * `Math.ceil(norm) * mag * (step / 10)`, which for most real peak
+ * values (e.g. 17,000 -> 4,400) returned a ceiling *below* the actual
+ * max, clipping the line off the top of the chart's SVG viewBox. */
 function niceY(v: number): number {
   if (v <= 0) return 1000;
   const mag = Math.pow(10, Math.floor(Math.log10(v)));
-  const norm = v / mag;
-  let step: number;
-  if (norm <= 1) step = 1;
-  else if (norm <= 2) step = 2;
-  else if (norm <= 5) step = 5;
-  else step = 10;
-  return Math.ceil(norm) * mag * (step / 10) * 1.1;
+  const norm = (v / mag) * 1.1;
+  for (const step of [1, 2, 2.5, 5, 10]) {
+    if (norm <= step) return step * mag;
+  }
+  return 10 * mag;
 }
 
 function fmtYLabel(v: number): string {

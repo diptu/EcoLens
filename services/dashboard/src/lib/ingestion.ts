@@ -708,6 +708,57 @@ export async function triggerFeatureRebuild(): Promise<FeatureRebuildTrigger> {
   return res.json();
 }
 
+/** Real result of one `meta._feature_selection_log` row -- the actual
+ * sklearn output (`scripts/select_features.py`'s `run_selection()`:
+ * mutual information + RandomForest importance + permutation importance,
+ * min-max normalized to [0,1] each, per feature) `triggerFeatureRebuild`
+ * itself only returns a count for. Shape matches that script's own
+ * `selected_features.json` output exactly -- nothing renamed/reshaped
+ * here. `feature_scores`/`selected_features` are absent on a `"failed"`
+ * run (no real result to report). */
+export type FeatureRebuildResult = {
+  target: string;
+  regions: string[];
+  feature_scores?: Record<string, number>;
+  n_common_features?: number;
+  selected_features?: string[];
+  historical_variables?: string[];
+};
+
+export type FeatureRebuildRun = {
+  id: string;
+  triggered_by: string;
+  status: "running" | "success" | "failed";
+  started_at: string;
+  finished_at: string | null;
+  n_selected: number | null;
+  result: FeatureRebuildResult | null;
+  error: string | null;
+};
+
+export type FeatureRebuildRunsList = {
+  data: FeatureRebuildRun[];
+};
+
+/** Live call to `GET /v1/features/rebuild/runs` (`services/ingestion`) --
+ * real history of every feature-selection run, including the FULL real
+ * `result` (per-feature importance scores), not just the `n_selected`
+ * count `POST /v1/features/rebuild` itself returns. Backs the Model
+ * Performance page's "Feature Impact" tab -- the most recent
+ * `status: "success"` entry (`data[0]` if the caller doesn't filter) is
+ * a real, already-computed sklearn feature-importance pass, not a
+ * placeholder; there just isn't a *live-serving* SHAP/per-prediction
+ * attribution anywhere in this platform (a materially bigger, separate
+ * feature), so this shows the real offline selection run's importance
+ * instead of fabricating one. */
+export async function fetchFeatureRebuildRuns(limit = 5): Promise<FeatureRebuildRunsList> {
+  const res = await fetch(`${INGESTION_API_URL}/features/rebuild/runs?limit=${limit}`);
+  if (!res.ok) {
+    throw new Error(`GET /v1/features/rebuild/runs failed: ${res.status}`);
+  }
+  return res.json();
+}
+
 // ────────────────────────────────────────────────────────────────────
 // Manually triggering training — POST /v1/model/train
 // ────────────────────────────────────────────────────────────────────

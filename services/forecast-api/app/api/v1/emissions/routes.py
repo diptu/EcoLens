@@ -345,33 +345,14 @@ async def get_emissions_timeseries(
     return response
 
 
-@router.get("/emissions/forecast", response_model=EmissionsForecastResponse)
-async def get_emissions_forecast(
-    region: str = "NEM",
-    db: AsyncSession = Depends(get_db),
-    redis: Redis = Depends(get_redis_client),
-    registry: ModelRegistry = Depends(get_model_registry),
-    settings: Settings = Depends(get_app_settings),
+async def _compute_emissions_forecast(
+    db: AsyncSession, bundle, region: str
 ) -> EmissionsForecastResponse:
-    """Projects an emissions band by applying the *current* carbon
-    intensity to `GET /v1/forecast`'s demand P10/P50/P90 -- there is no
-    learned emissions-forecasting model in this service, and holding
-    intensity constant across the horizon is a real methodological
-    choice (documented, not hidden): the fuel mix driving intensity can
-    shift meaningfully over a multi-hour horizon (e.g. solar dropping off
-    at dusk), so this is a reasonable near-term approximation, not a
-    substitute for a proper mix-aware emissions forecast."""
-    bundle = registry.bundle
-    if bundle is None:
-        raise ApiError(
-            503, "model_not_loaded", "No Production model version is loaded yet"
-        )
-
-    cache_key = f"emissions:forecast:v1:{region}:{bundle.version}"
-    cached = await redis.get(cache_key)
-    if cached is not None:
-        return EmissionsForecastResponse.model_validate_json(cached)
-
+    """Real compute for `GET /v1/emissions/forecast` -- extracted
+    (2026-08-11) so `app.service.cache_warmer`'s background pre-warm
+    pass can call the exact same logic the route handler does, not a
+    second, separately-maintained copy of it. See the route's own
+    docstring for the methodology."""
     if region == "NEM":
         lo, p50, hi, step, last_ts = await _forecast_arrays_nem(db, bundle)
         intensity_row = await load_current_intensity(db)
@@ -403,7 +384,7 @@ async def get_emissions_forecast(
         for i in range(bundle.horizon)
     ]
 
-    response = EmissionsForecastResponse(
+    return EmissionsForecastResponse(
         region=region,
         generated_at=datetime.now(UTC),
         horizon=_format_timedelta(step * bundle.horizon),
@@ -412,6 +393,53 @@ async def get_emissions_forecast(
         factors_version=intensity_row["factors_version"],
         points=points,
     )
+
+
+def emissions_forecast_cache_key(region: str, bundle_version: str) -> str:
+    """Shared with `app.service.cache_warmer` so the warmer writes to the
+    exact key this route reads from -- one real definition, not two that
+    could drift."""
+    return f"emissions:forecast:v1:{region}:{bundle_version}"
+
+
+@router.get("/emissions/forecast", response_model=EmissionsForecastResponse)
+async def get_emissions_forecast(
+    region: str = "NEM",
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis_client),
+    registry: ModelRegistry = Depends(get_model_registry),
+    settings: Settings = Depends(get_app_settings),
+) -> EmissionsForecastResponse:
+    """Projects an emissions band by applying the *current* carbon
+    intensity to `GET /v1/forecast`'s demand P10/P50/P90 -- there is no
+    learned emissions-forecasting model in this service, and holding
+    intensity constant across the horizon is a real methodological
+    choice (documented, not hidden): the fuel mix driving intensity can
+    shift meaningfully over a multi-hour horizon (e.g. solar dropping off
+    at dusk), so this is a reasonable near-term approximation, not a
+    substitute for a proper mix-aware emissions forecast.
+
+    Cached, `forecast_cache_ttl_seconds` TTL -- confirmed live at ~14s
+    to compute (`region=NEM` sums 5 real per-region live inferences,
+    each its own real Postgres round-trip + LSTM forward pass). For
+    `region=NEM` specifically, `app.service.cache_warmer` also proactively
+    refreshes this cache in the background on an interval shorter than
+    the TTL, so a real user request should never actually hit the ~14s
+    cold path in practice -- see that module for why NEM alone (not
+    every individual region) is worth the background compute cost.
+    """
+    bundle = registry.bundle
+    if bundle is None:
+        raise ApiError(
+            503, "model_not_loaded", "No Production model version is loaded yet"
+        )
+
+    cache_key = emissions_forecast_cache_key(region, bundle.version)
+    cached = await redis.get(cache_key)
+    if cached is not None:
+        return EmissionsForecastResponse.model_validate_json(cached)
+
+    response = await _compute_emissions_forecast(db, bundle, region)
     await redis.set(
         cache_key, response.model_dump_json(), ex=settings.forecast_cache_ttl_seconds
     )

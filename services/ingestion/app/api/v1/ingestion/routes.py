@@ -35,9 +35,12 @@ import uuid
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, Query
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_db
+from app.api.v1.deps import get_app_settings, get_db, get_redis_client
+from app.core.config import Settings
+from app.core.response_cache import cached_response
 from app.schemas.ingest import (
     IngestionRunOut,
     PublicFailedRunsListResponse,
@@ -69,8 +72,19 @@ async def get_ingestion_run_endpoint(
 @router.get("/public/pipelines", response_model=PublicPipelinesListResponse)
 async def list_pipelines_public_endpoint(
     db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis_client),
+    settings: Settings = Depends(get_app_settings),
 ) -> PublicPipelinesListResponse:
-    return await list_pipelines_public(db)
+    # Cached (2026-08-11): confirmed live at ~2-3s/call uncached -- see
+    # `app.core.response_cache`'s own module docstring for why (this
+    # service's real Postgres round-trip cost, not per-endpoint compute).
+    return await cached_response(
+        redis,
+        "ingestion:public_pipelines:v1",
+        settings.public_status_cache_ttl_seconds,
+        PublicPipelinesListResponse,
+        lambda: list_pipelines_public(db),
+    )
 
 
 @router.get("/public/runs", response_model=PublicRunsListResponse)
@@ -83,16 +97,28 @@ async def list_runs_public_endpoint(
     limit: int = Query(default=100, ge=1, le=500),
     cursor: str | None = None,
     db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis_client),
+    settings: Settings = Depends(get_app_settings),
 ) -> PublicRunsListResponse:
-    return await list_runs_public(
-        db,
-        source_id=source_id,
-        status=status,
-        trigger=trigger,
-        from_=from_,
-        to=to,
-        limit=limit,
-        cursor=cursor,
+    cache_key = (
+        "ingestion:public_runs:v1:"
+        f"{source_id}:{status}:{trigger}:{from_}:{to}:{limit}:{cursor}"
+    )
+    return await cached_response(
+        redis,
+        cache_key,
+        settings.public_status_cache_ttl_seconds,
+        PublicRunsListResponse,
+        lambda: list_runs_public(
+            db,
+            source_id=source_id,
+            status=status,
+            trigger=trigger,
+            from_=from_,
+            to=to,
+            limit=limit,
+            cursor=cursor,
+        ),
     )
 
 
@@ -101,20 +127,44 @@ async def list_failed_public_endpoint(
     limit: int = Query(default=50, ge=1, le=200),
     cursor: str | None = None,
     db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis_client),
+    settings: Settings = Depends(get_app_settings),
 ) -> PublicFailedRunsListResponse:
-    return await list_failed_public(db, limit=limit, cursor=cursor)
+    return await cached_response(
+        redis,
+        f"ingestion:public_failed:v1:{limit}:{cursor}",
+        settings.public_status_cache_ttl_seconds,
+        PublicFailedRunsListResponse,
+        lambda: list_failed_public(db, limit=limit, cursor=cursor),
+    )
 
 
 @router.get("/public/retry-queue", response_model=PublicRetryQueueListResponse)
 async def list_retry_queue_public_endpoint(
     limit: int = Query(default=50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis_client),
+    settings: Settings = Depends(get_app_settings),
 ) -> PublicRetryQueueListResponse:
-    return await list_retry_queue_public(db, limit=limit)
+    return await cached_response(
+        redis,
+        f"ingestion:public_retry_queue:v1:{limit}",
+        settings.public_status_cache_ttl_seconds,
+        PublicRetryQueueListResponse,
+        lambda: list_retry_queue_public(db, limit=limit),
+    )
 
 
 @router.get("/public/scheduler", response_model=PublicSchedulerResponse)
 async def get_scheduler_public_endpoint(
     db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis_client),
+    settings: Settings = Depends(get_app_settings),
 ) -> PublicSchedulerResponse:
-    return await get_scheduler_status_public(db)
+    return await cached_response(
+        redis,
+        "ingestion:public_scheduler:v1",
+        settings.public_status_cache_ttl_seconds,
+        PublicSchedulerResponse,
+        lambda: get_scheduler_status_public(db),
+    )

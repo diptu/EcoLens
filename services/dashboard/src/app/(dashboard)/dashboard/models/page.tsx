@@ -15,42 +15,64 @@ import {
   ChevronDown,
   ChevronRight,
   GitBranch,
+  Info,
+  Minus,
   PlayCircle,
   Rocket,
+  Scale,
   Sliders,
+  Star,
   Trash2,
+  TrendingDown,
+  TrendingUp,
+  Trophy,
   XCircle,
 } from "lucide-react";
 
 import { Card } from "@/components/dashboard/card";
+import { PALETTE, RadarChart } from "@/components/dashboard/charts";
+import { ArcGauge } from "@/components/dashboard/gauge";
 import { cn } from "@/lib/utils";
 import {
   deleteModelVersion,
+  fetchModelEvaluation,
+  fetchModelEvaluationHistory,
   fetchModelVersions,
   pollForNewModelVersion,
   promoteModelVersion,
   type ModelVersion,
+  type RegionEvaluation,
 } from "@/lib/emissions";
 import { formatRelativeTime, triggerTraining, type TrainTrigger } from "@/lib/ingestion";
 
-type Tab = "registry" | "train" | "fine-tune";
+type Tab = "registry" | "comparison" | "train" | "fine-tune";
 
 // This page's own architecture list, deliberately narrower than
 // `lib/emissions.ts`'s shared `MODEL_ARCHITECTURES` (which also backs
 // `training/page.tsx` and includes `energy_forecast_multi_task`) --
 // Model Registry is scoped to the three forecasting architectures the
 // product description names (LSTM, TFT, TimesFM), not the separate
-// carbon-insights model. Same scoping decision `performance/page.tsx`
-// already made -- see that file's `PERFORMANCE_ARCHITECTURES` comment
-// for the full TimesFM caveat (zero-shot, no MLflow Model Registry
-// entry of its own, `lstm_demand_timesfm` is a real evaluation-run tag,
-// not a registrable model name).
+// carbon-insights model.
 //
-// Registry/Train tabs behave honestly for TimesFM (empty "no model
-// trained" state, Train tab already permanently disabled regardless of
-// architecture). Fine-tune tab caveat, pre-existing and NOT introduced
-// by adding TimesFM here: `POST /v1/model/train` (`triggerTraining`)
-// takes no architecture parameter at all -- `service/model/actions.py`'s
+// TimesFM's real registrable model is `timesfm_demand_correction`
+// (`service/ml/timesfm_correction.py`) -- a genuinely trainable Ridge-
+// regression residual-correction layer on top of frozen zero-shot
+// TimesFM, with its own MLflow registry entries/versions/metrics, NOT
+// `lstm_demand_timesfm` (that string is only a evaluation-run *tag*,
+// `ml/evaluate.py`'s own comment on it: "not an MLflow Model Registry
+// entry" -- querying it here always 404s/returns empty, which is why
+// this tab used to always show "No registered version for TimesFM
+// yet." regardless of real registry state). Fixed 2026-08-10 -- see
+// this file's git history for the stale `lstm_demand_timesfm` version
+// of this comment if the reasoning above needs re-checking.
+//
+// Train tab still honest for TimesFM: it's permanently disabled
+// regardless of architecture (raw zero-shot TimesFM itself has nothing
+// to retrain; the correction layer trains via its own separate CLI
+// command, `train-timesfm-correction`, not `POST /v1/model/train`).
+// Fine-tune tab caveat, pre-existing and unrelated to TimesFM:
+// `POST /v1/model/train` (`triggerTraining`) takes no architecture
+// parameter at all -- `service/model/actions.py`'s
 // `_build_and_publish_training_trigger` hardcodes `"architecture":
 // "lstm"` server-side regardless of which tab is selected client-side,
 // so selecting TFT *or* TimesFM and clicking "Start fine-tune" already
@@ -58,7 +80,7 @@ type Tab = "registry" | "train" | "fine-tune";
 const MODEL_ARCHITECTURES = [
   { modelName: "lstm_demand", label: "LSTM" },
   { modelName: "lstm_demand_tft", label: "TFT" },
-  { modelName: "lstm_demand_timesfm", label: "TimesFM" },
+  { modelName: "timesfm_demand_correction", label: "TimesFM" },
 ] as const;
 
 export default function AdminModelsPage() {
@@ -159,6 +181,9 @@ export default function AdminModelsPage() {
         <TabButton active={tab === "registry"}  onClick={() => setTab("registry")}  data-testid="tab-registry">
           <Box className="h-3.5 w-3.5" /> Registry
         </TabButton>
+        <TabButton active={tab === "comparison"} onClick={() => setTab("comparison")} data-testid="tab-comparison">
+          <Scale className="h-3.5 w-3.5" /> Comparison
+        </TabButton>
         <TabButton active={tab === "train"}     onClick={() => setTab("train")}     data-testid="tab-train">
           <Rocket className="h-3.5 w-3.5" /> Train
         </TabButton>
@@ -221,6 +246,9 @@ export default function AdminModelsPage() {
         </Card>
       )}
 
+      {/* ── Comparison tab ──────────────────────────────────── */}
+      {tab === "comparison" && <ComparisonTab />}
+
       {/* ── Train tab ────────────────────────────────────────── */}
       {tab === "train" && <TrainForm />}
 
@@ -263,6 +291,730 @@ function TabButton({
     >
       {children}
     </button>
+  );
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Comparison tab -- real Model Comparison view (2026-08-10). Every
+// number here traces to a real forecast-api read: `GET /v1/model/
+// versions` (registry metadata + training-time `test_*` metrics),
+// `GET .../evaluation` (the harder walk-forward backtest, preferred
+// when it exists), and `GET .../evaluation-history` (the real time
+// series a genuine "has this version's accuracy drifted" comparison
+// needs). No metric here is fabricated -- a candidate whose evaluation
+// has never been run falls back to its training-time split honestly
+// labeled `metricsSource: "training"`, and Stability stays `null`
+// (rendered as "not enough evaluation history yet") until `evaluate`
+// has actually been run at least twice for that version.
+// ────────────────────────────────────────────────────────────────────
+
+type ComparisonCandidate = {
+  modelName: string;
+  label: string;
+  version: ModelVersion | null;
+  primaryCandidateName: string | null;
+  accuracyMape: number | null;
+  reliabilityCoverage: number | null;
+  consistencyWidthMw: number | null;
+  metricsSource: "evaluation" | "training" | null;
+  driftDeltaMapePp: number | null;
+  driftRunCount: number;
+};
+
+function average(values: number[]): number | null {
+  const finite = values.filter((v) => Number.isFinite(v));
+  if (finite.length === 0) return null;
+  return finite.reduce((a, b) => a + b, 0) / finite.length;
+}
+
+async function loadComparisonCandidate(
+  modelName: string,
+  label: string,
+): Promise<ComparisonCandidate> {
+  const base: ComparisonCandidate = {
+    modelName,
+    label,
+    version: null,
+    primaryCandidateName: null,
+    accuracyMape: null,
+    reliabilityCoverage: null,
+    consistencyWidthMw: null,
+    metricsSource: null,
+    driftDeltaMapePp: null,
+    driftRunCount: 0,
+  };
+
+  let versions: ModelVersion[];
+  try {
+    versions = (await fetchModelVersions(modelName)).data;
+  } catch {
+    return base;
+  }
+  if (versions.length === 0) return base;
+
+  const version = versions.find((v) => v.stage === "Production") ?? versions[0];
+  base.version = version;
+  const primaryCandidateName = `${modelName}_v${version.version}`;
+  base.primaryCandidateName = primaryCandidateName;
+
+  const byPrimary = (regions: RegionEvaluation[]) =>
+    regions.filter((r) => r.candidate === primaryCandidateName);
+
+  try {
+    const evaluation = await fetchModelEvaluation(version.version, modelName);
+    const rows = evaluation ? byPrimary(evaluation.regions) : [];
+    if (rows.length > 0) {
+      base.accuracyMape = average(rows.map((r) => r.mape));
+      base.reliabilityCoverage = average(rows.map((r) => r.coverage));
+      base.consistencyWidthMw = average(rows.map((r) => r.interval_width));
+      base.metricsSource = "evaluation";
+    }
+  } catch {
+    // Real evaluation read can fail (e.g. registry unreachable) -- fall
+    // through to the training-time split below rather than surfacing a
+    // hard error for what's an optional, "harder" number.
+  }
+
+  if (base.metricsSource === null) {
+    const m = version.metrics;
+    // `timesfm_demand_correction` (`service/ml/timesfm_correction.py`)
+    // logs its training-time test split under its own `corrected_*`
+    // key names (`raw_test_mape`/`corrected_test_mape`/etc, not the
+    // LSTM/TFT `train_and_register`'s `test_*` names) -- real numbers,
+    // just a different real key, so this checks both rather than
+    // showing "no test metrics" for a version that actually has them.
+    // No calibrated-interval-width equivalent is logged for the
+    // correction model, so Consistency honestly stays "—" for it.
+    const hasAny =
+      m.test_mape !== undefined ||
+      m.test_coverage_calibrated !== undefined ||
+      m.test_interval_width_calibrated_mw !== undefined ||
+      m.corrected_test_mape !== undefined ||
+      m.corrected_test_coverage_calibrated !== undefined;
+    if (hasAny) {
+      base.accuracyMape = m.test_mape ?? m.corrected_test_mape ?? null;
+      base.reliabilityCoverage = m.test_coverage_calibrated ?? m.corrected_test_coverage_calibrated ?? null;
+      base.consistencyWidthMw = m.test_interval_width_calibrated_mw ?? null;
+      base.metricsSource = "training";
+    }
+  }
+
+  try {
+    const history = await fetchModelEvaluationHistory(version.version, modelName);
+    const perRunMape = history.runs
+      .map((run) => average(byPrimary(run.regions).map((r) => r.mape)))
+      .filter((v): v is number => v !== null);
+    base.driftRunCount = perRunMape.length;
+    if (perRunMape.length >= 2) {
+      base.driftDeltaMapePp = perRunMape[perRunMape.length - 1] - perRunMape[0];
+    }
+  } catch {
+    // Real history read can fail -- Stability stays "not enough data".
+  }
+
+  return base;
+}
+
+/** Bounded to [0, 100] -- a MAPE over 100% (a real possibility for a bad
+ * model on a volatile series) would otherwise drive this negative. */
+function accuracyScore(mape: number | null): number | null {
+  if (mape === null) return null;
+  return Math.max(0, Math.min(100, 100 - mape));
+}
+
+function reliabilityScore(coverage: number | null): number | null {
+  if (coverage === null) return null;
+  return Math.max(0, Math.min(100, coverage * 100));
+}
+
+/** Relative, not absolute -- there's no universal "good" MW interval
+ * width across regions of very different scale (TAS1 vs NSW1), so this
+ * scores the narrower of the *two candidates actually being compared*
+ * higher, explicitly disclosed as relative in the UI caption below. */
+function consistencyScores(
+  widthA: number | null,
+  widthB: number | null,
+): [number | null, number | null] {
+  if (widthA === null || widthB === null) return [null, null];
+  const worst = Math.max(widthA, widthB);
+  if (worst === 0) return [100, 100];
+  return [100 * (1 - widthA / worst), 100 * (1 - widthB / worst)];
+}
+
+// Sensitivity factor for `stabilityScore` -- how many points a 1
+// percentage-point rise in real backtested MAPE (between a version's
+// earliest and most recent `evaluate` run) costs. A bare `10` here would
+// be an undocumented magic number with no stated rationale; naming it
+// makes explicit that it's a deliberate product choice (harsher than a
+// 1:1 point-per-pp penalty), not a value derived from any calibration
+// study -- tune it here if that choice ever needs revisiting, and the
+// `ScoreCalculationTooltip` breakdown below picks up the change
+// automatically rather than drifting out of sync with a hardcoded copy.
+const STABILITY_PENALTY_PER_PP = 10;
+
+/** Absolute, disclosed formula: every 1 percentage-point rise in this
+ * version's own real backtested MAPE between its earliest and most
+ * recent `evaluate` run costs `STABILITY_PENALTY_PER_PP` points, bounded
+ * to [0, 100] -- an improvement is capped at 100, not rewarded beyond
+ * it, and a large-enough regression floors at 0 rather than going
+ * negative. */
+function stabilityScore(deltaPp: number | null): number | null {
+  if (deltaPp === null) return null;
+  return Math.max(0, Math.min(100, 100 - Math.max(0, deltaPp) * STABILITY_PENALTY_PER_PP));
+}
+
+function overallScore(scores: Array<number | null>): number | null {
+  const present = scores.filter((s): s is number => s !== null);
+  if (present.length === 0) return null;
+  return present.reduce((a, b) => a + b, 0) / present.length;
+}
+
+function ComparisonTab() {
+  const [modelNameA, setModelNameA] = useState<string>(MODEL_ARCHITECTURES[1].modelName); // TFT
+  const [modelNameB, setModelNameB] = useState<string>(MODEL_ARCHITECTURES[0].modelName); // LSTM
+  const [loading, setLoading] = useState(true);
+  const [candA, setCandA] = useState<ComparisonCandidate | null>(null);
+  const [candB, setCandB] = useState<ComparisonCandidate | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    const labelA = MODEL_ARCHITECTURES.find((a) => a.modelName === modelNameA)?.label ?? modelNameA;
+    const labelB = MODEL_ARCHITECTURES.find((a) => a.modelName === modelNameB)?.label ?? modelNameB;
+    Promise.all([
+      loadComparisonCandidate(modelNameA, labelA),
+      loadComparisonCandidate(modelNameB, labelB),
+    ])
+      .then(([a, b]) => {
+        if (!cancelled) {
+          setCandA(a);
+          setCandB(b);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [modelNameA, modelNameB]);
+
+  const accA = accuracyScore(candA?.accuracyMape ?? null);
+  const accB = accuracyScore(candB?.accuracyMape ?? null);
+  const relA = reliabilityScore(candA?.reliabilityCoverage ?? null);
+  const relB = reliabilityScore(candB?.reliabilityCoverage ?? null);
+  const [consA, consB] = consistencyScores(
+    candA?.consistencyWidthMw ?? null,
+    candB?.consistencyWidthMw ?? null,
+  );
+  const stabA = stabilityScore(candA?.driftDeltaMapePp ?? null);
+  const stabB = stabilityScore(candB?.driftDeltaMapePp ?? null);
+  const overallA = overallScore([accA, relA, consA, stabA]);
+  const overallB = overallScore([accB, relB, consB, stabB]);
+
+  const leading =
+    overallA !== null && (overallB === null || overallA >= overallB) ? "A" : overallB !== null ? "B" : null;
+
+  return (
+    <div className="space-y-6" data-testid="comparison-tab">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_1fr_320px]">
+        <ComparisonPicker
+          value={modelNameA}
+          onChange={setModelNameA}
+          exclude={modelNameB}
+          testId="comparison-select-a"
+        />
+        <ComparisonPicker
+          value={modelNameB}
+          onChange={setModelNameB}
+          exclude={modelNameA}
+          testId="comparison-select-b"
+        />
+        <div />
+      </div>
+
+      {loading ? (
+        <Card><p className="py-8 text-center text-xs text-white/40">Loading real registry + evaluation data…</p></Card>
+      ) : (
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_1fr_320px]">
+          <ComparisonScoreCard
+            candidate={candA}
+            overall={overallA}
+            accuracyScore={accA}
+            reliabilityScore={relA}
+            consistencyScore={consA}
+            stabilityScore={stabA}
+            leading={leading === "A"}
+            color={PALETTE.green}
+          />
+          <ComparisonScoreCard
+            candidate={candB}
+            overall={overallB}
+            accuracyScore={accB}
+            reliabilityScore={relB}
+            consistencyScore={consB}
+            stabilityScore={stabB}
+            leading={leading === "B"}
+            color={PALETTE.sky}
+          />
+          <RecommendationPanel
+            candA={candA}
+            candB={candB}
+            accA={accA}
+            relA={relA}
+            consA={consA}
+            stabA={stabA}
+            accB={accB}
+            relB={relB}
+            consB={consB}
+            stabB={stabB}
+            overallA={overallA}
+            overallB={overallB}
+            leading={leading}
+          />
+        </div>
+      )}
+
+      {!loading && (candA?.metricsSource || candB?.metricsSource) && (
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_320px]">
+          <KeyMetricsTable candA={candA} candB={candB} />
+          <Card title="Model at a Glance">
+            <RadarChart
+              axes={["Accuracy", "Reliability", "Consistency", "Stability"]}
+              maxValue={100}
+              series={[
+                { name: candA?.label ?? "A", color: PALETTE.green, values: [accA ?? 0, relA ?? 0, consA ?? 0, stabA ?? 0] },
+                { name: candB?.label ?? "B", color: PALETTE.sky, values: [accB ?? 0, relB ?? 0, consB ?? 0, stabB ?? 0] },
+              ]}
+            />
+            <p className="mt-3 text-[10px] leading-relaxed text-white/40">
+              Each axis is a real metric normalized 0-100 (higher = better). Consistency is
+              relative between these two candidates (narrower interval wins); Stability needs
+              &ge;2 real <code className="font-mono">evaluate</code> runs for this version to be
+              computed, and reads as "no data" (axis at 0) until then.
+            </p>
+          </Card>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ComparisonPicker({
+  value, onChange, exclude, testId,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  exclude: string;
+  testId: string;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <label className="text-[10px] font-semibold uppercase tracking-wider text-white/40">
+        Compare
+      </label>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        data-testid={testId}
+        className="rounded-md border border-white/10 bg-white/[0.04] px-2.5 py-1.5 text-sm text-white focus:border-emerald-200/60 focus:outline-none"
+      >
+        {MODEL_ARCHITECTURES.filter((a) => a.modelName !== exclude).map((a) => (
+          <option key={a.modelName} value={a.modelName} className="bg-[#0a1410]">
+            {a.label}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+function MetricRow({
+  label, score, display, color,
+}: {
+  label: string;
+  score: number | null;
+  display: string;
+  color: string;
+}) {
+  return (
+    <div>
+      <div className="flex items-center justify-between text-xs">
+        <span className="text-white/55">{label}</span>
+        <span className="font-mono font-semibold text-white">{display}</span>
+      </div>
+      <div className="mt-1 h-1 w-full overflow-hidden rounded-full bg-white/5">
+        <div
+          className="h-full rounded-full"
+          style={{ width: `${score ?? 0}%`, backgroundColor: color }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function ComparisonScoreCard({
+  candidate, overall, accuracyScore: accS, reliabilityScore: relS, consistencyScore: consS,
+  stabilityScore: stabS, leading, color,
+}: {
+  candidate: ComparisonCandidate | null;
+  overall: number | null;
+  accuracyScore: number | null;
+  reliabilityScore: number | null;
+  consistencyScore: number | null;
+  stabilityScore: number | null;
+  leading: boolean;
+  color: string;
+}) {
+  if (!candidate || !candidate.version) {
+    return (
+      <Card>
+        <p className="py-8 text-center text-xs text-white/40">
+          {candidate ? `No registered version for ${candidate.label} yet.` : ""}
+        </p>
+      </Card>
+    );
+  }
+  const { version } = candidate;
+  return (
+    <Card
+      noPadding
+      className={leading ? "border-lime-200/25 bg-lime-100/[0.03]" : undefined}
+      data-testid={`comparison-card-${candidate.modelName}`}
+    >
+      <div className="flex items-start justify-between gap-2 p-5 pb-0">
+        <div>
+          {leading && (
+            <div className="mb-1 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-lime-200">
+              <Trophy className="h-3 w-3" /> Leading model
+            </div>
+          )}
+          <h3 className="text-lg font-bold text-white">{candidate.label}</h3>
+          <p className="mt-0.5 text-[11px] text-white/45">
+            v{version.version} · {formatRelativeTime(version.created_at)}
+          </p>
+        </div>
+        <span className={cn(
+          "rounded-md border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider",
+          STAGE_COLORS[version.stage] ?? "border-white/10 bg-white/5 text-white/55",
+        )}>
+          {version.stage}
+        </span>
+      </div>
+      <div className="flex items-center gap-4 p-5">
+        <div className="flex flex-col items-center gap-1.5">
+          <ArcGauge value={overall ?? 0} max={100} label={overall === null ? "—" : overall.toFixed(0)} sub="/ 100" size={128} color={color} />
+          <ScoreCalculationTooltip
+            overall={overall}
+            accS={accS}
+            relS={relS}
+            consS={consS}
+            stabS={stabS}
+            candidate={candidate}
+          />
+        </div>
+        <div className="flex-1 space-y-2.5">
+          <MetricRow
+            label="Accuracy (MAPE)"
+            score={accS}
+            color={color}
+            display={candidate.accuracyMape === null ? "—" : `${candidate.accuracyMape.toFixed(2)}%`}
+          />
+          <MetricRow
+            label="Reliability (Coverage)"
+            score={relS}
+            color={color}
+            display={candidate.reliabilityCoverage === null ? "—" : `${(candidate.reliabilityCoverage * 100).toFixed(1)}%`}
+          />
+          <MetricRow
+            label="Consistency (Interval Width)"
+            score={consS}
+            color={color}
+            display={candidate.consistencyWidthMw === null ? "—" : `${candidate.consistencyWidthMw.toFixed(0)} MW`}
+          />
+          <MetricRow
+            label="Stability (Perf. Drift)"
+            score={stabS}
+            color={color}
+            display={candidate.driftDeltaMapePp === null ? `— (${candidate.driftRunCount}/2 eval runs)` : `${candidate.driftDeltaMapePp >= 0 ? "+" : ""}${candidate.driftDeltaMapePp.toFixed(2)}pp`}
+          />
+        </div>
+      </div>
+      <div className="border-t border-white/5 px-5 py-3 text-[11px] text-white/45">
+        {candidate.metricsSource === "evaluation"
+          ? "Accuracy/Reliability/Consistency from a real walk-forward evaluate run."
+          : candidate.metricsSource === "training"
+            ? "No evaluate run logged yet -- showing this version's training-time test split instead."
+            : "No test metrics logged for this version yet."}
+      </div>
+    </Card>
+  );
+}
+
+/**
+ * ScoreCalculationTooltip — hover-only breakdown of how the composite
+ * "overall" score (and each of its 4 sub-scores) is actually computed,
+ * with this candidate's own real numbers plugged into each formula.
+ *
+ * Deliberately hover-on-a-fixed-icon, not a floating mouse-tracked
+ * tooltip with an interactive button inside (the "View details" pattern
+ * `RealEmissionsTrend`'s tooltip used to have, removed 2026-08-10
+ * because a mouse-tracked tooltip relocates out from under the cursor
+ * before a click can land) -- this one is read-only and anchored to a
+ * static target, so hovering it is enough; there's nothing inside that
+ * needs to be clicked.
+ */
+function ScoreCalculationTooltip({
+  overall, accS, relS, consS, stabS, candidate,
+}: {
+  overall: number | null;
+  accS: number | null;
+  relS: number | null;
+  consS: number | null;
+  stabS: number | null;
+  candidate: ComparisonCandidate;
+}) {
+  const fmt = (v: number | null) => (v === null ? "no data" : v.toFixed(1));
+  return (
+    <div className="group relative">
+      <span className="flex cursor-help items-center gap-1 text-[10px] text-white/40 hover:text-white/70">
+        <Info className="h-3 w-3" /> How calculated?
+      </span>
+      <div className="pointer-events-none absolute left-1/2 top-full z-30 mt-2 w-72 -translate-x-1/2 rounded-md border border-white/10 bg-[#0a1410]/95 p-3 text-[11px] leading-relaxed text-white/70 opacity-0 shadow-2xl backdrop-blur transition-opacity duration-150 group-hover:opacity-100">
+        <p className="mb-1.5 font-semibold text-white">
+          Overall = average of the scores below (each normalized 0-100, higher = better)
+        </p>
+        <ul className="space-y-1">
+          <li>
+            <span className="text-white/90">Accuracy</span> = 100 − MAPE →{" "}
+            {candidate.accuracyMape === null
+              ? "no data"
+              : `100 − ${candidate.accuracyMape.toFixed(2)} = ${fmt(accS)}`}
+          </li>
+          <li>
+            <span className="text-white/90">Reliability</span> = Coverage × 100 →{" "}
+            {candidate.reliabilityCoverage === null
+              ? "no data"
+              : `${(candidate.reliabilityCoverage * 100).toFixed(1)} → ${fmt(relS)}`}
+          </li>
+          <li>
+            <span className="text-white/90">Consistency</span> = 100 × (1 − this width ÷ the
+            wider of the two compared models&apos; widths) -- relative, not absolute → {fmt(consS)}
+          </li>
+          <li>
+            <span className="text-white/90">Stability</span> = 100 − {STABILITY_PENALTY_PER_PP} × the
+            MAPE increase between this version&apos;s earliest and latest real{" "}
+            <code className="font-mono">evaluate</code> run (0 if it improved) → {fmt(stabS)}
+          </li>
+        </ul>
+        <p className="mt-1.5 border-t border-white/10 pt-1.5 text-white/50">
+          Overall = mean of whichever scores above have data ={" "}
+          {overall === null ? "—" : overall.toFixed(1)}
+        </p>
+        <p className="mt-1 text-white/40">
+          {candidate.metricsSource === "evaluation"
+            ? "Accuracy/Reliability/Consistency come from this version's real walk-forward evaluate run."
+            : candidate.metricsSource === "training"
+              ? "No evaluate run logged yet -- using this version's training-time test split instead."
+              : "No test metrics logged for this version yet."}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function RecommendationPanel({
+  candA, candB, overallA, overallB, accA, relA, consA, stabA, accB, relB, consB, stabB, leading,
+}: {
+  candA: ComparisonCandidate | null;
+  candB: ComparisonCandidate | null;
+  overallA: number | null;
+  overallB: number | null;
+  accA: number | null;
+  relA: number | null;
+  consA: number | null;
+  stabA: number | null;
+  accB: number | null;
+  relB: number | null;
+  consB: number | null;
+  stabB: number | null;
+  leading: "A" | "B" | null;
+}) {
+  const [promoting, setPromoting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState(false);
+
+  if (leading === null) {
+    return (
+      <Card title="Recommendation">
+        <p className="py-4 text-xs text-white/45">
+          Not enough real data to recommend a model yet -- neither candidate has a
+          training-time test split or an evaluate run logged.
+        </p>
+      </Card>
+    );
+  }
+
+  const winner = leading === "A" ? candA : candB;
+  const other = leading === "A" ? candB : candA;
+  const winnerOverall = leading === "A" ? overallA : overallB;
+  const otherOverall = leading === "A" ? overallB : overallA;
+  const winnerAcc = leading === "A" ? accA : accB;
+  const winnerRel = leading === "A" ? relA : relB;
+  const winnerCons = leading === "A" ? consA : consB;
+  const winnerStab = leading === "A" ? stabA : stabB;
+  const improvementPct =
+    otherOverall !== null && otherOverall > 0 && winnerOverall !== null
+      ? ((winnerOverall - otherOverall) / otherOverall) * 100
+      : null;
+  const alreadyProduction = winner?.version?.stage === "Production";
+
+  async function handlePromote() {
+    if (!winner?.version) return;
+    if (
+      !window.confirm(
+        `Promote ${winner.label} v${winner.version.version} to Production? This archives whatever is currently in Production for ${winner.modelName}.`,
+      )
+    ) {
+      return;
+    }
+    setPromoting(true);
+    setError(null);
+    try {
+      await promoteModelVersion(winner.version.version, "Production", winner.modelName);
+      setDone(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "promotion failed");
+    } finally {
+      setPromoting(false);
+    }
+  }
+
+  return (
+    <Card title="Recommendation" data-testid="recommendation-panel">
+      <div className="space-y-3">
+        <div className="flex items-center gap-2">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-lime-200/30 bg-lime-100/10">
+            <Star className="h-4 w-4 text-lime-200" />
+          </span>
+          <div>
+            <p className="text-sm font-semibold text-white">
+              {alreadyProduction ? `${winner?.label} is already in Production` : `Promote ${winner?.label} to Production`}
+            </p>
+            {winner && other && (
+              <p className="mt-0.5 text-[11px] text-white/50">
+                {winner.label} ({winner.metricsSource ?? "no data"}) scores higher than {other.label} on available metrics.
+              </p>
+            )}
+          </div>
+        </div>
+        <dl className="space-y-1.5 text-xs">
+          <div className="flex justify-between">
+            <dt className="flex items-center gap-1.5 text-white/45">
+              Overall score
+              {winner && (
+                <ScoreCalculationTooltip
+                  overall={winnerOverall}
+                  accS={winnerAcc}
+                  relS={winnerRel}
+                  consS={winnerCons}
+                  stabS={winnerStab}
+                  candidate={winner}
+                />
+              )}
+            </dt>
+            <dd className="font-mono text-white">{winnerOverall !== null ? `${winnerOverall.toFixed(0)}/100` : "—"}</dd>
+          </div>
+          <div className="flex justify-between"><dt className="text-white/45">vs. other candidate</dt><dd className="font-mono text-white">{improvementPct !== null ? `${improvementPct >= 0 ? "+" : ""}${improvementPct.toFixed(0)}%` : "—"}</dd></div>
+          <div className="flex justify-between"><dt className="text-white/45">Ready for production</dt><dd className="font-mono text-white">{winner?.version ? "Yes" : "No"}</dd></div>
+        </dl>
+        {error && <p className="text-[11px] text-rose-300">{error}</p>}
+        {done ? (
+          <p className="rounded-md border border-lime-200/30 bg-lime-100/10 px-3 py-2 text-[11px] text-lime-100">
+            Promoted -- reload the Registry tab to see it reflected.
+          </p>
+        ) : !alreadyProduction && winner?.version ? (
+          <button
+            type="button"
+            onClick={handlePromote}
+            disabled={promoting}
+            data-testid="promote-recommended"
+            className="flex w-full items-center justify-center gap-1.5 rounded-md bg-lime-100 px-4 py-2 text-sm font-semibold text-black hover:bg-lime-200 disabled:opacity-50"
+          >
+            <Rocket className="h-3.5 w-3.5" /> {promoting ? "Promoting…" : `Promote ${winner.label} to Production`}
+          </button>
+        ) : null}
+      </div>
+    </Card>
+  );
+}
+
+function KeyMetricsTable({
+  candA, candB,
+}: {
+  candA: ComparisonCandidate | null;
+  candB: ComparisonCandidate | null;
+}) {
+  type Row = {
+    label: string;
+    lowerIsBetter: boolean;
+    valueA: number | null;
+    valueB: number | null;
+    fmt: (v: number) => string;
+  };
+  const rows: Row[] = [
+    { label: "Accuracy (MAPE)", lowerIsBetter: true, valueA: candA?.accuracyMape ?? null, valueB: candB?.accuracyMape ?? null, fmt: (v) => `${v.toFixed(2)}%` },
+    { label: "Reliability (Coverage)", lowerIsBetter: false, valueA: candA?.reliabilityCoverage ?? null, valueB: candB?.reliabilityCoverage ?? null, fmt: (v) => `${(v * 100).toFixed(1)}%` },
+    { label: "Consistency (Interval Width)", lowerIsBetter: true, valueA: candA?.consistencyWidthMw ?? null, valueB: candB?.consistencyWidthMw ?? null, fmt: (v) => `${v.toFixed(0)} MW` },
+    { label: "Stability (Perf. Drift)", lowerIsBetter: true, valueA: candA?.driftDeltaMapePp ?? null, valueB: candB?.driftDeltaMapePp ?? null, fmt: (v) => `${v >= 0 ? "+" : ""}${v.toFixed(2)}pp` },
+  ];
+  return (
+    <Card title="Key Metrics Comparison" noPadding>
+      <div className="overflow-x-auto">
+        <table className="w-full text-left text-xs">
+          <thead>
+            <tr className="border-b border-white/5 text-[10px] uppercase tracking-wider text-white/40">
+              <th className="px-4 py-2.5 font-medium">Metric</th>
+              <th className="px-4 py-2.5 font-medium">{candA?.label ?? "A"}</th>
+              <th className="px-4 py-2.5 font-medium">{candB?.label ?? "B"}</th>
+              <th className="px-4 py-2.5 font-medium">Difference</th>
+              <th className="px-4 py-2.5 font-medium">Better</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => {
+              const both = row.valueA !== null && row.valueB !== null;
+              const better = !both ? null : row.lowerIsBetter
+                ? (row.valueA! <= row.valueB! ? "A" : "B")
+                : (row.valueA! >= row.valueB! ? "A" : "B");
+              const diff = both ? row.valueA! - row.valueB! : null;
+              return (
+                <tr key={row.label} className="border-b border-white/5 last:border-0">
+                  <td className="px-4 py-2.5 text-white/70">{row.label}</td>
+                  <td className="px-4 py-2.5 font-mono text-white">{row.valueA !== null ? row.fmt(row.valueA) : "—"}</td>
+                  <td className="px-4 py-2.5 font-mono text-white">{row.valueB !== null ? row.fmt(row.valueB) : "—"}</td>
+                  <td className="px-4 py-2.5 font-mono text-white/60">{diff !== null ? row.fmt(diff) : "—"}</td>
+                  <td className="px-4 py-2.5">
+                    {better === null ? (
+                      <span className="text-white/30">—</span>
+                    ) : diff === 0 ? (
+                      <span className="inline-flex items-center gap-1 text-white/40">
+                        <Minus className="h-3 w-3" /> Tie
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 text-emerald-200">
+                        {row.lowerIsBetter === (diff! < 0) ? <TrendingDown className="h-3 w-3" /> : <TrendingUp className="h-3 w-3" />}
+                        {better === "A" ? candA?.label : candB?.label}
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </Card>
   );
 }
 

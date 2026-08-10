@@ -7,9 +7,11 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
+from app.db.redis import get_redis
 from app.db.session import get_session
 
 
@@ -20,3 +22,7 @@ async def get_db() -> AsyncIterator[AsyncSession]:
 
 def get_app_settings() -> Settings:
     return get_settings()
+
+
+def get_redis_client() -> Redis:
+    return get_redis()

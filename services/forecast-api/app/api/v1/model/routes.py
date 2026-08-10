@@ -24,6 +24,7 @@ from app.core.errors import ApiError
 from app.schemas.model import (
     DriftListResponse,
     DriftReportOut,
+    EvaluationSummaryOut,
     ExperimentOut,
     ExperimentsListResponse,
     LossCurveOut,
@@ -34,6 +35,7 @@ from app.schemas.model import (
     ModelVersionOut,
     ModelVersionsListResponse,
     PromoteModelRequest,
+    RegionEvaluationOut,
     TrainingRunsListResponse,
     TrainRequest,
     TrainTriggerResponse,
@@ -52,6 +54,7 @@ from app.service.ml.registry import (
     ModelRegistry,
     PromotionRejected,
     delete_model_version,
+    get_latest_evaluation,
     get_loss_curve,
     list_versions,
     promote_version,
@@ -329,6 +332,48 @@ async def get_model_version_loss_curve(
                 val_mae=p.val_mae,
             )
             for p in curve.points
+        ],
+    )
+
+
+@router.get(
+    "/model/versions/{version}/evaluation", response_model=EvaluationSummaryOut | None
+)
+async def get_model_version_evaluation(
+    version: str,
+    model_name: str | None = None,
+    settings: Settings = Depends(get_app_settings),
+) -> EvaluationSummaryOut | None:
+    """Real walk-forward backtest results (`ecolens-forecast evaluate`)
+    for one version, per region/candidate -- `null` (not a 404) when no
+    evaluation has ever been run for it, same "empty is a real, expected
+    state" convention `GET /v1/model/drift` etc. already use. Distinct
+    from `GET /model/versions`' own `metrics.test_mape` (the easier,
+    training-time split) -- this is the honest, harder rolling-origin
+    backtest against a real seasonal-naive baseline (`ml/registry.py`'s
+    `get_latest_evaluation` docstring has the full reasoning for why
+    these live in a separate MLflow run and can't be merged into the
+    version's own metrics)."""
+    model_name = model_name or settings.mlflow_registry_model_name
+    summary = await get_latest_evaluation(model_name, version)
+    if summary is None:
+        return None
+    return EvaluationSummaryOut(
+        model_name=model_name,
+        version=version,
+        run_id=summary.run_id,
+        evaluated_at=summary.evaluated_at,
+        n_origins=summary.n_origins,
+        regions=[
+            RegionEvaluationOut(
+                region=r.region,
+                candidate=r.candidate,
+                mape=r.mape,
+                rmse=r.rmse,
+                coverage=r.coverage,
+                n_origins=r.n_origins,
+            )
+            for r in summary.regions
         ],
     )
 

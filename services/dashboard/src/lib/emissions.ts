@@ -478,6 +478,53 @@ export async function fetchLossCurve(
   return res.json();
 }
 
+export type RegionEvaluation = {
+  region: string;
+  candidate: string;
+  mape: number;
+  rmse: number;
+  coverage: number;
+  n_origins: number;
+};
+
+export type EvaluationSummary = {
+  model_name: string;
+  version: string;
+  run_id: string;
+  evaluated_at: string;
+  n_origins: number;
+  regions: RegionEvaluation[];
+};
+
+/** Live call to `GET /v1/model/versions/{version}/evaluation` -- the
+ * real walk-forward backtest (`ecolens-forecast evaluate`) for one
+ * registered version, per region/candidate (the version itself, its
+ * uncalibrated raw quantiles, and a seasonal-naive baseline). `null`
+ * when no evaluation has ever been run for this version -- a real,
+ * expected state (`evaluate` is a deliberate, occasional CLI run, not
+ * something every training run triggers automatically), not an error.
+ * Distinct from `ModelVersion.metrics.test_mape` (the easier,
+ * training-time split) -- this is the honest, harder rolling-origin
+ * number a version's own registered metrics can never surface (see
+ * forecast-api's `ml/registry.py`'s `get_latest_evaluation` docstring
+ * for why). */
+export async function fetchModelEvaluation(
+  version: string,
+  modelName?: string,
+): Promise<EvaluationSummary | null> {
+  const url = modelName
+    ? `${FORECAST_API_URL}/model/versions/${encodeURIComponent(version)}/evaluation?model_name=${encodeURIComponent(modelName)}`
+    : `${FORECAST_API_URL}/model/versions/${encodeURIComponent(version)}/evaluation`;
+  const res = await fetchWithTimeout(url);
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(
+      body?.error?.message ?? `GET /v1/model/versions/${version}/evaluation failed: ${res.status}`,
+    );
+  }
+  return res.json();
+}
+
 export type MlflowExperiment = {
   experiment_id: string;
   name: string;

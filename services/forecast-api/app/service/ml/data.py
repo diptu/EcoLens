@@ -182,6 +182,32 @@ def split_by_time(
     return TimeSplit(train=train, val=val, test=test)
 
 
+def split_by_date(
+    df: pd.DataFrame,
+    *,
+    train_start: pd.Timestamp,
+    train_end: pd.Timestamp,
+    val_start: pd.Timestamp,
+    val_end: pd.Timestamp,
+    test_start: pd.Timestamp,
+    test_end: pd.Timestamp,
+    ts_col: str = "ts",
+) -> TimeSplit:
+    """`split_by_time`'s explicit-calendar-boundary counterpart -- for
+    when the caller wants a fixed, reproducible train/val/test cut (e.g.
+    comparing hyperparameter changes across runs against the exact same
+    windows) instead of fractions of whatever history happens to be in
+    `df`. All six bounds are inclusive. Unlike `split_by_time`, boundaries
+    aren't derived from `df` itself, so nothing here checks they're
+    non-overlapping or chronologically ordered -- that's the caller's
+    responsibility.
+    """
+    train = df[(df[ts_col] >= train_start) & (df[ts_col] <= train_end)]
+    val = df[(df[ts_col] >= val_start) & (df[ts_col] <= val_end)]
+    test = df[(df[ts_col] >= test_start) & (df[ts_col] <= test_end)]
+    return TimeSplit(train=train, val=val, test=test)
+
+
 def fit_scalers(
     train: pd.DataFrame,
     group_col: str = "region",

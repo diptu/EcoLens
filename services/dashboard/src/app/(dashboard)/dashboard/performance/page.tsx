@@ -3,14 +3,30 @@
  *
  * Modeled on an ML-monitoring mockup (registry, error metrics, conformal
  * coverage, concept-drift, online-learning, model health, alerts,
- * automated actions, tech stack). Sections are split strictly into real
- * (fetched from `GET /v1/model/versions`, `GET /v1/model/training-runs`,
- * and `GET /v1/model/drift` — same convention as `models/page.tsx`) and
- * illustrative (no backend concept exists yet — there is no rolling error
- * time-series, no health-score formula, no alert policy). Every
- * illustrative section carries `IllustrativeBadge` — this app's
- * convention is no silently fabricated dashboards (see `training/
+ * automated actions, tech stack). Sections are split into real (fetched
+ * from `GET /v1/model/versions`, `GET /v1/model/versions/{v}/evaluation`,
+ * `GET /v1/model/training-runs`, `GET /v1/model/drift` — same convention
+ * as `models/page.tsx`), real-but-computed (a disclosed, simple formula
+ * over real inputs — Model health score, Alert conditions' triggered
+ * state, Retraining decision guide's active row), and genuinely
+ * illustrative (no backend concept exists at all yet — batch-count
+ * tracking, historical/cumulative drift persistence, alert paging).
+ * Every still-illustrative section keeps `IllustrativeBadge` — this
+ * app's convention is no silently fabricated dashboards (see `training/
  * page.tsx` for the precedent this deliberately does NOT follow).
+ *
+ * 2026-08-10: added `GET /v1/model/versions/{version}/evaluation`
+ * (forecast-api's `ml/registry.py`'s `get_latest_evaluation`) -- the
+ * real walk-forward backtest (`ecolens-forecast evaluate`) was
+ * previously computed but had no API surface at all; this page's old
+ * `MAPE_KEYS = ["eval_mape", "test_mape"]` fallback could never actually
+ * match `eval_mape` (it only ever existed on a separate MLflow run this
+ * page never read), so "Error metrics"/"Conformal coverage" silently
+ * fell back to training-time `test_mape`/`test_coverage_*` only -- which
+ * can also be legitimately absent (e.g. a small-data config that shrinks
+ * `test_frac` toward 0). Real per-region walk-forward numbers now back
+ * a new "Walk-forward evaluation" card, the health score, and both
+ * cards' fallback.
  */
 "use client";
 
@@ -30,8 +46,10 @@ import { cn } from "@/lib/utils";
 import {
   fetchDrift,
   fetchLossCurve,
+  fetchModelEvaluation,
   fetchModelVersions,
   type DriftReport,
+  type EvaluationSummary,
   type LossCurve,
   type ModelVersion,
 } from "@/lib/emissions";
@@ -85,6 +103,10 @@ function firstMetric(metrics: Record<string, number>, keys: string[]): number | 
     if (typeof metrics[k] === "number") return metrics[k];
   }
   return null;
+}
+
+function mean(values: number[]): number | null {
+  return values.length > 0 ? values.reduce((a, b) => a + b, 0) / values.length : null;
 }
 
 // Real "latest epoch" value + % change vs the epoch before it, from a
@@ -172,6 +194,43 @@ export default function PerformancePage() {
   const staging = versions?.filter((v) => v.stage === "Staging") ?? [];
   const recentForChart = (versions ?? []).slice(0, 8).reverse();
 
+  // Real walk-forward evaluation for the Production version specifically
+  // -- kept separate from the version-picker-linked `evaluation` state
+  // below (which follows whatever the loss-curve dropdown has selected)
+  // because the "Error metrics"/"Conformal coverage" cards' own
+  // subtitles promise "the Production version's logged eval" -- they
+  // shouldn't silently start describing a different version just
+  // because an operator picked one in the loss-curve dropdown further
+  // down the page.
+  const [productionEvaluation, setProductionEvaluation] = useState<EvaluationSummary | null>(
+    null,
+  );
+  useEffect(() => {
+    let cancelled = false;
+    if (!production) {
+      setProductionEvaluation(null);
+      return;
+    }
+    fetchModelEvaluation(production.version, architecture)
+      .then((summary) => {
+        if (!cancelled) setProductionEvaluation(summary);
+      })
+      .catch(() => {
+        if (!cancelled) setProductionEvaluation(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [architecture, production?.version]);
+  const productionCalibratedEval = (productionEvaluation?.regions ?? []).filter(
+    (r) => r.candidate !== "seasonal_naive" && !r.candidate.endsWith("_raw"),
+  );
+  const productionNaiveMapeByRegion = new Map(
+    (productionEvaluation?.regions ?? [])
+      .filter((r) => r.candidate === "seasonal_naive")
+      .map((r) => [r.region, r.mape]),
+  );
+
   // Loss curve is per-version training history. Defaults to whichever
   // version the rest of this page treats as "the" version (Production,
   // falling back to the newest if nothing's Production yet) -- but a
@@ -208,6 +267,65 @@ export default function PerformancePage() {
     };
   }, [architecture, lossCurveVersion?.version]);
 
+  // Real walk-forward backtest (`ecolens-forecast evaluate`) for
+  // whichever version the loss-curve picker above is showing -- the
+  // honest, harder rolling-origin MAPE against a real seasonal-naive
+  // baseline, per region. `null` is a real, expected state (no
+  // `evaluate` run has ever been logged for this version), not a
+  // loading/error placeholder -- `evaluationLoaded` distinguishes that
+  // from "still fetching".
+  const [evaluation, setEvaluation] = useState<EvaluationSummary | null>(null);
+  const [evaluationLoaded, setEvaluationLoaded] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    if (!lossCurveVersion) {
+      setEvaluation(null);
+      setEvaluationLoaded(true);
+      return;
+    }
+    setEvaluationLoaded(false);
+    fetchModelEvaluation(lossCurveVersion.version, architecture)
+      .then((summary) => {
+        if (cancelled) return;
+        setEvaluation(summary);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setEvaluation(null);
+      })
+      .finally(() => {
+        if (!cancelled) setEvaluationLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [architecture, lossCurveVersion?.version]);
+
+  // Splits the flat per-`(region, candidate)` rows into the three real
+  // candidates `evaluate_and_log` always scores together: the version's
+  // own calibrated quantiles, its uncalibrated raw quantiles (`_raw`),
+  // and the seasonal-naive baseline (`ml/evaluate.py`'s own fixed
+  // `"seasonal_naive"` name) -- not string-matched against the model
+  // name/version (which would break if a candidate name format ever
+  // changes), just against the two fixed markers that are actually
+  // stable across every real evaluation run.
+  const evalRegions = evaluation?.regions ?? [];
+  const calibratedEval = evalRegions.filter(
+    (r) => r.candidate !== "seasonal_naive" && !r.candidate.endsWith("_raw"),
+  );
+  const naiveEval = evalRegions.filter((r) => r.candidate === "seasonal_naive");
+  const naiveMapeByRegion = new Map(naiveEval.map((r) => [r.region, r.mape]));
+
+  // Real, simple, unweighted mean across regions -- every region counts
+  // equally regardless of its own demand volume, same convention the
+  // dashboard's other cross-region aggregates (e.g. `/dashboard/
+  // forecast`'s NEM tab) already use.
+  const walkForwardMape = mean(calibratedEval.map((r) => r.mape));
+  const walkForwardBaselineMape = mean(
+    calibratedEval.map((r) => naiveMapeByRegion.get(r.region)).filter((v): v is number => v != null),
+  );
+  const walkForwardCoverage = mean(calibratedEval.map((r) => r.coverage));
+
   const lossCurvePoints = lossCurve?.points ?? [];
   const lossCurveLabels = lossCurvePoints.map((p) => `${p.epoch}`);
   const trainLossSeries = lossCurvePoints.map((p) => p.train_loss ?? 0);
@@ -233,9 +351,39 @@ export default function PerformancePage() {
   const valRmseLatest = hasValRmseMae ? latestWithDelta(valRmseSeries) : null;
   const valMaeLatest = hasValRmseMae ? latestWithDelta(valMaeSeries) : null;
 
-  const mape = production ? firstMetric(production.metrics, MAPE_KEYS) : null;
-  const rmse = production ? firstMetric(production.metrics, RMSE_KEYS) : null;
-  const coverage = production ? firstMetric(production.metrics, COVERAGE_KEYS) : null;
+  // Training-time metrics first (cheaper, already on `production.
+  // metrics`), falling back to the real walk-forward mean when absent --
+  // `test_mape`/`test_coverage_*` are only logged when the training run
+  // actually had a non-empty `test` split (`ml/train.py`'s own comment:
+  // `test`/`test_mape` are optional, `val`/`cal` are what's required),
+  // which isn't guaranteed (e.g. a small-data region config that
+  // deliberately shrinks `test_frac` toward 0 to give `val`/`cal` more
+  // room -- a real, current example, not a hypothetical). `eval_mape` in
+  // the old `MAPE_KEYS` list could never match anything here (that key
+  // only ever exists on the SEPARATE evaluation run `productionEvaluation`
+  // now reads) -- kept in `MAPE_KEYS` only because `mapeSeries` below
+  // still uses it against `production.metrics` for the same reason.
+  const productionBaselineMape = mean(
+    productionCalibratedEval
+      .map((r) => productionNaiveMapeByRegion.get(r.region))
+      .filter((v): v is number => v != null),
+  );
+  const mape =
+    (production ? firstMetric(production.metrics, MAPE_KEYS) : null) ??
+    mean(productionCalibratedEval.map((r) => r.mape));
+  const rmse =
+    (production ? firstMetric(production.metrics, RMSE_KEYS) : null) ??
+    mean(productionCalibratedEval.map((r) => r.rmse));
+  const coverage =
+    (production ? firstMetric(production.metrics, COVERAGE_KEYS) : null) ??
+    mean(productionCalibratedEval.map((r) => r.coverage));
+  // Real walk-forward MAPE specifically (not the training-time-first
+  // `mape` above) -- the "is this actually beating naive" question only
+  // the harder, honest backtest can answer; training-time `test_mape` is
+  // an easier, in-distribution split that can look fine while still
+  // losing to naive on fresh out-of-sample data (this model family's
+  // own real, measured history -- see `TODO.md`).
+  const productionWalkForwardMape = mean(productionCalibratedEval.map((r) => r.mape));
 
   const mapeSeries = recentForChart
     .map((v) => firstMetric(v.metrics, MAPE_KEYS))
@@ -264,6 +412,46 @@ export default function PerformancePage() {
   // already sorted descending by PSI (live_drift.py), so this is just
   // the top feature's PSI, not a new computation invented for this card.
   const top3Psi = drift ? drift.slice(0, 3).find((r) => r.psi !== null)?.psi ?? null : null;
+
+  // Real, transparent health score -- NOT a fabricated placeholder.
+  // Built entirely from real inputs already fetched on this page
+  // (walk-forward MAPE-vs-baseline, conformal coverage-vs-target, top
+  // drift PSI), each mapped to a 0-100 "how healthy is this dimension"
+  // score, then averaged with the weights below. A component is left
+  // out of the average (not zeroed) when its real input isn't available
+  // yet, so a version simply missing a walk-forward eval doesn't get
+  // punished as if it scored 0 on that dimension. Disclosed here and in
+  // the card's subtitle -- deliberately simple and real rather than
+  // "looking more authoritative than it is" (this page's own prior
+  // stance on this exact card, which this replaces): weights and
+  // formula are visible, not a black box.
+  const errorHealth =
+    productionBaselineMape != null && productionWalkForwardMape != null && productionBaselineMape > 0
+      ? Math.min(1, productionBaselineMape / productionWalkForwardMape) * 100
+      : null;
+  const coverageHealth =
+    coverage != null
+      ? Math.max(
+          0,
+          100 -
+            (Math.abs(coverage * (coverage <= 1 ? 100 : 1) - TARGET_COVERAGE_PCT) /
+              TARGET_COVERAGE_PCT) *
+              100,
+        )
+      : null;
+  const driftHealth = top3Psi != null ? Math.max(0, 100 - Math.min(1, top3Psi / 0.5) * 100) : null;
+  const healthComponents = [
+    { value: errorHealth, weight: 0.5 },
+    { value: coverageHealth, weight: 0.25 },
+    { value: driftHealth, weight: 0.25 },
+  ].filter((c): c is { value: number; weight: number } => c.value != null);
+  const healthTotalWeight = healthComponents.reduce((sum, c) => sum + c.weight, 0);
+  const healthScore =
+    healthTotalWeight > 0
+      ? Math.round(
+          healthComponents.reduce((sum, c) => sum + c.value * c.weight, 0) / healthTotalWeight,
+        )
+      : null;
 
   return (
     <div className="space-y-6">
@@ -368,7 +556,7 @@ export default function PerformancePage() {
               <Activity className="h-4 w-4 text-emerald-200" /> Error metrics
             </span>
           }
-          subtitle="Across recent model versions — no daily time-series exists yet, so this is per-version, not a rolling window"
+          subtitle="Training-time test split when logged, else the real walk-forward mean (see the Walk-forward card below) — per-version, not a rolling window"
         >
           <div className="grid grid-cols-2 gap-2 text-center">
             <Stat label="MAPE (Production)" value={mape !== null ? `${mape.toFixed(2)}%` : "—"} />
@@ -392,7 +580,7 @@ export default function PerformancePage() {
               <Target className="h-4 w-4 text-emerald-200" /> Conformal coverage
             </span>
           }
-          subtitle="Target from Settings.conformal_alpha (fixed); actual from the Production version's logged eval"
+          subtitle="Target from Settings.conformal_alpha (fixed); actual from the Production version's training-time split, or its real walk-forward eval when that's absent"
         >
           {coverage !== null ? (
             <ArcGauge
@@ -406,11 +594,106 @@ export default function PerformancePage() {
             />
           ) : (
             <p className="py-10 text-center text-xs text-white/40">
-              No coverage metric logged for the Production version yet.
+              No coverage metric logged or walk-forward-evaluated for the Production version yet.
             </p>
           )}
         </Card>
       </div>
+
+      {/* ── Walk-forward evaluation (real) ──────────────────── */}
+      <Card
+        title={
+          <span className="flex items-center gap-2">
+            <TitleIcon icon={Target} /> Walk-forward evaluation
+          </span>
+        }
+        subtitle={
+          <>
+            <span>
+              Real rolling-origin backtest for {architecture}
+              {lossCurveVersion ? ` v${lossCurveVersion.version} (${lossCurveVersion.stage})` : ""},
+              per region, vs. a seasonal-naive baseline — the honest, harder number
+              training-time <code className="rounded bg-black/30 px-1 py-0.5 font-mono text-lime-100">test_mape</code>{" "}
+              doesn&apos;t capture
+            </span>
+            <br />
+            <span className="font-mono text-white/35">GET /v1/model/versions/&#123;version&#125;/evaluation</span>
+          </>
+        }
+      >
+        {!evaluationLoaded ? (
+          <p className="py-10 text-center text-xs text-white/40">Loading…</p>
+        ) : calibratedEval.length === 0 ? (
+          <p className="py-10 text-center text-xs text-white/40">
+            No <code className="rounded bg-black/20 px-1 py-0.5 font-mono">evaluate</code> run
+            logged yet for v{lossCurveVersion?.version ?? "?"} — run{" "}
+            <code className="rounded bg-black/20 px-1 py-0.5 font-mono">
+              ecolens-forecast evaluate --version {lossCurveVersion?.version ?? "?"}
+            </code>{" "}
+            to populate this.
+          </p>
+        ) : (
+          <>
+            {(walkForwardMape != null || walkForwardCoverage != null) && (
+              <div className="mb-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                <Stat
+                  label="Mean MAPE (this version)"
+                  value={walkForwardMape != null ? `${walkForwardMape.toFixed(2)}%` : "—"}
+                />
+                <Stat
+                  label="Mean MAPE (naive baseline)"
+                  value={walkForwardBaselineMape != null ? `${walkForwardBaselineMape.toFixed(2)}%` : "—"}
+                />
+                <Stat
+                  label="Mean coverage"
+                  value={walkForwardCoverage != null ? `${(walkForwardCoverage * 100).toFixed(1)}%` : "—"}
+                />
+              </div>
+            )}
+            <div className="space-y-1.5">
+              {calibratedEval.map((row) => {
+                const baselineMape = naiveMapeByRegion.get(row.region);
+                const beatsBaseline = baselineMape != null && row.mape <= baselineMape;
+                return (
+                  <div
+                    key={row.region}
+                    className="flex items-center gap-2 rounded-md border border-white/5 bg-white/[0.02] px-2 py-1.5 text-xs"
+                  >
+                    <span className="w-14 shrink-0 text-white/70">{row.region}</span>
+                    <div className="h-2 flex-1 overflow-hidden rounded-full bg-white/5">
+                      <div
+                        className={cn("h-full rounded-full", beatsBaseline ? "bg-emerald-300/50" : "bg-rose-400/50")}
+                        style={{ width: `${Math.min(100, (row.mape / Math.max(row.mape, baselineMape ?? row.mape, 1)) * 100)}%` }}
+                      />
+                    </div>
+                    <span className="w-16 shrink-0 text-right font-mono text-white/60">
+                      {row.mape.toFixed(2)}%
+                    </span>
+                    <span className="w-24 shrink-0 text-right text-[10px] text-white/35">
+                      naive {baselineMape != null ? `${baselineMape.toFixed(2)}%` : "—"}
+                    </span>
+                    <span
+                      className={cn(
+                        "w-20 shrink-0 rounded-md border px-1.5 py-0.5 text-center text-[9px] font-medium uppercase",
+                        beatsBaseline
+                          ? "border-emerald-300/30 bg-emerald-300/10 text-emerald-200"
+                          : "border-rose-400/30 bg-rose-400/10 text-rose-200",
+                      )}
+                    >
+                      {beatsBaseline ? "beats naive" : "below naive"}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+            <p className="mt-3 text-[10px] text-white/35">
+              n_origins={evaluation?.n_origins ?? "—"} rolling origins per region · evaluated{" "}
+              {evaluation?.evaluated_at ? new Date(evaluation.evaluated_at).toLocaleString() : "—"} ·
+              run {evaluation?.run_id.slice(0, 8) ?? "—"}
+            </p>
+          </>
+        )}
+      </Card>
 
       {/* ── Training vs validation loss (real) ──────────────── */}
       <Card
@@ -669,17 +952,34 @@ export default function PerformancePage() {
             <IllustrativeBadge label="Not tracked yet" />
           </div>
         </div>
-        <div className="mt-4 rounded-lg border border-dashed border-amber-300/20 bg-white/[0.01] p-4">
+        <div className="mt-4 rounded-lg border border-white/5 bg-white/[0.01] p-4">
           <div className="mb-2 flex items-center justify-between">
-            <span className="text-xs font-semibold text-white/70">
-              Cumulative drift / diminishing-returns tracking
-            </span>
-            <IllustrativeBadge />
+            <span className="text-xs font-semibold text-white/70">Current drift snapshot</span>
+            {top3Psi != null && (
+              <span
+                className={cn(
+                  "rounded-md border px-1.5 py-0.5 text-[9px] font-medium uppercase",
+                  top3Psi > 0.5
+                    ? "border-rose-400/30 bg-rose-400/10 text-rose-200"
+                    : top3Psi > 0.25
+                      ? "border-amber-300/30 bg-amber-300/10 text-amber-200"
+                      : "border-emerald-300/30 bg-emerald-300/10 text-emerald-200",
+                )}
+              >
+                top PSI {top3Psi.toFixed(2)}
+              </span>
+            )}
           </div>
           <p className="text-xs text-white/45">
-            Would show cumulative drift since the last full retrain and
-            whether online updates are still improving accuracy. No such
-            computation exists in the pipeline yet — see TODO.md.
+            {top3Psi != null
+              ? `Real, current top-3-feature PSI from GET /v1/model/drift (reference vs. comparison chronological split of ${architecture}'s own training data) — same number the Concept drift tracking card and Alert conditions below use.`
+              : "No real drift snapshot available yet for this architecture (needs 200+ rows on each side of the split)."}
+          </p>
+          <p className="mt-2 text-[10px] text-amber-200/60">
+            Still illustrative: a real trend *since the last full retrain* (cumulative drift over
+            time, whether online updates are still improving accuracy) needs historical drift
+            snapshots persisted somewhere — this only ever computes the CURRENT snapshot on
+            demand, nothing is stored between page loads yet. See TODO.md.
           </p>
         </div>
       </Card>
@@ -744,7 +1044,7 @@ export default function PerformancePage() {
         )}
       </Card>
 
-      {/* ── Model health score (illustrative) ──────────────── */}
+      {/* ── Model health score (real, disclosed formula) ────── */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <Card
           title={
@@ -752,23 +1052,40 @@ export default function PerformancePage() {
               <AlertTriangle className="h-4 w-4 text-amber-200" /> Model health score
             </span>
           }
-          subtitle="No scoring formula exists in this codebase yet — inventing one from real inputs would look more authoritative than it is"
-          badge={<IllustrativeBadge />}
+          subtitle="Real, computed from this page's own real inputs -- not product-approved policy, just a disclosed formula (weights shown below), for the Production version"
         >
           <div className="flex justify-center">
-            <ArcGauge value={63} max={100} label="63/100" sub="Sample value" color="rgba(244,63,94,0.85)" />
+            {healthScore != null ? (
+              <ArcGauge
+                value={healthScore}
+                max={100}
+                label={`${healthScore}/100`}
+                sub="Computed score"
+                color={
+                  healthScore >= 90
+                    ? "rgba(163,230,53,0.9)"
+                    : healthScore >= 70
+                      ? "rgba(250,204,21,0.85)"
+                      : "rgba(244,63,94,0.85)"
+                }
+              />
+            ) : (
+              <p className="py-10 text-center text-xs text-white/40">
+                Not enough real inputs yet (needs at least one of: a walk-forward eval, a logged
+                coverage metric, or a drift snapshot for the Production version).
+              </p>
+            )}
           </div>
-          <p className="mt-2 text-center text-xs text-white/45">
-            Would combine error-vs-baseline, feature drift, and coverage
-            health into one score once a real formula is defined and
-            product-approved.
+          <p className="mt-2 text-center text-[10px] text-white/40">
+            50% error-vs-naive-baseline (walk-forward) + 25% coverage-vs-{TARGET_COVERAGE_PCT.toFixed(0)}%-target
+            + 25% top-3-feature drift (PSI-vs-0.5) — reweighted across whichever components have
+            a real value; none are fabricated when missing.
           </p>
         </Card>
 
         <Card
           title="Retraining decision guide"
-          subtitle="Sample thresholds — no retraining policy is wired to real alerts yet"
-          badge={<IllustrativeBadge />}
+          subtitle="Thresholds are a policy choice (not fetched data) — the highlighted row reflects the real score above"
         >
           <table className="w-full text-xs">
             <thead>
@@ -779,45 +1096,92 @@ export default function PerformancePage() {
               </tr>
             </thead>
             <tbody className="text-white/70">
-              <tr className="border-t border-white/5">
-                <td className="py-1.5">90 – 100</td>
-                <td className="py-1.5 text-lime-100">Stable</td>
-                <td className="py-1.5">No action needed</td>
-              </tr>
-              <tr className="border-t border-white/5">
-                <td className="py-1.5">70 – 89</td>
-                <td className="py-1.5 text-amber-200">Monitor</td>
-                <td className="py-1.5">Continue online learning</td>
-              </tr>
-              <tr className="border-t border-white/5">
-                <td className="py-1.5">&lt; 70</td>
-                <td className="py-1.5 text-rose-300">Critical</td>
-                <td className="py-1.5">Full retrain</td>
-              </tr>
+              {[
+                { range: "90 – 100", label: "Stable", action: "No action needed", active: healthScore != null && healthScore >= 90, tone: "text-lime-100" },
+                { range: "70 – 89", label: "Monitor", action: "Continue online learning", active: healthScore != null && healthScore >= 70 && healthScore < 90, tone: "text-amber-200" },
+                { range: "< 70", label: "Critical", action: "Full retrain", active: healthScore != null && healthScore < 70, tone: "text-rose-300" },
+              ].map((row) => (
+                <tr
+                  key={row.range}
+                  className={cn(
+                    "border-t border-white/5",
+                    row.active && "bg-white/[0.04] outline outline-1 -outline-offset-1 outline-white/10",
+                  )}
+                >
+                  <td className="py-1.5">
+                    {row.range}
+                    {row.active && <span className="ml-1.5 text-[9px] text-white/40">← current</span>}
+                  </td>
+                  <td className={cn("py-1.5", row.tone)}>{row.label}</td>
+                  <td className="py-1.5">{row.action}</td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </Card>
       </div>
 
-      {/* ── Alert conditions (illustrative) ─────────────────── */}
+      {/* ── Alert conditions (real trigger state; no paging yet) ─ */}
       <Card
         title={
           <span className="flex items-center gap-2">
             <Bell className="h-4 w-4 text-amber-200" /> Alert conditions
           </span>
         }
-        subtitle="Sample thresholds only — no alert policy or paging integration exists yet"
-        badge={<IllustrativeBadge />}
+        subtitle="Thresholds are a policy choice, not fetched data — but each condition's TRIGGERED/OK state below is computed live from this page's real numbers. No paging/notification integration exists yet (see Actions → Notify team)."
       >
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
           {[
-            { label: "Coverage < 75%", current: coverage !== null ? `${(coverage * (coverage <= 1 ? 100 : 1)).toFixed(1)}%` : "—" },
-            { label: "MAPE increase > 15% vs last version", current: mapeChangePct !== null ? `${mapeChangePct >= 0 ? "+" : ""}${mapeChangePct.toFixed(1)}%` : "— (needs 2+ versions with logged MAPE)" },
-            { label: "PSI (top 3 features) > 0.5", current: top3Psi !== null ? top3Psi.toFixed(2) : "—" },
-            { label: "Error plateau detected", current: "— (no plateau-detection formula defined yet)" },
+            {
+              label: "Coverage < 75%",
+              current: coverage !== null ? `${(coverage * (coverage <= 1 ? 100 : 1)).toFixed(1)}%` : "—",
+              triggered: coverage !== null ? coverage * (coverage <= 1 ? 100 : 1) < 75 : null,
+            },
+            {
+              label: "MAPE increase > 15% vs last version",
+              current: mapeChangePct !== null ? `${mapeChangePct >= 0 ? "+" : ""}${mapeChangePct.toFixed(1)}%` : "— (needs 2+ versions with logged MAPE)",
+              triggered: mapeChangePct !== null ? mapeChangePct > 15 : null,
+            },
+            {
+              label: "PSI (top 3 features) > 0.5",
+              current: top3Psi !== null ? top3Psi.toFixed(2) : "—",
+              triggered: top3Psi !== null ? top3Psi > 0.5 : null,
+            },
+            {
+              label: "Error plateau detected",
+              current: "— (no plateau-detection formula defined yet)",
+              triggered: null,
+            },
           ].map((cond) => (
-            <div key={cond.label} className="rounded-md border border-white/5 bg-white/[0.02] p-3">
-              <AlertTriangle className="h-3.5 w-3.5 text-amber-300/70" />
+            <div
+              key={cond.label}
+              className={cn(
+                "rounded-md border p-3",
+                cond.triggered === true
+                  ? "border-rose-400/30 bg-rose-400/5"
+                  : "border-white/5 bg-white/[0.02]",
+              )}
+            >
+              <div className="flex items-center justify-between">
+                <AlertTriangle
+                  className={cn(
+                    "h-3.5 w-3.5",
+                    cond.triggered === true ? "text-rose-300" : "text-amber-300/70",
+                  )}
+                />
+                {cond.triggered !== null && (
+                  <span
+                    className={cn(
+                      "rounded-md border px-1.5 py-0.5 text-[8px] font-medium uppercase",
+                      cond.triggered
+                        ? "border-rose-400/30 bg-rose-400/10 text-rose-200"
+                        : "border-emerald-300/30 bg-emerald-300/10 text-emerald-200",
+                    )}
+                  >
+                    {cond.triggered ? "Triggered" : "OK"}
+                  </span>
+                )}
+              </div>
               <p className="mt-1 text-[11px] text-white/70">{cond.label}</p>
               <p className="mt-1 text-[10px] text-white/40">Current: {cond.current}</p>
             </div>

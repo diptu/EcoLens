@@ -46,7 +46,12 @@ from app.service.ml.data import (
     fit_scalers,
     load_holidays,
     load_training_data,
+    split_by_date,
     split_by_time,
+)
+from app.service.ml.demand_data_offline import (
+    load_demand_training_data_from_master,
+    load_holidays_from_master,
 )
 from app.service.ml.features import (
     KNOWN_FUTURE_COLUMNS,
@@ -171,9 +176,28 @@ def train_tft_model(
     no-op.
     """
     engineered = build_features(raw_df, holidays=holidays)
-    split = split_by_time(
-        engineered, train_frac=config.train_frac, val_frac=config.val_frac
-    )
+    # Explicit calendar-boundary dates, when given (`ml/train.py`'s
+    # `TrainConfig.train_start` docstring has the full rationale), applied
+    # as one global split rather than per-region -- unlike
+    # `split_by_time`'s fraction boundaries (which land at a different
+    # real timestamp per region if computed per-region), a fixed calendar
+    # date means the same instant for every region already, so a single
+    # `split_by_date` call over the concatenated multi-region `engineered`
+    # frame is equivalent to doing it per-region.
+    if config.train_start is not None:
+        split = split_by_date(
+            engineered,
+            train_start=config.train_start,
+            train_end=config.train_end,
+            val_start=config.val_start,
+            val_end=config.val_end,
+            test_start=config.test_start,
+            test_end=config.test_end,
+        )
+    else:
+        split = split_by_time(
+            engineered, train_frac=config.train_frac, val_frac=config.val_frac
+        )
     earlystop_val, cal = _split_val_for_calibration(split.val, config.cal_frac)
 
     if split.train.empty or earlystop_val.empty or cal.empty:
@@ -217,7 +241,7 @@ def train_tft_model(
         )
 
     train_loader = DataLoader(
-        train_ds, batch_size=config.batch_size, shuffle=True, collate_fn=collate_tft
+        train_ds, batch_size=config.batch_size, shuffle=config.shuffle, collate_fn=collate_tft
     )
     val_loader = DataLoader(
         val_ds, batch_size=config.batch_size, shuffle=False, collate_fn=collate_tft
@@ -365,6 +389,7 @@ async def train_and_register_tft(
     config: TFTTrainConfig | None = None,
     register: bool = True,
     since: pd.Timestamp | None = None,
+    data_source: str = "fct_energy_demand",
 ) -> TrainAndRegisterResult:
     """The real, DB + MLflow-backed TFT entrypoint -- `ecolens-pipeline
     train --architecture tft`'s real path. `model_name` should be
@@ -376,18 +401,28 @@ async def train_and_register_tft(
     query result, so a feature only backfilled for a recent window (e.g.
     `total_generation_mw`) gets diluted across a much longer mostly-NaN
     history without this, starving train/val/calibration of real data.
+
+    `data_source="r2_master"` (2026-08-10): `ml/train.py`'s
+    `train_and_register`'s identical option, mirrored here so TFT can use
+    `master.duckdb`'s real ~1-year bootstrap history too -- never opens a
+    Postgres session at all in that case, same as the LSTM path.
     """
     settings = settings or get_settings()
     config = config or TFTTrainConfig.from_settings(settings)
     configure_mlflow(settings)
 
-    async with get_session() as db:
-        raw_df = await load_training_data(db, regions, since=since)
-        holidays_df = await load_holidays(db)
+    extra_params: dict[str, object] = {"data_source": data_source}
+    if data_source == "r2_master":
+        raw_df = load_demand_training_data_from_master(regions, since=since)
+        holidays_df = load_holidays_from_master()
+    else:
+        async with get_session() as db:
+            raw_df = await load_training_data(db, regions, since=since)
+            holidays_df = await load_holidays(db)
 
     if raw_df.empty:
         raise ValueError(
-            f"no training data found in the warehouse for regions={list(regions)}"
+            f"no training data found in {data_source!r} for regions={list(regions)}"
         )
 
     result = train_tft_model(raw_df, config, holidays=holidays_df)
@@ -401,5 +436,6 @@ async def train_and_register_tft(
         extra_params={
             "n_encoder_features": len(ENCODER_COLUMNS),
             "n_decoder_features": len(DECODER_COLUMNS),
+            **extra_params,
         },
     )

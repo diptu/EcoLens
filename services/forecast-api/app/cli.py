@@ -68,12 +68,70 @@ def main() -> None:
     default=False,
     help="Log to MLflow but skip registering a model version.",
 )
+@click.option(
+    "--source",
+    "data_source",
+    type=click.Choice(["fct_energy_demand", "r2_master", "ml_features_v1"]),
+    default="fct_energy_demand",
+    show_default=True,
+    help="fct_energy_demand: live Postgres marts (~60-day retention). "
+    "r2_master: master.duckdb's real ~1-year bootstrap history (2025-07-31 "
+    "on), never touches Postgres. ml_features_v1: orphaned ml.* table, see "
+    "ml/data.py's load_ml_features_v1_training_data.",
+)
+@click.option("--lr", type=float, default=None, help="Override Settings.model_train_lr.")
+@click.option(
+    "--patience",
+    "early_stopping_patience",
+    type=int,
+    default=None,
+    help="Override Settings.model_early_stopping_patience.",
+)
+@click.option(
+    "--quantile-weight",
+    type=float,
+    default=None,
+    help="Override Settings.model_quantile_weight.",
+)
+@click.option(
+    "--shuffle/--no-shuffle",
+    default=True,
+    show_default=True,
+    help="Reshuffle train_loader each epoch.",
+)
+@click.option(
+    "--train-start", default=None, help="ISO date -- start of an explicit train window."
+)
+@click.option(
+    "--train-end", default=None, help="ISO date -- end of an explicit train window."
+)
+@click.option(
+    "--val-start", default=None, help="ISO date -- start of an explicit val window."
+)
+@click.option("--val-end", default=None, help="ISO date -- end of an explicit val window.")
+@click.option(
+    "--test-start", default=None, help="ISO date -- start of an explicit test window."
+)
+@click.option(
+    "--test-end", default=None, help="ISO date -- end of an explicit test window."
+)
 def train(
     regions: tuple[str, ...],
     model_name: str | None,
     epochs: int | None,
     since: str | None,
     no_register: bool,
+    data_source: str,
+    lr: float | None,
+    early_stopping_patience: int | None,
+    quantile_weight: float | None,
+    shuffle: bool,
+    train_start: str | None,
+    train_end: str | None,
+    val_start: str | None,
+    val_end: str | None,
+    test_start: str | None,
+    test_end: str | None,
 ) -> None:
     """Train the demand-forecast LSTM and log (+ register) it in MLflow.
     Never promotes to Production."""
@@ -87,8 +145,38 @@ def train(
     resolved_regions = list(regions) or settings.model_default_regions
     resolved_model_name = model_name or settings.mlflow_registry_model_name
     config = TrainConfig.from_settings(settings)
+
+    overrides: dict[str, object] = {"shuffle": shuffle}
     if epochs is not None:
-        config = replace(config, epochs=epochs)
+        overrides["epochs"] = epochs
+    if lr is not None:
+        overrides["lr"] = lr
+    if early_stopping_patience is not None:
+        overrides["early_stopping_patience"] = early_stopping_patience
+    if quantile_weight is not None:
+        overrides["quantile_weight"] = quantile_weight
+
+    date_fields = {
+        "train_start": train_start,
+        "train_end": train_end,
+        "val_start": val_start,
+        "val_end": val_end,
+        "test_start": test_start,
+        "test_end": test_end,
+    }
+    if any(date_fields.values()):
+        missing = [name for name, value in date_fields.items() if value is None]
+        if missing:
+            click.echo(
+                f"train: failed — explicit date split needs all six --*-start/--*-end "
+                f"options, missing: {', '.join(missing)}",
+                err=True,
+            )
+            sys.exit(1)
+        for name, value in date_fields.items():
+            overrides[name] = pd.Timestamp(value, tz="UTC")
+
+    config = replace(config, **overrides)
     resolved_since = pd.Timestamp(since, tz="UTC") if since else None
 
     try:
@@ -100,6 +188,7 @@ def train(
                 config=config,
                 register=not no_register,
                 since=resolved_since,
+                data_source=data_source,
             )
         )
     except Exception as exc:
@@ -151,12 +240,69 @@ def train(
     default=False,
     help="Log to MLflow but skip registering a model version.",
 )
+@click.option(
+    "--source",
+    "data_source",
+    type=click.Choice(["fct_energy_demand", "r2_master"]),
+    default="fct_energy_demand",
+    show_default=True,
+    help="fct_energy_demand: live Postgres marts (~60-day retention). "
+    "r2_master: master.duckdb's real ~1-year bootstrap history (2025-07-31 "
+    "on), never touches Postgres.",
+)
+@click.option("--lr", type=float, default=None, help="Override Settings.model_train_lr.")
+@click.option(
+    "--patience",
+    "early_stopping_patience",
+    type=int,
+    default=None,
+    help="Override Settings.model_early_stopping_patience.",
+)
+@click.option(
+    "--quantile-weight",
+    type=float,
+    default=None,
+    help="Override Settings.model_quantile_weight.",
+)
+@click.option(
+    "--shuffle/--no-shuffle",
+    default=True,
+    show_default=True,
+    help="Reshuffle train_loader each epoch.",
+)
+@click.option(
+    "--train-start", default=None, help="ISO date -- start of an explicit train window."
+)
+@click.option(
+    "--train-end", default=None, help="ISO date -- end of an explicit train window."
+)
+@click.option(
+    "--val-start", default=None, help="ISO date -- start of an explicit val window."
+)
+@click.option("--val-end", default=None, help="ISO date -- end of an explicit val window.")
+@click.option(
+    "--test-start", default=None, help="ISO date -- start of an explicit test window."
+)
+@click.option(
+    "--test-end", default=None, help="ISO date -- end of an explicit test window."
+)
 def train_tft(
     regions: tuple[str, ...],
     model_name: str,
     epochs: int | None,
     since: str | None,
     no_register: bool,
+    data_source: str,
+    lr: float | None,
+    early_stopping_patience: int | None,
+    quantile_weight: float | None,
+    shuffle: bool,
+    train_start: str | None,
+    train_end: str | None,
+    val_start: str | None,
+    val_end: str | None,
+    test_start: str | None,
+    test_end: str | None,
 ) -> None:
     """Train the demand-forecast TFT and log (+ register) it in MLflow,
     under its own `lstm_demand_tft` registry entry, never `lstm_demand`.
@@ -170,8 +316,38 @@ def train_tft(
     settings = get_settings()
     resolved_regions = list(regions) or settings.model_default_regions
     config = TFTTrainConfig.from_settings(settings)
+
+    overrides: dict[str, object] = {"shuffle": shuffle}
     if epochs is not None:
-        config = replace(config, epochs=epochs)
+        overrides["epochs"] = epochs
+    if lr is not None:
+        overrides["lr"] = lr
+    if early_stopping_patience is not None:
+        overrides["early_stopping_patience"] = early_stopping_patience
+    if quantile_weight is not None:
+        overrides["quantile_weight"] = quantile_weight
+
+    date_fields = {
+        "train_start": train_start,
+        "train_end": train_end,
+        "val_start": val_start,
+        "val_end": val_end,
+        "test_start": test_start,
+        "test_end": test_end,
+    }
+    if any(date_fields.values()):
+        missing = [name for name, value in date_fields.items() if value is None]
+        if missing:
+            click.echo(
+                f"train-tft: failed — explicit date split needs all six --*-start/--*-end "
+                f"options, missing: {', '.join(missing)}",
+                err=True,
+            )
+            sys.exit(1)
+        for name, value in date_fields.items():
+            overrides[name] = pd.Timestamp(value, tz="UTC")
+
+    config = replace(config, **overrides)
     resolved_since = pd.Timestamp(since, tz="UTC") if since else None
 
     try:
@@ -183,6 +359,7 @@ def train_tft(
                 config=config,
                 register=not no_register,
                 since=resolved_since,
+                data_source=data_source,
             )
         )
     except Exception as exc:

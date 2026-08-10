@@ -39,6 +39,7 @@ from sklearn.preprocessing import StandardScaler
 
 from app.core.config import get_settings
 from app.service.ml.conformal import ConformalCalibration
+from app.service.ml.features import ALL_MODEL_REGIONS
 from app.models.ml import DemandLSTM
 from app.core.logging import get_logger
 
@@ -260,6 +261,152 @@ async def get_loss_curve(model_name: str, version: str) -> LossCurve:
             for step in steps
         ]
         return LossCurve(run_id=run_id, points=points)
+
+    return await asyncio.to_thread(_fetch)
+
+
+@dataclass
+class RegionEvaluation:
+    region: str
+    # e.g. "lstm_demand_v6" (calibrated), "lstm_demand_v6_raw"
+    # (uncalibrated quantiles), "seasonal_naive" (baseline) -- whatever
+    # `Forecaster.name` the candidate that produced this report used
+    # (`ml/evaluate.py`'s `LSTMForecaster`/`BaselineForecaster`).
+    candidate: str
+    mape: float
+    rmse: float
+    coverage: float
+    n_origins: int
+
+
+@dataclass
+class EvaluationSummary:
+    run_id: str
+    evaluated_at: datetime
+    n_origins: int
+    regions: list[RegionEvaluation]
+
+
+# The exact metric-name suffixes `EvaluationReport.as_mlflow_metrics()`
+# (`ml/evaluate.py`) logs -- fixed, not user input.
+_EVAL_METRIC_SUFFIXES = (
+    "eval_mape",
+    "eval_rmse",
+    "eval_coverage",
+    "eval_n_origins",
+    "eval_pinball_p10",
+    "eval_pinball_p50",
+    "eval_pinball_p90",
+)
+
+
+def _parse_evaluation_metrics(metrics: dict[str, float]) -> list[RegionEvaluation]:
+    """Reconstructs per-`(region, candidate)` rows from `evaluate_and_log`'s
+    flat `f"{region}_{candidate.name}_{metric}"` MLflow metric keys
+    (`EvaluationReport.as_mlflow_metrics()`, `ml/evaluate.py`) -- MLflow
+    only ever stores flat key/value pairs per run, so this is the one
+    place that un-flattens them back into real per-region/candidate
+    reports. Matches from the region side, not the metric-suffix side --
+    `ALL_MODEL_REGIONS` codes never contain `_`, but candidate names
+    sometimes do (`lstm_demand_v6_raw`), so a region-prefix match is
+    unambiguous where a suffix-only match wouldn't be. Metric keys that
+    don't parse (an unrelated param/metric on the same run, or a region
+    outside `ALL_MODEL_REGIONS`) are silently skipped, not an error --
+    this function's whole job is picking the real evaluation rows out of
+    a flat namespace, not validating every key on the run.
+    """
+    grouped: dict[tuple[str, str], dict[str, float]] = {}
+    for key, value in metrics.items():
+        region = next((r for r in ALL_MODEL_REGIONS if key.startswith(f"{r}_")), None)
+        if region is None:
+            continue
+        rest = key[len(region) + 1 :]
+        suffix = next((s for s in _EVAL_METRIC_SUFFIXES if rest.endswith(f"_{s}")), None)
+        if suffix is None:
+            continue
+        candidate = rest[: -(len(suffix) + 1)]
+        if not candidate:
+            continue
+        grouped.setdefault((region, candidate), {})[suffix] = value
+
+    out = []
+    for (region, candidate), vals in grouped.items():
+        if "eval_mape" not in vals or "eval_n_origins" not in vals:
+            continue
+        out.append(
+            RegionEvaluation(
+                region=region,
+                candidate=candidate,
+                mape=vals["eval_mape"],
+                rmse=vals.get("eval_rmse", float("nan")),
+                coverage=vals.get("eval_coverage", float("nan")),
+                n_origins=int(vals["eval_n_origins"]),
+            )
+        )
+    out.sort(key=lambda r: (r.region, r.candidate))
+    return out
+
+
+async def get_latest_evaluation(model_name: str, version: str) -> EvaluationSummary | None:
+    """Real walk-forward backtest results (`ecolens-forecast evaluate`)
+    for one registered version -- `None` (not an error) if no evaluation
+    run has ever been logged for it, a real and common state (`evaluate`
+    is a deliberate, occasional CLI run, not something every training
+    run triggers automatically).
+
+    Reads a SEPARATE MLflow run from the version's own training run --
+    `evaluate_and_log` (`ml/evaluate.py`) always starts a fresh
+    `mlflow.start_run()` tagged `evaluation=true`/`evaluated_model`/
+    `evaluated_version`, deliberately not appended to the training run
+    (a walk-forward backtest can be re-run repeatedly against the same
+    version as fresher data lands, and each run should be its own real,
+    timestamped record, not silently overwrite the last one). This is
+    also why `GET /v1/model/versions`' own `ModelVersionOut.metrics`
+    can never surface real walk-forward numbers under an `eval_mape`
+    key -- that key only ever exists on THIS separate run. Callers that
+    want the honest, harder walk-forward MAPE (against a real
+    seasonal-naive baseline, over multiple rolling origins) rather than
+    the easier training-time `test_mape` need this function specifically.
+    """
+
+    def _fetch() -> EvaluationSummary | None:
+        tracking_uri = get_settings().mlflow_tracking_uri
+        mlflow.set_tracking_uri(tracking_uri)
+        client = MlflowClient(tracking_uri=tracking_uri)
+        experiments = client.search_experiments()
+        if not experiments:
+            return None
+        exp_ids = [exp.experiment_id for exp in experiments]
+        # `model_name`/`version` come from a caller-controlled path/query
+        # param -- escaped before interpolation into MLflow's filter-string
+        # DSL so a stray `'` can't break out of the quoted literal (this
+        # only ever scopes a read against this service's own MLflow
+        # instance, not a SQL injection into the real warehouse, but
+        # there's no reason to build the filter string unescaped anyway).
+        safe_model_name = model_name.replace("'", "\\'")
+        safe_version = str(version).replace("'", "\\'")
+        runs = client.search_runs(
+            exp_ids,
+            filter_string=(
+                "tags.evaluation = 'true' and "
+                f"tags.evaluated_model = '{safe_model_name}' and "
+                f"tags.evaluated_version = '{safe_version}'"
+            ),
+            order_by=["start_time DESC"],
+            max_results=1,
+        )
+        if not runs:
+            return None
+        run = runs[0]
+        regions = _parse_evaluation_metrics(dict(run.data.metrics))
+        if not regions:
+            return None
+        return EvaluationSummary(
+            run_id=run.info.run_id,
+            evaluated_at=datetime.fromtimestamp(run.info.start_time / 1000, tz=UTC),
+            n_origins=int(float(run.data.params.get("n_origins", 0))),
+            regions=regions,
+        )
 
     return await asyncio.to_thread(_fetch)
 

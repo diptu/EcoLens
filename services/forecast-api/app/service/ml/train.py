@@ -64,7 +64,12 @@ from app.service.ml.data import (
     load_ml_features_v1_imputed_fraction,
     load_ml_features_v1_training_data,
     load_training_data,
+    split_by_date,
     split_by_time,
+)
+from app.service.ml.demand_data_offline import (
+    load_demand_training_data_from_master,
+    load_holidays_from_master,
 )
 from app.service.ml.device import get_device
 from app.service.ml.features import FEATURE_COLUMNS, TARGET_COLUMN, build_features
@@ -127,6 +132,27 @@ class TrainConfig:
     train_frac: float = 0.49
     val_frac: float = 0.49
 
+    # Explicit calendar-boundary split, as an alternative to
+    # `train_frac`/`val_frac` above -- when `train_start` is set (the
+    # other five must then be set too), `train_model` uses
+    # `ml/data.py`'s `split_by_date` instead of `split_by_time`/fractions,
+    # per-region, and also caps the test split's upper bound at
+    # `test_end` (the frac-based path leaves test open-ended: "everything
+    # after val_end"). All `None` (the default) preserves the fraction-
+    # based behavior above untouched.
+    train_start: pd.Timestamp | None = None
+    train_end: pd.Timestamp | None = None
+    val_start: pd.Timestamp | None = None
+    val_end: pd.Timestamp | None = None
+    test_start: pd.Timestamp | None = None
+    test_end: pd.Timestamp | None = None
+
+    # `False` disables `train_loader`'s per-epoch reshuffling -- windows
+    # are then presented in the same region-grouped, chronological order
+    # `ConcatDataset`/`DemandDataset` build them in, every epoch. `True`
+    # (the default) matches every prior training run on this model.
+    shuffle: bool = True
+
     @classmethod
     def from_settings(cls, settings: Settings) -> Self:
         # `Self`, not `TrainConfig` -- `TFTTrainConfig` (`train_tft.py`)
@@ -154,7 +180,7 @@ class TrainConfig:
         )
 
     def as_mlflow_params(self) -> dict[str, object]:
-        return {
+        params: dict[str, object] = {
             "lookback": self.lookback,
             "horizon": self.horizon,
             "hidden_size": self.hidden_size,
@@ -170,7 +196,20 @@ class TrainConfig:
             "early_stopping_patience": self.early_stopping_patience,
             "train_frac": self.train_frac,
             "val_frac": self.val_frac,
+            "shuffle": self.shuffle,
         }
+        if self.train_start is not None:
+            params.update(
+                {
+                    "train_start": self.train_start.isoformat(),
+                    "train_end": self.train_end.isoformat(),
+                    "val_start": self.val_start.isoformat(),
+                    "val_end": self.val_end.isoformat(),
+                    "test_start": self.test_start.isoformat(),
+                    "test_end": self.test_end.isoformat(),
+                }
+            )
+        return params
 
 
 @dataclass
@@ -370,11 +409,23 @@ def train_model(
     # own data actually is. Splitting each region against its own
     # timestamps first, then combining, is what actually gives every
     # region a fair, real split of its own history.
+    use_date_split = config.train_start is not None
     per_region_split: dict[str, tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]] = {}
     for region, region_df in engineered.groupby("region"):
-        region_split = split_by_time(
-            region_df, train_frac=config.train_frac, val_frac=config.val_frac
-        )
+        if use_date_split:
+            region_split = split_by_date(
+                region_df,
+                train_start=config.train_start,
+                train_end=config.train_end,
+                val_start=config.val_start,
+                val_end=config.val_end,
+                test_start=config.test_start,
+                test_end=config.test_end,
+            )
+        else:
+            region_split = split_by_time(
+                region_df, train_frac=config.train_frac, val_frac=config.val_frac
+            )
         region_earlystop_val, region_cal = _split_val_for_calibration(
             region_split.val, config.cal_frac
         )
@@ -466,8 +517,13 @@ def train_model(
             horizon=config.horizon,
             min_target_ts=region_cal_boundary,
         )
+        region_test_input = (
+            region_full[region_full["ts"] <= config.test_end]
+            if use_date_split
+            else region_full
+        )
         region_test_ds = DemandDataset(
-            region_full,
+            region_test_input,
             lookback=config.lookback,
             horizon=config.horizon,
             min_target_ts=region_val_end,
@@ -498,7 +554,7 @@ def train_model(
         )
 
     train_loader = DataLoader(
-        train_ds, batch_size=config.batch_size, shuffle=True, collate_fn=collate
+        train_ds, batch_size=config.batch_size, shuffle=config.shuffle, collate_fn=collate
     )
     val_loader = DataLoader(
         val_ds, batch_size=config.batch_size, shuffle=False, collate_fn=collate
@@ -848,15 +904,26 @@ async def train_and_register(
     configure_mlflow(settings)
 
     extra_params: dict[str, object] = {"data_source": data_source}
-    async with get_session() as db:
-        if data_source == "ml_features_v1":
-            raw_df = await load_ml_features_v1_training_data(db, regions)
-            extra_params[
-                "imputed_fraction"
-            ] = await load_ml_features_v1_imputed_fraction(db, regions)
-        else:
-            raw_df = await load_training_data(db, regions, since=since)
-        holidays_df = await load_holidays(db)
+    # `data_source="r2_master"` (2026-08-10): the `master.duckdb` bootstrap
+    # path -- deliberately never opens a Postgres session at all, not just
+    # "doesn't query fct_energy_demand". Real, explicit instruction: use
+    # DuckDB's real ~1-year history for this initial training pass without
+    # touching Postgres, which stays exactly at its own 60-day retention
+    # policy either way (`energy_data_offline.py`'s identical bootstrap
+    # path for `EnergyForecastLSTM` set this precedent).
+    if data_source == "r2_master":
+        raw_df = load_demand_training_data_from_master(regions, since=since)
+        holidays_df = load_holidays_from_master()
+    else:
+        async with get_session() as db:
+            if data_source == "ml_features_v1":
+                raw_df = await load_ml_features_v1_training_data(db, regions)
+                extra_params[
+                    "imputed_fraction"
+                ] = await load_ml_features_v1_imputed_fraction(db, regions)
+            else:
+                raw_df = await load_training_data(db, regions, since=since)
+            holidays_df = await load_holidays(db)
 
     if raw_df.empty:
         raise ValueError(

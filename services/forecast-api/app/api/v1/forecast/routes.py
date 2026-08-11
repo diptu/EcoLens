@@ -40,6 +40,7 @@ from app.api.v1.deps import (
     get_redis_client,
 )
 from app.core.errors import ApiError
+from app.core.local_cache import TTLCache
 from app.core.logging import get_logger
 from app.core.metrics import forecast_predictions_total, forecast_prediction_latency_seconds
 from app.core.tracing import get_tracer
@@ -89,6 +90,16 @@ _NEM_AGGREGATE_REGIONS: tuple[str, ...] = ("NSW1", "QLD1", "VIC1", "SA1", "TAS1"
 # `_LAGS`/`_ROLLING_WINDOWS` (12 and 24 respectively) -- see that file's
 # duplication note.
 _FEATURE_WARMUP_ROWS = 24
+
+# L1 cache in front of `GET /v1/forecast`'s existing Redis L2 cache below
+# -- same cache keys, same `forecast_cache_ttl_seconds` TTL, just skipping
+# the Redis round-trip/JSON parse for a repeat request this same worker
+# already served recently. Small `maxsize`: the real key space is just
+# (region, model_version | "baseline_fallback"), a handful of entries at
+# any moment, never unbounded. Public (not `_`-prefixed) so
+# `app.service.cache_warmer`'s forced-refresh warmer can invalidate it in
+# lockstep with the Redis key it already deletes -- see that module.
+forecast_local_cache: TTLCache[ForecastResponse] = TTLCache(maxsize=64)
 
 
 def _inverse_target(scaler, values: np.ndarray) -> np.ndarray:
@@ -442,6 +453,7 @@ async def get_recent_actual_vs_predicted(
     region: str,
     days: int = Query(default=7, ge=1, le=_RECENT_BACKTEST_MAX_DAYS),
     db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis_client),
     registry: ModelRegistry = Depends(get_model_registry),
     settings: Settings = Depends(get_app_settings),
 ) -> RecentBacktestResponse:
@@ -449,18 +461,27 @@ async def get_recent_actual_vs_predicted(
     model against real actual demand for roughly the last `days` days,
     ending at the most recent real origin the warehouse has (see
     `service/ml/evaluate.py`'s `evaluate_recent_actual_vs_predicted` for
-    the full reasoning). Built on demand from real history every request
-    -- nothing in this platform persists a rolling history of past
-    predictions to read back later (`service/ml/forecast_reconciliation.py`'s
-    own served-forecast log is Redis-backed, ~48h TTL, and deletes each
-    entry once reconciled -- a transient breaker signal, not a durable
-    audit trail this could read from instead).
+    the full reasoning).
+
+    Redis-cached (`recent_backtest_cache_ttl_seconds`, 2026-08-11) --
+    previously recomputed from real history on every single request,
+    confirmed slow (`region=NEM` alone sums 5 independent per-region
+    re-forecasts server-side; `lib/emissions.ts`'s `fetchRecentBacktest`
+    uses a 45s timeout instead of every other call's 15s default because
+    of it). Keyed on the currently-served model's own version, same as
+    `GET /v1/forecast`'s cache -- a promotion/rollback invalidates this
+    the same real way, not by waiting out a stale TTL.
     """
     bundle = registry.bundle
     if bundle is None:
         raise ApiError(
             503, "model_not_loaded", "No Production model version is loaded yet"
         )
+
+    cache_key = f"forecast:recent_backtest:v1:{region}:{days}:{bundle.version}"
+    cached = await redis.get(cache_key)
+    if cached is not None:
+        return RecentBacktestResponse.model_validate_json(cached)
 
     if region == "NEM":
         points = await _run_recent_backtest_nem(db, bundle, days)
@@ -474,7 +495,7 @@ async def get_recent_actual_vs_predicted(
             "(it wasn't trained on this region)",
         )
 
-    return RecentBacktestResponse(
+    response = RecentBacktestResponse(
         region=region,
         model=f"{settings.mlflow_registry_model_name}@{bundle.stage.lower()}",
         generated_at=datetime.now(UTC),
@@ -493,6 +514,12 @@ async def get_recent_actual_vs_predicted(
             for p in points
         ],
     )
+    await redis.set(
+        cache_key,
+        response.model_dump_json(),
+        ex=settings.recent_backtest_cache_ttl_seconds,
+    )
+    return response
 
 
 @router.get("/forecast", response_model=ForecastResponse)
@@ -537,10 +564,17 @@ async def get_forecast(
             if is_fallback
             else f"forecast:v1:{region}:{bundle.version}"
         )
+        local_hit = forecast_local_cache.get(cache_key)
+        if local_hit is not None:
+            forecast_predictions_total.labels(region=region, cache="hit_local").inc()
+            return local_hit
+
         cached = await redis.get(cache_key)
         if cached is not None:
+            response = ForecastResponse.model_validate_json(cached)
+            forecast_local_cache.set(cache_key, response, settings.forecast_cache_ttl_seconds)
             forecast_predictions_total.labels(region=region, cache="hit").inc()
-            return ForecastResponse.model_validate_json(cached)
+            return response
 
         # Real inference/fallback branch (`TODO.md` Forecasting Phase 7's
         # "OpenTelemetry Instrumentation" + "Structured Logging" -- a
@@ -601,5 +635,6 @@ async def get_forecast(
         await redis.set(
             cache_key, response.model_dump_json(), ex=settings.forecast_cache_ttl_seconds
         )
+        forecast_local_cache.set(cache_key, response, settings.forecast_cache_ttl_seconds)
         forecast_predictions_total.labels(region=region, cache="miss").inc()
         return response

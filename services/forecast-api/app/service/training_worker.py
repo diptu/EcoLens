@@ -42,6 +42,11 @@ from app.service.ml.evaluate import (
 )
 from app.service.ml.incremental import train_and_register_incremental
 from app.service.ml.incremental_tft import train_and_register_tft_incremental
+from app.service.ml.timesfm_correction import (
+    TIMESFM_CORRECTION_MODEL_NAME,
+    load_registered_correction_model,
+    train_and_register_correction,
+)
 from app.service.ml.train_tft import TFT_MODEL_NAME
 from app.service.model.actions import log_training_finish, log_training_start
 
@@ -70,6 +75,9 @@ async def _run_live_evaluation_gate(
         if architecture == "tft":
             tft_forecaster = load_registered_tft_model(model_name, version)
             forecaster, horizon = tft_forecaster, tft_forecaster.model.horizon
+        elif architecture == "timesfm_correction":
+            correction_forecaster = load_registered_correction_model(model_name, version)
+            forecaster, horizon = correction_forecaster, correction_forecaster.horizon
         else:
             lstm_forecaster = load_registered_model(model_name, version)
             forecaster, horizon = lstm_forecaster, lstm_forecaster.model.horizon
@@ -105,10 +113,16 @@ async def handle_training_trigger(payload: dict[str, Any]) -> None:
     retrying forever.
 
     `payload["architecture"]` (`"lstm"`, the default if absent -- older
-    events published before this ever set it -- or `"tft"`) dispatches
-    to `ml.incremental`/`ml.incremental_tft` respectively; the publisher
-    calls this once per architecture so both get a fine-tune from the
-    same real dbt-build-completion signal.
+    events published before this ever set it -- `"tft"`, or
+    `"timesfm_correction"`) dispatches to `ml.incremental`/
+    `ml.incremental_tft`/`ml.timesfm_correction` respectively; the
+    publisher calls this once per architecture so all three get a
+    fine-tune from the same real dbt-build-completion signal.
+    `timesfm_correction` retrains the Ridge residual-correction layer on
+    top of frozen zero-shot TimesFM (`service/ml/timesfm_correction.py`'s
+    own docstring) -- TimesFM's own weights never move, only that
+    layer's, which is what makes "continuously adapts" honestly true for
+    TimesFM's contribution the same way it already is for LSTM/TFT.
 
     Logs a `meta._training_log` row for the full attempt regardless of
     outcome (`running` at start, `success`/`failed` at the end) -- the
@@ -130,9 +144,12 @@ async def handle_training_trigger(payload: dict[str, Any]) -> None:
     )
     until = pd.Timestamp(window_until) if window_until else pd.Timestamp.now(tz="UTC")
     architecture = payload.get("architecture") or "lstm"
-    model_name = (
-        TFT_MODEL_NAME if architecture == "tft" else settings.mlflow_registry_model_name
-    )
+    if architecture == "tft":
+        model_name = TFT_MODEL_NAME
+    elif architecture == "timesfm_correction":
+        model_name = TIMESFM_CORRECTION_MODEL_NAME
+    else:
+        model_name = settings.mlflow_registry_model_name
     triggered_by = payload.get("triggered_by") or "schedule"
 
     log_id = await log_training_start(
@@ -146,6 +163,10 @@ async def handle_training_trigger(payload: dict[str, Any]) -> None:
         if architecture == "tft":
             result = await train_and_register_tft_incremental(
                 model_name, regions, since
+            )
+        elif architecture == "timesfm_correction":
+            result = await train_and_register_correction(
+                model_name, regions, since=since
             )
         else:
             result = await train_and_register_incremental(model_name, regions, since)

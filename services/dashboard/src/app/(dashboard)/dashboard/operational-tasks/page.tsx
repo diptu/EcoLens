@@ -4,7 +4,13 @@
  * Mirrors the "Operational Tasks" reference layout: 6 KPIs, Pipeline
  * Operations + Model Operations tables side by side, Active Tasks
  * with tabbed filters, Model Training & Tuning form, Recent
- * Training Runs, Scheduled Operations, and System Commands.
+ * Training Runs, and Scheduled Operations. (System Commands removed
+ * 2026-08-11. Of its 3 real wired actions: system-health checks and
+ * dbt builds are still reachable elsewhere on this page -- System
+ * Diagnostics' own Refresh button, and Pipeline Operations' own
+ * "Run now" on the dbt-warehouse row, respectively -- but "Rebuild
+ * Features" (`POST /v1/features/rebuild`) had no other UI entry point
+ * and is no longer triggerable from this page at all.)
  *
  * Pipeline Operations lists the real 6-pipeline inventory (OpenElectricity,
  * AEMO NEM, AEMO WEM, BoM, AEMO Public Holidays, dbt warehouse build) from
@@ -43,10 +49,7 @@
  * `fetchPublicPipelines()`/this page's own live pipeline-poll state/
  * `modelInfo`, not `getOperationalKpis()`/`getActiveTasks()`/
  * `getScheduledOps()`'s mocks (full reasoning in `services/ingestion/
- * TODO.md`'s Operational Tasks section). System Commands got 2 of its
- * 6 buttons wired to real calls (`triggerDbtBuild`/`fetchAllServicesHealth`
- * — see `executeCommand`'s own docstring for why the other 4 stay
- * disabled rather than fabricated). Active Tasks' other 5 task types
+ * TODO.md`'s Operational Tasks section). Active Tasks' other 5 task types
  * (data_quality/feature_build/forecast/report/anomaly) still have no
  * "task in flight" concept anywhere in any service -- `getActiveTasks()`'s
  * hardcoded mock rows for them were removed entirely (2026-08-08, root
@@ -66,6 +69,8 @@ import {
   Check,
   CheckCircle2,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Cpu,
   Database,
   Loader2,
@@ -80,10 +85,8 @@ import {
 import { Card } from "@/components/dashboard/card";
 import { cn } from "@/lib/utils";
 import {
-  getSystemCommands,
   type ActiveTask,
   type OperationalKpi,
-  type SystemCommand,
   type TaskStatus,
   type TaskType,
 } from "@/lib/admin-dashboard";
@@ -105,7 +108,6 @@ import {
   pollBackfillSummary,
   fetchBackfillStatus,
   triggerDbtBuild,
-  triggerFeatureRebuild,
   pollLatestDbtBuild,
   fetchPublicPipelines,
   fetchPublicRuns,
@@ -130,11 +132,6 @@ import {
 const ICON_MAP: Record<string, React.ComponentType<{ className?: string }>> = {
   Play, Database, Cpu, Calendar, RefreshCw, Trash2, Search, Activity,
 };
-
-function IconFor({ name, className = "h-4 w-4" }: { name: string; className?: string }) {
-  const I = ICON_MAP[name] ?? Activity;
-  return <I className={className} />;
-}
 
 // ────────────────────────────────────────────────────────────────────
 // Building blocks
@@ -295,15 +292,24 @@ export default function OperationalTasksPage() {
   const [modelVersions, setModelVersions] = useState<ModelVersion[] | null>(null);
   const [trainStatus, setTrainStatus] = useState<TrainStatus>({ state: "idle" });
   const [trainingRuns, setTrainingRuns] = useState<TrainingRunLog[] | null>(null);
-  const [commandStatus, setCommandStatus] = useState<
-    Record<string, { state: "running" | "success" | "error"; message: string }>
-  >({});
   const [serviceHealth, setServiceHealth] = useState<ServiceHealth[] | null>(null);
   const [serviceHealthCheckedAt, setServiceHealthCheckedAt] = useState<string | null>(null);
   const [serviceHealthRefreshing, setServiceHealthRefreshing] = useState(false);
   const [runLog, setRunLog] = useState<PublicRun[] | null>(null);
   const [runLogRefreshKey, setRunLogRefreshKey] = useState(0);
   const [runLogRefreshing, setRunLogRefreshing] = useState(false);
+  const [runLogHasMore, setRunLogHasMore] = useState(false);
+  // Real cursor-based pagination (`GET /v1/ingestion/public/runs`'s own
+  // `cursor`/`has_more`/`next_cursor` -- not a client-side offset, this
+  // is a real DB keyset cursor). `runLogCursorStack[i]` is the cursor
+  // used to fetch page `i` (`null` for page 0, the newest rows) --
+  // recorded as each page's own response comes back so "Previous" can
+  // jump straight back to a page already visited instead of re-deriving
+  // it, matching how forward-only cursor pagination is normally driven
+  // from a UI that still wants to go both directions.
+  const [runLogCursorStack, setRunLogCursorStack] = useState<(string | null)[]>([null]);
+  const [runLogPageIndex, setRunLogPageIndex] = useState(0);
+  const RUN_LOG_PAGE_SIZE = 10;
 
   // System Diagnostics card -- root TODO.md's "should show which system
   // are healthy and which are not": a persistent status grid, not just
@@ -312,10 +318,19 @@ export default function OperationalTasksPage() {
   // is reused here so both surfaces agree). Fetches on mount and every
   // 60s after that -- frequent enough to catch a service dying between
   // visits without hammering 5 real `/readyz` endpoints on every render.
+  //
+  // IAM (services/iam) is no longer building, so it's filtered out of
+  // this page's grid + "Check System Health" result rather than
+  // permanently reading as unhealthy. `lib/health.ts`'s
+  // `fetchAllServicesHealth` is left as-is -- system-health/ and
+  // operations/ still surface IAM.
+  const fetchOperationalServicesHealth = () =>
+    fetchAllServicesHealth().then((results) => results.filter((r) => r.service !== "iam"));
+
   const refreshServiceHealth = useMemo(
     () => () => {
       setServiceHealthRefreshing(true);
-      fetchAllServicesHealth()
+      fetchOperationalServicesHealth()
         .then((results) => {
           setServiceHealth(results);
           setServiceHealthCheckedAt(new Date().toISOString());
@@ -370,15 +385,29 @@ export default function OperationalTasksPage() {
   // cross-session history -- when a pipeline last ran whether or not
   // anyone had this tab open, how many rows it landed, and whether a
   // human or Celery Beat kicked it off (`trigger`: "manual"/"schedule"/
-  // "backfill"). Re-fetches whenever `runLogRefreshKey` changes (manual
-  // refresh button) -- no auto-poll interval, since this is a history
-  // list, not a live status the user is watching resolve.
+  // "backfill"). Re-fetches whenever `runLogRefreshKey` (manual refresh
+  // button, always resets to page 0) or `runLogPageIndex` (Prev/Next)
+  // changes -- no auto-poll interval, since this is a history list, not
+  // a live status the user is watching resolve.
   useEffect(() => {
     let cancelled = false;
     setRunLogRefreshing(true);
-    fetchPublicRuns(20)
+    const cursor = runLogCursorStack[runLogPageIndex] ?? undefined;
+    fetchPublicRuns(RUN_LOG_PAGE_SIZE, undefined, cursor)
       .then((r) => {
-        if (!cancelled) setRunLog(r.data);
+        if (cancelled) return;
+        setRunLog(r.data);
+        setRunLogHasMore(r.has_more);
+        // Only append once -- if the user has already paged forward past
+        // this point and come back, the next page's real cursor is
+        // already recorded; re-appending here would fork the stack from
+        // a possibly-stale `next_cursor` (real rows can land between
+        // visits) instead of reusing the one already visited.
+        setRunLogCursorStack((prev) =>
+          r.has_more && r.next_cursor && prev.length === runLogPageIndex + 1
+            ? [...prev, r.next_cursor]
+            : prev,
+        );
       })
       .catch(() => {})
       .finally(() => {
@@ -387,7 +416,14 @@ export default function OperationalTasksPage() {
     return () => {
       cancelled = true;
     };
-  }, [runLogRefreshKey]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runLogRefreshKey, runLogPageIndex]);
+
+  const refreshRunLog = () => {
+    setRunLogCursorStack([null]);
+    setRunLogPageIndex(0);
+    setRunLogRefreshKey((k) => k + 1);
+  };
 
   // `type: "ingestion"`/`"transform"` rows synthesized from this same
   // page's own live `pollLatestRun`/`pollLatestDbtBuild`/
@@ -451,7 +487,6 @@ export default function OperationalTasksPage() {
     }));
     return [...realTrainingTasks, ...pipelineActiveTasks];
   }, [trainingRuns, pipelineActiveTasks]);
-  const commands = useMemo(() => getSystemCommands(), []);
 
   const [tab, setTab] = useState<TaskStatus | "all">("all");
   const [trainRegionsInput, setTrainRegionsInput] = useState("");
@@ -588,16 +623,33 @@ export default function OperationalTasksPage() {
     triggerTraining(opts)
       .then(() => {
         fetchTrainingRuns(5).then((r) => setTrainingRuns(r.data)).catch(() => {});
-        cancelFns.current["__model_training__"] = pollForNewModelVersion(sinceVersion, (versions) => {
-          setTrainStatus({ state: "polling" });
-          fetchTrainingRuns(5).then((r) => setTrainingRuns(r.data)).catch(() => {});
-          const newest = versions.data[0]?.version ?? null;
-          if (newest !== sinceVersion) {
-            setModelVersions(versions.data);
-            fetchModelInfo().then(setModelInfo).catch(() => {});
-            setTrainStatus({ state: "idle" });
-          }
-        });
+        cancelFns.current["__model_training__"] = pollForNewModelVersion(
+          sinceVersion,
+          (versions) => {
+            setTrainStatus({ state: "polling" });
+            fetchTrainingRuns(5).then((r) => setTrainingRuns(r.data)).catch(() => {});
+            const newest = versions.data[0]?.version ?? null;
+            if (newest !== sinceVersion) {
+              setModelVersions(versions.data);
+              fetchModelInfo().then(setModelInfo).catch(() => {});
+              setTrainStatus({ state: "idle" });
+            }
+          },
+          5000,
+          120_000,
+          undefined,
+          // Real bug fix (2026-08-11) -- see `pollForNewModelVersion`'s
+          // own comment: previously left this stuck on "polling" forever
+          // if the real training-trigger consumer crashed or the run
+          // genuinely failed, no error, no way to tell.
+          () => {
+            setTrainStatus({
+              state: "error",
+              message:
+                "No new version registered within 2 minutes -- check the training worker/Recent Training Runs.",
+            });
+          },
+        );
       })
       .catch((err) => {
         const message = err instanceof Error ? err.message : "training trigger failed";
@@ -698,87 +750,6 @@ export default function OperationalTasksPage() {
       });
   }
 
-  // Of `getSystemCommands()`'s 6 buttons, these three now map onto a
-  // real backend call -- see `services/ingestion/TODO.md`'s "System
-  // Commands" item for why the other 3 don't: "Clear Cache"/"Vacuum
-  // Database" (the button, not the now-real Celery schedule -- see root
-  // TODO.md's "Vacuum Database" item) are destructive-adjacent admin-only
-  // operations against live infra with no defined-safe on-demand scope
-  // yet; "Reindex Search" has no search-index concept anywhere in this
-  // codebase to map onto at all.
-  //
-  // "Rebuild Features" (c1) was left unwired for the same stated reason
-  // as those two until 2026-08-08 -- reconsidered: `select_features.py`
-  // never needed cloud credentials on demand in the first place, only a
-  // *local* `master.duckdb` that must already exist (a real, disclosed
-  // precondition, not a silent one -- `POST /v1/features/rebuild` itself
-  // returns a real 422 `master_duckdb_missing` if it doesn't). Wiring a
-  // button that surfaces that real success/failure honestly doesn't
-  // contradict the original design decision the way auto-*building*
-  // `master.duckdb` from R2 on every click would have.
-  function executeCommand(id: string) {
-    if (id === "c1") {
-      setCommandStatus((prev) => ({
-        ...prev,
-        [id]: { state: "running", message: "Running feature selection (real sklearn compute -- can take several minutes)…" },
-      }));
-      triggerFeatureRebuild()
-        .then((result) => {
-          setCommandStatus((prev) => ({
-            ...prev,
-            [id]: { state: "success", message: `${result.n_selected} features selected.` },
-          }));
-        })
-        .catch((err) => {
-          const message = err instanceof TriggerIngestionError ? err.message : "feature rebuild failed";
-          setCommandStatus((prev) => ({ ...prev, [id]: { state: "error", message } }));
-        });
-      return;
-    }
-    if (id === "c2") {
-      setCommandStatus((prev) => ({ ...prev, [id]: { state: "running", message: "Building…" } }));
-      triggerDbtBuild()
-        .then((result) => {
-          setCommandStatus((prev) => ({
-            ...prev,
-            [id]: result.exit_code === 0
-              ? { state: "success", message: "Materialized views refreshed." }
-              : { state: "error", message: `dbt build exited ${result.exit_code}.` },
-          }));
-        })
-        .catch((err) => {
-          const message = err instanceof TriggerIngestionError ? err.message : "dbt build failed";
-          setCommandStatus((prev) => ({ ...prev, [id]: { state: "error", message } }));
-        });
-      return;
-    }
-    if (id === "c6") {
-      setCommandStatus((prev) => ({ ...prev, [id]: { state: "running", message: "Checking…" } }));
-      // Shares the System Diagnostics card's own fetch/state below
-      // (`serviceHealth`/`serviceHealthCheckedAt`) instead of an
-      // independent round-trip -- one real check, both surfaces agree.
-      fetchAllServicesHealth()
-        .then((results) => {
-          setServiceHealth(results);
-          setServiceHealthCheckedAt(new Date().toISOString());
-          const unhealthy = results.filter((r) => !r.reachable || r.ready === false);
-          const message = unhealthy.length === 0
-            ? `All ${results.length} services healthy.`
-            : `${unhealthy.length}/${results.length} service(s) unhealthy: ${unhealthy.map((r) => r.service).join(", ")}.`;
-          setCommandStatus((prev) => ({
-            ...prev,
-            [id]: { state: unhealthy.length === 0 ? "success" : "error", message },
-          }));
-        })
-        .catch(() => {
-          setCommandStatus((prev) => ({
-            ...prev,
-            [id]: { state: "error", message: "Diagnostics check failed to run." },
-          }));
-        });
-    }
-  }
-
   const taskCounts = useMemo(() => ({
     all:       allTasks.length,
     running:   allTasks.filter((t) => t.status === "running").length,
@@ -860,10 +831,6 @@ export default function OperationalTasksPage() {
       },
     ];
   }, [pipelines, taskCounts, modelInfo]);
-
-  const dbtRowStatus = pipelineRows["pipe-dbt-warehouse"]?.status;
-  const dbtBuildBusy =
-    dbtRowStatus === "queued" || dbtRowStatus === "running" || dbtRowStatus === "staged";
 
   const tasks = useMemo(() => {
     if (tab === "all") return allTasks;
@@ -974,7 +941,7 @@ export default function OperationalTasksPage() {
             </p>
           </div>
           <button
-            onClick={() => setRunLogRefreshKey((k) => k + 1)}
+            onClick={refreshRunLog}
             disabled={runLogRefreshing}
             className={cn(
               "inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium",
@@ -988,6 +955,39 @@ export default function OperationalTasksPage() {
           </button>
         </div>
         <RunLogTable runs={runLog} />
+        <div className="mt-3 flex items-center justify-between border-t border-white/5 pt-3 text-xs text-white/50">
+          <span>Page {runLogPageIndex + 1}</span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setRunLogPageIndex((i) => Math.max(0, i - 1))}
+              disabled={runLogPageIndex === 0 || runLogRefreshing}
+              className={cn(
+                "inline-flex items-center gap-1 rounded-md border px-2 py-1 font-medium",
+                runLogPageIndex === 0 || runLogRefreshing
+                  ? "cursor-not-allowed border-white/10 bg-white/5 text-white/30"
+                  : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10 hover:text-white",
+              )}
+            >
+              <ChevronLeft className="h-3 w-3" />
+              Previous
+            </button>
+            <button
+              type="button"
+              onClick={() => setRunLogPageIndex((i) => i + 1)}
+              disabled={!runLogHasMore || runLogRefreshing}
+              className={cn(
+                "inline-flex items-center gap-1 rounded-md border px-2 py-1 font-medium",
+                !runLogHasMore || runLogRefreshing
+                  ? "cursor-not-allowed border-white/10 bg-white/5 text-white/30"
+                  : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10 hover:text-white",
+              )}
+            >
+              Next
+              <ChevronRight className="h-3 w-3" />
+            </button>
+          </div>
+        </div>
       </Card>
 
       {/* Active Tasks + Training form */}
@@ -1092,44 +1092,17 @@ export default function OperationalTasksPage() {
         </Card>
       </div>
 
-      {/* Scheduled operations + system commands */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <Card>
-          <div className="mb-3">
-            <h2 className="text-base font-semibold text-white">Scheduled Operations</h2>
-            <p className="text-xs text-white/50">Manage cron schedules for automated operations.</p>
-          </div>
-          <ScheduledTable rows={pipelines ?? []} loaded={pipelines !== null} />
-          <button className="mt-3 inline-flex w-full items-center justify-center gap-1 text-xs text-emerald-100 hover:underline">
-            View all schedules <ChevronDown className="h-3 w-3" />
-          </button>
-        </Card>
-
-        <Card>
-          <div className="mb-3">
-            <h2 className="text-base font-semibold text-white">System Commands</h2>
-            <p className="text-xs text-white/50">Execute system level commands.</p>
-          </div>
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-            {commands.map((c) => (
-              <CommandCard
-                key={c.id}
-                c={c}
-                status={commandStatus[c.id]}
-                onExecute={c.id === "c1" || c.id === "c2" || c.id === "c6" ? () => executeCommand(c.id) : undefined}
-                // "Refresh Materialized Views" (c2) shares the dbt-build
-                // row's own live-polled state -- a build already in
-                // flight (self- or externally-triggered, observed via
-                // `pollLatestDbtBuild`) disables this button proactively
-                // too, not just the Pipeline Operations table's own
-                // "Run now" (`services/waerehouse/TODO.md`'s own note
-                // on this gap).
-                busy={c.id === "c2" && dbtBuildBusy}
-              />
-            ))}
-          </div>
-        </Card>
-      </div>
+      {/* Scheduled operations */}
+      <Card>
+        <div className="mb-3">
+          <h2 className="text-base font-semibold text-white">Scheduled Operations</h2>
+          <p className="text-xs text-white/50">Manage cron schedules for automated operations.</p>
+        </div>
+        <ScheduledTable rows={pipelines ?? []} loaded={pipelines !== null} />
+        <button className="mt-3 inline-flex w-full items-center justify-center gap-1 text-xs text-emerald-100 hover:underline">
+          View all schedules <ChevronDown className="h-3 w-3" />
+        </button>
+      </Card>
 
       {/* System Diagnostics */}
       <Card>
@@ -1820,68 +1793,6 @@ function SystemDiagnosticsGrid({ health }: { health: ServiceHealth[] | null }) {
           </div>
         );
       })}
-    </div>
-  );
-}
-
-/** `onExecute` is only ever set for the 2 commands that map onto a real
- * backend call (`executeCommand`'s own docstring has the full reasoning
- * for why the other 4 don't) -- those without it render disabled with
- * an explanatory tooltip instead of a decorative, always-enabled button
- * that does nothing when clicked (same "no silently fabricated success"
- * convention the rest of this page follows). */
-function CommandCard({
-  c,
-  status,
-  onExecute,
-  busy = false,
-}: {
-  c: SystemCommand;
-  status?: { state: "running" | "success" | "error"; message: string };
-  onExecute?: () => void;
-  /** True when the real backend state this command acts on is already
-   * in flight from somewhere else (e.g. a dbt build someone else
-   * triggered) -- disables proactively, same as `PipelineTable`'s own
-   * "Run now" already does from the same underlying state. */
-  busy?: boolean;
-}) {
-  const running = status?.state === "running" || busy;
-  return (
-    <div className="rounded-md border border-white/10 bg-white/[0.02] p-3">
-      <div className="mb-1 flex items-center gap-2">
-        <IconFor name={c.icon} className="h-4 w-4 text-emerald-100" />
-        <h3 className="text-sm font-medium text-white">{c.label}</h3>
-      </div>
-      <p className="mb-2 text-[11px] text-white/50">{c.description}</p>
-      <button
-        onClick={onExecute}
-        disabled={!onExecute || running}
-        title={
-          !onExecute
-            ? "No backend endpoint exists for this command yet"
-            : busy
-              ? "A build triggered elsewhere is already in progress"
-              : undefined
-        }
-        className={cn(
-          "inline-flex w-full items-center justify-center gap-2 rounded-md border px-3 py-1.5 text-xs font-medium",
-          !onExecute
-            ? "cursor-not-allowed border-white/10 bg-white/[0.02] text-white/30"
-            : running
-              ? "cursor-not-allowed border-white/10 bg-white/5 text-white/40"
-              : c.destructive
-                ? "border-rose-300/40 bg-rose-300/10 text-rose-200 hover:bg-rose-300/15"
-                : "border-emerald-200/40 bg-emerald-200/10 text-emerald-100 hover:bg-emerald-200/15",
-        )}
-      >
-        {running ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
-        {running ? "Running…" : "Execute"}
-      </button>
-      {status && status.state !== "running" && (
-        <p className={cn("mt-1.5 text-[11px]", status.state === "success" ? "text-emerald-200" : "text-rose-300")}>
-          {status.message}
-        </p>
-      )}
     </div>
   );
 }

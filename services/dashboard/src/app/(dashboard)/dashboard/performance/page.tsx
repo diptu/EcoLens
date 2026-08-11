@@ -606,78 +606,188 @@ export default function PerformancePage() {
     bias: number | null;
     coverage: number | null;
     score: number | null;
+    /** True when this row's numbers come from the version's own
+     * training-time test-split metrics (`ModelVersion.metrics`), not a
+     * real walk-forward `evaluate` run -- e.g. TimesFM, which has never
+     * had `evaluate` run against it (real, confirmed: no Production
+     * version, no logged evaluation for either registered version).
+     * Surfaced in the UI (a label, not silently blended in) since
+     * training-time test-split numbers aren't directly comparable to
+     * the other rows' real rolling walk-forward ones -- MAE/Bias
+     * specifically don't exist in training-time metrics for any
+     * architecture (walk-forward-only fields), so those two stay "—"
+     * rather than guessing. */
+    trainingTimeOnly: boolean;
   };
+  // Best-effort real key lookup across this platform's 3 architectures'
+  // own differently-named training-time metrics (`ModelVersion.metrics`)
+  // -- LSTM/TFT log `test_mape`/`val_rmse`/`val_mae`/`test_coverage_*`;
+  // TimesFM logs `raw_test_*`/`corrected_test_*` instead (confirmed live
+  // against both real registries). Real values only, first one present.
+  function firstVersionMetric(metrics: Record<string, number>, keys: string[]): number | null {
+    for (const k of keys) {
+      if (typeof metrics[k] === "number") return metrics[k];
+    }
+    return null;
+  }
+  const TRAINING_MAPE_KEYS = ["test_mape", "corrected_test_mape", "raw_test_mape"];
+  const TRAINING_RMSE_KEYS = ["val_rmse", "corrected_test_rmse", "raw_test_rmse"];
+  const TRAINING_COVERAGE_KEYS = [
+    "test_coverage_calibrated",
+    "corrected_test_coverage_calibrated",
+    "test_coverage_raw",
+    "corrected_test_coverage_raw",
+    "raw_test_coverage",
+  ];
+
   const [benchmarkRows, setBenchmarkRows] = useState<BenchmarkRow[] | null>(null);
+  const [naiveBenchmarkRow, setNaiveBenchmarkRow] = useState<
+    Pick<BenchmarkRow, "mape" | "rmse" | "mae" | "bias" | "coverage"> | null
+  >(null);
   useEffect(() => {
     let cancelled = false;
     setBenchmarkRows(null);
+    setNaiveBenchmarkRow(null);
     Promise.all(
       PERFORMANCE_ARCHITECTURES.map(async (arch) => {
         const versionsResp = await fetchModelVersions(arch.modelName).catch(() => ({ data: [] as ModelVersion[] }));
         const prod = versionsResp.data.find((v) => v.stage === "Production") ?? null;
-        if (!prod) return { label: arch.label, modelName: arch.modelName, version: null } as BenchmarkRow;
-        const evalSummary = await fetchModelEvaluation(prod.version, arch.modelName).catch(() => null);
-        const calib = (evalSummary?.regions ?? []).filter(
-          (r) => r.candidate !== "seasonal_naive" && !r.candidate.endsWith("_raw"),
-        );
-        const naiveByRegion = new Map(
-          (evalSummary?.regions ?? [])
-            .filter((r) => r.candidate === "seasonal_naive")
-            .map((r) => [r.region, r.mape]),
-        );
-        const archMape = mean(calib.map((r) => r.mape));
-        const archBaseline = mean(
-          calib.map((r) => naiveByRegion.get(r.region)).filter((v): v is number => v != null),
-        );
-        const archCoverage = mean(calib.map((r) => r.coverage));
-        // Real, disclosed 2-component score (same methodology as the
-        // Model health score card further down: real inputs, weights
-        // shown, reweighted across whichever components are actually
-        // available -- just without that card's drift component, since
-        // computing 3 architectures' own drift snapshots here too would
-        // triple this fetch's real cost for a comparison table that's
-        // primarily about accuracy/calibration).
-        const errorComponent =
-          archBaseline != null && archMape != null && archBaseline > 0
-            ? clamp01(archBaseline / archMape)
-            : null;
-        const coverageComponent =
-          archCoverage != null
-            ? clamp01(1 - Math.abs(archCoverage * 100 - TARGET_COVERAGE_PCT) / TARGET_COVERAGE_PCT)
-            : null;
-        const scoreParts = [
-          { v: errorComponent, w: 0.7 },
-          { v: coverageComponent, w: 0.3 },
-        ].filter((p): p is { v: number; w: number } => p.v != null);
-        const scoreWeight = scoreParts.reduce((s, p) => s + p.w, 0);
-        const score = scoreWeight > 0 ? scoreParts.reduce((s, p) => s + p.v * p.w, 0) / scoreWeight : null;
+        // Real fallback when there's no Production version at all --
+        // `versionsResp.data` is newest-first (confirmed against the
+        // real API), so this is the most recently registered version,
+        // labeled below as training-time-only rather than silently
+        // presented as if it were a live Production evaluation.
+        const fallbackVersion = prod ?? versionsResp.data[0] ?? null;
+        if (!fallbackVersion) {
+          return {
+            label: arch.label,
+            modelName: arch.modelName,
+            version: null,
+            mape: null,
+            rmse: null,
+            mae: null,
+            bias: null,
+            coverage: null,
+            score: null,
+            trainingTimeOnly: false,
+            naiveRegions: [],
+          };
+        }
+        const evalSummary = prod
+          ? await fetchModelEvaluation(prod.version, arch.modelName).catch(() => null)
+          : null;
+        const naiveRegions = (evalSummary?.regions ?? []).filter((r) => r.candidate === "seasonal_naive");
+
+        if (evalSummary) {
+          const calib = evalSummary.regions.filter(
+            (r) => r.candidate !== "seasonal_naive" && !r.candidate.endsWith("_raw"),
+          );
+          const naiveByRegion = new Map(naiveRegions.map((r) => [r.region, r.mape]));
+          const archMape = mean(calib.map((r) => r.mape));
+          const archBaseline = mean(
+            calib.map((r) => naiveByRegion.get(r.region)).filter((v): v is number => v != null),
+          );
+          const archCoverage = mean(calib.map((r) => r.coverage));
+          // Real, disclosed 2-component score (same methodology as the
+          // Model health score card further down: real inputs, weights
+          // shown, reweighted across whichever components are actually
+          // available -- just without that card's drift component, since
+          // computing 3 architectures' own drift snapshots here too would
+          // triple this fetch's real cost for a comparison table that's
+          // primarily about accuracy/calibration).
+          const errorComponent =
+            archBaseline != null && archMape != null && archBaseline > 0
+              ? clamp01(archBaseline / archMape)
+              : null;
+          const coverageComponent =
+            archCoverage != null
+              ? clamp01(1 - Math.abs(archCoverage * 100 - TARGET_COVERAGE_PCT) / TARGET_COVERAGE_PCT)
+              : null;
+          const scoreParts = [
+            { v: errorComponent, w: 0.7 },
+            { v: coverageComponent, w: 0.3 },
+          ].filter((p): p is { v: number; w: number } => p.v != null);
+          const scoreWeight = scoreParts.reduce((s, p) => s + p.w, 0);
+          const score = scoreWeight > 0 ? scoreParts.reduce((s, p) => s + p.v * p.w, 0) / scoreWeight : null;
+          return {
+            label: arch.label,
+            modelName: arch.modelName,
+            version: fallbackVersion.version,
+            mape: archMape,
+            rmse: mean(calib.map((r) => r.rmse)),
+            mae: mean(calib.map((r) => r.mae).filter((v): v is number => v != null)),
+            bias: mean(calib.map((r) => r.mean_error).filter((v): v is number => v != null)),
+            coverage: archCoverage,
+            score,
+            trainingTimeOnly: false,
+            naiveRegions,
+          };
+        }
+
+        // No real walk-forward evaluation exists for this architecture
+        // at all yet -- real training-time test-split metrics instead of
+        // an all-dashes row. No MAE/Bias (walk-forward-only real fields,
+        // never computed at training time for any architecture) and no
+        // Score (the score formula needs a real baseline-vs-model
+        // comparison this row doesn't have).
         return {
           label: arch.label,
           modelName: arch.modelName,
-          version: prod.version,
-          mape: archMape,
-          rmse: mean(calib.map((r) => r.rmse)),
-          mae: mean(calib.map((r) => r.mae).filter((v): v is number => v != null)),
-          bias: mean(calib.map((r) => r.mean_error).filter((v): v is number => v != null)),
-          coverage: archCoverage,
-          score,
-        } as BenchmarkRow;
+          version: fallbackVersion.version,
+          mape: firstVersionMetric(fallbackVersion.metrics, TRAINING_MAPE_KEYS),
+          rmse: firstVersionMetric(fallbackVersion.metrics, TRAINING_RMSE_KEYS),
+          mae: null,
+          bias: null,
+          coverage: firstVersionMetric(fallbackVersion.metrics, TRAINING_COVERAGE_KEYS),
+          score: null,
+          trainingTimeOnly: true,
+          naiveRegions: [],
+        };
       }),
     )
       .then((rows) => {
-        if (!cancelled) setBenchmarkRows(rows);
+        if (cancelled) return;
+        setBenchmarkRows(rows.map(({ naiveRegions: _drop, ...row }) => row));
+        // Real seasonal-naive rows collected across every architecture's
+        // own evaluation that actually has one logged (same underlying
+        // `BaselineForecaster` regardless of which architecture's
+        // evaluate run produced it -- see this section's own header
+        // comment) -- deduped by region so a region scored by more than
+        // one architecture's evaluate run isn't double-counted in the
+        // mean.
+        const naiveByRegionAll = new Map<string, (typeof rows)[number]["naiveRegions"][number]>();
+        for (const row of rows) {
+          for (const r of row.naiveRegions) {
+            if (!naiveByRegionAll.has(r.region)) naiveByRegionAll.set(r.region, r);
+          }
+        }
+        const naiveRows = [...naiveByRegionAll.values()];
+        setNaiveBenchmarkRow(
+          naiveRows.length > 0
+            ? {
+                mape: mean(naiveRows.map((r) => r.mape)),
+                rmse: mean(naiveRows.map((r) => r.rmse)),
+                mae: mean(naiveRows.map((r) => r.mae).filter((v): v is number => v != null)),
+                bias: mean(naiveRows.map((r) => r.mean_error).filter((v): v is number => v != null)),
+                coverage: mean(naiveRows.map((r) => r.coverage)),
+              }
+            : null,
+        );
       })
       .catch(() => {
-        if (!cancelled) setBenchmarkRows([]);
+        if (!cancelled) {
+          setBenchmarkRows([]);
+          setNaiveBenchmarkRow(null);
+        }
       });
     return () => {
       cancelled = true;
     };
   }, []);
-  // Real naive baseline row, from whichever architecture's own
-  // evaluation happened to log it (all 3 score against the exact same
-  // seasonal-naive implementation, `ml/evaluate.py`'s `BaselineForecaster`
-  // -- picking the first available real one is not a fabricated row).
+  // Real naive baseline MAPE for cards outside the benchmark table
+  // (`naiveBenchmarkRow` above backs the table itself, with the fuller
+  // real RMSE/MAE/Bias/Coverage set) -- kept for those other real
+  // callers rather than threading `naiveBenchmarkRow` through them too.
   const naiveBenchmarkMape =
     walkForwardBaselineMape ?? mean(calibratedEvalAll.map((r) => naiveMapeByRegion.get(r.region)).filter((v): v is number => v != null));
 
@@ -1050,6 +1160,14 @@ export default function PerformancePage() {
                           <span className="font-medium">{row.label}</span>
                           {row.version && <span className="ml-1.5 rounded-md border border-white/10 bg-white/5 px-1 py-0.5 text-[9px] text-white/50">v{row.version}</span>}
                           {row.modelName === architecture && <span className="ml-1.5 rounded-md border border-lime-200/30 bg-lime-100/10 px-1 py-0.5 text-[9px] text-lime-100">Selected</span>}
+                          {row.trainingTimeOnly && (
+                            <span
+                              className="ml-1.5 rounded-md border border-amber-300/30 bg-amber-300/10 px-1 py-0.5 text-[9px] text-amber-200"
+                              title="No real walk-forward evaluate run exists for this architecture yet (no Production version, or none logged) -- these are its own training-time test-split metrics instead, not directly comparable to the other rows' real rolling walk-forward numbers. MAE/Bias are walk-forward-only fields, so they stay unavailable."
+                            >
+                              training-time only
+                            </span>
+                          )}
                         </td>
                         <td className="py-2 pr-3 font-mono">{row.mape != null ? `${row.mape.toFixed(2)}%` : "—"}</td>
                         <td className="py-2 pr-3 font-mono">{row.rmse != null ? Math.round(row.rmse).toLocaleString() : "—"}</td>
@@ -1070,21 +1188,21 @@ export default function PerformancePage() {
                         </td>
                       </tr>
                     ))}
-                    {naiveBenchmarkMape != null && (
+                    {naiveBenchmarkRow && (
                       <tr className="text-white/50">
                         <td className="py-2 pr-3">Naive (baseline)</td>
-                        <td className="py-2 pr-3 font-mono">{naiveBenchmarkMape.toFixed(2)}%</td>
-                        <td className="py-2 pr-3">—</td>
-                        <td className="py-2 pr-3">—</td>
-                        <td className="py-2 pr-3">—</td>
-                        <td className="py-2 pr-3">—</td>
-                        <td className="py-2">—</td>
+                        <td className="py-2 pr-3 font-mono">{naiveBenchmarkRow.mape != null ? `${naiveBenchmarkRow.mape.toFixed(2)}%` : "—"}</td>
+                        <td className="py-2 pr-3 font-mono">{naiveBenchmarkRow.rmse != null ? Math.round(naiveBenchmarkRow.rmse).toLocaleString() : "—"}</td>
+                        <td className="py-2 pr-3 font-mono">{naiveBenchmarkRow.mae != null ? Math.round(naiveBenchmarkRow.mae).toLocaleString() : "—"}</td>
+                        <td className="py-2 pr-3 font-mono">{naiveBenchmarkRow.bias != null ? `${naiveBenchmarkRow.bias >= 0 ? "+" : ""}${naiveBenchmarkRow.bias.toFixed(0)}%`.replace("%", "") : "—"}</td>
+                        <td className="py-2 pr-3 font-mono">{naiveBenchmarkRow.coverage != null ? `${(naiveBenchmarkRow.coverage * 100).toFixed(1)}%` : "—"}</td>
+                        <td className="py-2" title="A baseline scored against itself has no real 'vs benchmark' score to show.">—</td>
                       </tr>
                     )}
                   </tbody>
                 </table>
                 <p className="mt-3 text-[10px] text-white/35">
-                  Score = 70% (real baseline MAPE ÷ this model&apos;s real MAPE, capped at 1) + 30% (real coverage-vs-target closeness) — a disclosed formula over real inputs, reweighted across whichever component is available; not a product-approved ranking.
+                  Score = 70% (real baseline MAPE ÷ this model&apos;s real MAPE, capped at 1) + 30% (real coverage-vs-target closeness) — a disclosed formula over real inputs, reweighted across whichever component is available; not a product-approved ranking. Rows marked &quot;training-time only&quot; have no real walk-forward evaluate run yet, so MAE/Bias/Score stay unavailable for them.
                 </p>
               </div>
             )}

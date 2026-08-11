@@ -58,12 +58,28 @@ class Settings(BaseSettings):
     # meaningfully shift on a sub-minute cadence, so 5 minutes is honest,
     # not stale in any way the dashboard's own drift alert cares about.
     model_drift_cache_ttl_seconds: int = 300
+    # `GET /v1/forecast/recent-actual-vs-predicted` -- a real walk-forward
+    # re-forecast, previously entirely uncached (`region=NEM` alone sums
+    # 5 independent per-region re-forecasts server-side, confirmed slow
+    # enough that `lib/emissions.ts`'s `fetchRecentBacktest` uses a 45s
+    # timeout instead of every other call's 15s default). The real origin
+    # this anchors to only advances as new actual demand lands (hourly at
+    # best), so 5 minutes is honest, not stale in any way the Forecast
+    # Explorer's "Actual vs Predicted" chart cares about -- same
+    # reasoning as `model_drift_cache_ttl_seconds` above.
+    recent_backtest_cache_ttl_seconds: int = 300
 
-    # `app.service.cache_warmer` -- both comfortably shorter than the
+    # `app.service.cache_warmer` -- all comfortably shorter than the
     # respective TTL above, so a background refresh always lands before
     # a real request could ever hit an expired (cold) entry.
     emissions_forecast_warmer_interval_seconds: float = 45.0
     model_drift_warmer_interval_seconds: float = 240.0
+    # `run_dashboard_essentials_warmer` -- covers `GET /v1/forecast`
+    # (region=NEM) among several other cheaper endpoints, all on
+    # `forecast_cache_ttl_seconds`/`emissions_cache_ttl_seconds` (60s) or
+    # longer TTLs -- 40s stays under the tightest of those with a real
+    # margin, same reasoning as the other two warmers above.
+    dashboard_essentials_warmer_interval_seconds: float = 40.0
 
     # `TODO.md` Forecasting Phase 4's "Self-Correction & Fallback
     # Mechanism" -- `service/ml/forecast_reconciliation.py`'s background

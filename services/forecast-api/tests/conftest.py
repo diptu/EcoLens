@@ -45,3 +45,20 @@ def _fresh_structlog_config():
     on what ran (or what closed `sys.stdout`) before it."""
     logging_module._configured = False
     logging_module.configure_logging()
+
+
+@pytest.fixture(autouse=True)
+def _clear_forecast_local_cache():
+    """`GET /v1/forecast`'s L1 process-local cache (`app.core.local_cache`,
+    `app.api.v1.forecast.routes.forecast_local_cache`) is a module-level
+    singleton -- unlike Redis (a fresh `_FakeRedis()` per test), it isn't
+    reconstructed per test on its own. Multiple tests reuse the same
+    cache key (region + `bundle.version`, which most tests leave at the
+    `_build_bundle` default of `"1"`), so without this an earlier test's
+    cached response would leak into a later test that expects a fresh
+    compute against its own fixture data."""
+    from app.api.v1.forecast.routes import forecast_local_cache
+
+    forecast_local_cache.clear()
+    yield
+    forecast_local_cache.clear()

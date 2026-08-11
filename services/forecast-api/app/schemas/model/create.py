@@ -30,11 +30,25 @@ class PromoteModelRequest(AppBaseModel):
 
 
 class TrainRequest(AppBaseModel):
-    """`POST /v1/model/train`'s body -- both fields optional, defaulting
-    to `Settings.model_default_regions`/`incremental_train_window_hours`,
-    the same defaults the automatic (dbt-build-triggered) path falls
-    back to. Ported from data-pipeline's identical schema as part of the
-    training-code migration."""
+    """`POST /v1/model/train`'s body -- `regions`/`window_hours` optional,
+    defaulting to `Settings.model_default_regions`/
+    `incremental_train_window_hours`, the same defaults the automatic
+    (dbt-build-triggered) path falls back to. Ported from data-pipeline's
+    identical schema as part of the training-code migration.
+
+    `architecture` (`None` defaults to `"lstm"` server-side, same as the
+    automatic path's own default) selects which incremental trainer
+    `app.service.training_worker.handle_training_trigger` dispatches
+    to -- `"lstm"`, `"tft"`, or `"timesfm_correction"` (the Ridge
+    residual-correction layer on top of frozen TimesFM, `service/ml/
+    timesfm_correction.py`; TimesFM's own weights are never retrained,
+    only this layer is). Previously missing entirely: this endpoint
+    always published `architecture: "lstm"` regardless of which
+    architecture tab the dashboard's Fine-tune form had selected, so
+    picking TFT or TimesFM and clicking "Start fine-tune" silently
+    fine-tuned LSTM instead (`services/dashboard`'s `models/page.tsx`
+    documented this as a known caveat before this field existed)."""
 
     regions: list[str] | None = None
     window_hours: int | None = None
+    architecture: Literal["lstm", "tft", "timesfm_correction"] | None = None

@@ -285,8 +285,18 @@ export type DemandForecast = {
  * `region` defaults to "NEM" (the 5-NEM-region aggregate summed
  * server-side; see forecast-api's `_run_nem_aggregate_forecast`). Backs
  * the Executive Dashboard's "Demand Forecast Preview" card. */
+/** `region=NEM` sums 5 real per-region LSTM inferences server-side on a
+ * real cache miss -- confirmed live (2026-08-11) taking ~20s, past this
+ * file's normal 15s default (which surfaced as a real "Request timed
+ * out after 15s" failure, not just a slow load). forecast-api now keeps
+ * this proactively warm (`app.service.cache_warmer.
+ * run_dashboard_essentials_warmer`, wired into startup the same day),
+ * so a real cold hit should be rare -- this generous 45s timeout is
+ * defense-in-depth for the gap between a fresh restart and that
+ * warmer's first tick, same real margin `fetchRecentBacktest` already
+ * uses for its own similarly slow real compute. */
 export async function fetchDemandForecast(region: string = "NEM"): Promise<DemandForecast> {
-  const res = await fetchWithTimeout(`${FORECAST_API_URL}/forecast?region=${region}`);
+  const res = await fetchWithTimeout(`${FORECAST_API_URL}/forecast?region=${region}`, {}, 45000);
   if (!res.ok) {
     const body = await res.json().catch(() => null);
     const err = new Error(
@@ -788,13 +798,25 @@ export async function fetchDrift(modelName?: string): Promise<DriftReport[]> {
  * top-of-list version here is the only real completion signal
  * available. Returns a cancel function; callers must call it on
  * unmount so a stale poll doesn't call `onUpdate` after the
- * component's gone. */
+ * component's gone.
+ *
+ * `onTimeout` (2026-08-11, real bug fix): previously this just silently
+ * stopped calling `setTimeout` once `deadline` passed, with no signal
+ * to the caller at all -- confirmed live, a real training-trigger
+ * consumer crash (see `db/rabbitmq.py`'s `consume_training_trigger_
+ * events` docstring for that real bug) left callers stuck showing
+ * "Waiting for the worker..." forever, no error, no way to tell a user
+ * "this gave up" from "this is still genuinely in progress". Called
+ * once, only when the real deadline is reached with no new version
+ * ever having landed -- never called after a real `onUpdate` already
+ * found one (that path returns early instead). */
 export function pollForNewModelVersion(
   sinceVersion: string | null,
   onUpdate: (versions: ModelVersionsList) => void,
   intervalMs = 5000,
   timeoutMs = 120_000,
   modelName?: string,
+  onTimeout?: () => void,
 ): () => void {
   let cancelled = false;
   const deadline = Date.now() + timeoutMs;
@@ -808,8 +830,11 @@ export function pollForNewModelVersion(
     } catch {
       // A transient poll failure isn't fatal -- just retry next tick.
     }
-    if (!cancelled && Date.now() < deadline) {
+    if (cancelled) return;
+    if (Date.now() < deadline) {
       setTimeout(tick, intervalMs);
+    } else {
+      onTimeout?.();
     }
   };
   void tick();

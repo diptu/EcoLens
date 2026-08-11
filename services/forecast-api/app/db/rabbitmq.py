@@ -133,6 +133,22 @@ async def consume_training_trigger_events(
     landing in `rabbitmq_training_trigger_dlq` for inspection/manual
     replay.
 
+    Real bug, confirmed live 2026-08-11: `message.process()` nacks on
+    exception but still re-raises it afterward (aio_pika's own real
+    behavior) -- an uncaught `ValueError` from a real training failure
+    (e.g. a real trigger window too short to build even one train/val/
+    cal window) propagated all the way out of this function and killed
+    the whole long-running consumer process, silently turning every
+    *future* real trigger into the exact "stuck waiting for the worker"
+    dashboard state this consumer exists to resolve -- one bad real job
+    taking down every subsequent one, not just itself. The `try`/`except`
+    below keeps the real nack-to-DLQ behavior (the exception still
+    occurs *inside* `message.process()`'s own block first) while
+    stopping it from escaping this function and crashing the consumer
+    loop -- same "one bad unit shouldn't sink the batch" convention
+    `pipeline.backfill`'s per-day loop already follows on the ingestion
+    side.
+
     `prefetch_count=1` -- one incremental training run at a time; a
     second trigger event arriving mid-training waits rather than
     kicking off a concurrent run against the same model name.
@@ -144,6 +160,13 @@ async def consume_training_trigger_events(
 
     async with queue.iterator() as queue_iter:
         async for message in queue_iter:
-            async with message.process(requeue=False):
-                payload = json.loads(message.body)
-                await handler(payload)
+            try:
+                async with message.process(requeue=False):
+                    payload = json.loads(message.body)
+                    await handler(payload)
+            except Exception as exc:  # noqa: BLE001 - one bad real trigger must not kill this long-running consumer
+                log.error(
+                    "training_worker.message_failed",
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )

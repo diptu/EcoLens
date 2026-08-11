@@ -38,8 +38,11 @@ export default function OperationsDashboardPage() {
         if (!cancelled) setModelInfo(r);
       })
       .catch(() => {});
+    // IAM (services/iam) is no longer building, so it's filtered out of
+    // this page's Service Health grid -- `lib/health.ts`'s
+    // `fetchAllServicesHealth` is left as-is (still used elsewhere).
     fetchAllServicesHealth().then((r) => {
-      if (!cancelled) setServicesHealth(r);
+      if (!cancelled) setServicesHealth(r.filter((s) => s.service !== "iam"));
     });
     fetchPublicDataSources()
       .then((r) => {

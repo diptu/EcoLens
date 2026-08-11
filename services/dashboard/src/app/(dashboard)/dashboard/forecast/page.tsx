@@ -54,6 +54,7 @@ import { Card } from "@/components/dashboard/card";
 import { RecentBacktestChart, type RecentBacktestPoint } from "@/components/dashboard/recent-backtest-chart";
 import { FanChart, Sparkline } from "@/components/dashboard/fan-chart";
 import { cn } from "@/lib/utils";
+import { getCached, setCached } from "@/lib/local-cache";
 import {
   ALL_REGIONS,
   formatStepLabel,
@@ -73,6 +74,26 @@ import {
 const RECENT_BACKTEST_DAYS = 7;
 
 const ALL_FORECAST_REGIONS: (Region | "NEM")[] = ["NEM", ...ALL_REGIONS];
+
+// This page's own `localStorage` cache (`lib/local-cache.ts`) -- separate
+// from forecast-api's own Redis caching of the two expensive real fetches
+// this page makes (`GET /v1/forecast` already cached; `GET /v1/forecast/
+// recent-actual-vs-predicted` gained Redis caching alongside this,
+// 2026-08-11 -- see that route's own docstring). Redis makes a
+// same-worker cache *miss* here cheap; this layer additionally survives
+// a full page reload and paints instantly on a region switch that was
+// already visited this session, rather than showing "Loading…" again
+// for data that's still fresh server-side. 2h max age, same convention
+// the Executive Dashboard's Demand Forecast Preview card uses.
+//
+// `GET /v1/model` (backing `modelInfo` below) deliberately has no Redis
+// layer -- it's a real in-process registry read (`registry.bundle`), no
+// DB/network round-trip to cache in the first place, so a Redis hop
+// would only add latency, not remove any. It still gets the same
+// localStorage treatment here, for the same "paint instantly on
+// reload" reason.
+const FORECAST_CACHE_MAX_AGE_MS = 2 * 60 * 60 * 1000;
+const MODEL_INFO_CACHE_KEY = "forecast-explorer:model-info";
 
 // Real, measured (not invented) walk-forward backtest of the
 // currently-served model (lstm_demand v6, promoted 2026-08-10) --
@@ -159,13 +180,24 @@ export default function ForecastPage() {
     let cancelled = false;
     setLoadFailed(false);
     setLoadErrorMessage(null);
+    // Mount-only-safe: reading `localStorage` inside an effect (not a
+    // lazy `useState` initializer) so this page's server-rendered first
+    // paint and the client's first paint stay identical -- no hydration
+    // mismatch -- then repaints from cache on the very next tick if a
+    // usable entry exists, instead of ever showing "Loading…" for a
+    // region already visited this session.
+    const liveCacheKey = `forecast-explorer:live:${region}`;
+    const cachedLive = getCached<DemandForecast>(liveCacheKey, FORECAST_CACHE_MAX_AGE_MS);
+    if (cachedLive) setLive(cachedLive);
     fetchDemandForecast(region)
       .then((f) => {
-        if (!cancelled) setLive(f);
+        if (cancelled) return;
+        setLive(f);
+        setCached(liveCacheKey, f);
       })
       .catch((err: Error) => {
         if (!cancelled) {
-          setLive(null);
+          if (!cachedLive) setLive(null);
           setLoadFailed(true);
           setLoadErrorMessage(err.message || null);
         }
@@ -185,11 +217,16 @@ export default function ForecastPage() {
   const [recentBacktestFailed, setRecentBacktestFailed] = useState(false);
   useEffect(() => {
     let cancelled = false;
-    setRecentBacktest(null);
     setRecentBacktestFailed(false);
+    // Same cache-then-refresh pattern as `live` above.
+    const backtestCacheKey = `forecast-explorer:recent-backtest:${region}:${RECENT_BACKTEST_DAYS}`;
+    const cachedBacktest = getCached<RecentBacktest>(backtestCacheKey, FORECAST_CACHE_MAX_AGE_MS);
+    setRecentBacktest(cachedBacktest);
     fetchRecentBacktest(region, RECENT_BACKTEST_DAYS)
       .then((r) => {
-        if (!cancelled) setRecentBacktest(r);
+        if (cancelled) return;
+        setRecentBacktest(r);
+        setCached(backtestCacheKey, r);
       })
       .catch(() => {
         if (!cancelled) setRecentBacktestFailed(true);
@@ -201,9 +238,17 @@ export default function ForecastPage() {
 
   useEffect(() => {
     let cancelled = false;
+    // Mount-only-safe cache hydration, same reasoning as `live`/
+    // `recentBacktest` above -- `modelInfo` starts `null` (server and
+    // client render identically), then repaints from a cached value
+    // here if one exists, before the real fetch below lands.
+    const cachedModelInfo = getCached<ModelInfo>(MODEL_INFO_CACHE_KEY, FORECAST_CACHE_MAX_AGE_MS);
+    if (cachedModelInfo) setModelInfo(cachedModelInfo);
     fetchModelInfo()
       .then((m) => {
-        if (!cancelled) setModelInfo(m);
+        if (cancelled) return;
+        setModelInfo(m);
+        setCached(MODEL_INFO_CACHE_KEY, m);
       })
       .catch(() => {});
     return () => {

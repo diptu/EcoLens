@@ -31,6 +31,7 @@ class TrainTriggerResponse(AppBaseModel):
     window_until: datetime
     anomalies_flagged: int
     triggered_by: str
+    architecture: str
 
 
 class TrainingRunOut(AppBaseModel):

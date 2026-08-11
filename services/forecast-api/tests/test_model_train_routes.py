@@ -104,6 +104,44 @@ def test_train_endpoint_accepts_explicit_regions_and_window(
     assert fake_training_trigger_deps[0]["regions"] == ["QLD1"]
 
 
+def test_train_endpoint_defaults_architecture_to_lstm(
+    client, fake_training_trigger_deps
+):
+    response = client.post("/v1/model/train", json={})
+
+    assert response.status_code == 202
+    assert response.json()["architecture"] == "lstm"
+    assert fake_training_trigger_deps[0]["architecture"] == "lstm"
+
+
+@pytest.mark.parametrize("architecture", ["lstm", "tft", "timesfm_correction"])
+def test_train_endpoint_threads_the_requested_architecture_through(
+    client, fake_training_trigger_deps, architecture
+):
+    """2026-08-11 fix: this endpoint used to hardcode `"architecture":
+    "lstm"` in the published event regardless of what the caller asked
+    for -- selecting TFT or TimesFM in the dashboard's Fine-tune form and
+    submitting silently fine-tuned LSTM instead. Confirms all three
+    architectures the product description names (LSTM, TFT, TimesFM) now
+    actually reach the published training-trigger event."""
+    response = client.post(
+        "/v1/model/train", json={"regions": ["QLD1"], "architecture": architecture}
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["architecture"] == architecture
+    assert fake_training_trigger_deps[0]["architecture"] == architecture
+
+
+def test_train_endpoint_rejects_an_unknown_architecture(client):
+    response = client.post(
+        "/v1/model/train", json={"architecture": "some_other_model"}
+    )
+
+    assert response.status_code == 422
+
+
 def test_train_endpoint_requires_no_auth(client):
     # Deliberately open, same reasoning as data-pipeline's identical
     # endpoint had -- this asserts the *absence* of a role gate, not a

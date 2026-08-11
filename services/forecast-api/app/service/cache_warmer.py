@@ -96,3 +96,140 @@ async def run_model_drift_warmer(
             log.error("cache_warmer.model_drift_failed", error=str(exc))
 
         await asyncio.sleep(interval_seconds)
+
+
+# The remaining cached endpoints below are all single, cheap queries
+# (1-4s cold, not the 8-14s of the two loops above) whose real fix is
+# already "cached at all" -- the occasional request that lands right
+# after a TTL expiry is a small, bounded tail for these, not the
+# `emissions_forecast`/`model_drift` scale of problem. Warmed anyway
+# (2026-08-11, "make every real endpoint reliably fast" pass) via one
+# shared loop rather than one `asyncio.create_task` per endpoint --
+# same real cost either way, less background-task bookkeeping.
+#
+# Technique: delete the real cache key, then call the real route
+# function directly (not a re-derived compute copy) with real
+# dependency values passed explicitly. FastAPI route functions are
+# plain async functions underneath the `@router.get` decorator --
+# calling one directly outside a real request works as long as every
+# `Depends(...)`-defaulted parameter is passed explicitly (an
+# unresolved `Depends` object would otherwise flow in as the literal
+# "value"). This reuses the exact same cache-key-construction and
+# compute logic a real request hits, so it can never silently drift
+# from what `emissions_forecast`/`model_drift` needed a dedicated
+# `_compute_*` extraction for instead: those two are re-derived because
+# their route functions carry other real request-only side effects
+# (breaker checks, served-forecast reconciliation logging, tracing
+# spans) this warmer shouldn't trigger; the endpoints below have none.
+async def run_dashboard_essentials_warmer(
+    redis: Redis,
+    db_session_factory: Callable[[], AsyncSession],
+    registry: ModelRegistry,
+    settings: Settings,
+    interval_seconds: float,
+) -> None:
+    from datetime import UTC, datetime
+
+    from app.api.v1.demand.routes import get_demand_summary
+    from app.api.v1.emissions.routes import (
+        get_emissions_current,
+        get_emissions_timeseries,
+        get_emissions_ytd,
+    )
+    from app.api.v1.generation_mix.routes import get_generation_mix
+    from app.api.v1.model.routes import get_training_runs
+
+    while True:
+        now = datetime.now(UTC)
+
+        async def _warm(label: str, fn) -> None:
+            try:
+                async with db_session_factory() as db:
+                    await fn(db)
+            except Exception as exc:  # noqa: BLE001 - one bad pass must not stop future ones
+                log.error("cache_warmer.dashboard_essential_failed", target=label, error=str(exc))
+
+        await _warm(
+            "emissions_current",
+            lambda db: (
+                redis.delete("emissions:current:v1"),
+                get_emissions_current(db=db, redis=redis, settings=settings),
+            )[1],
+        )
+        await _warm(
+            "emissions_ytd",
+            lambda db: (
+                redis.delete(f"emissions:ytd:v1:{now.year}"),
+                get_emissions_ytd(db=db, redis=redis, settings=settings),
+            )[1],
+        )
+        # `bucket="hour", days=7, region=None` -- the Emissions Trend
+        # chart's own default real call (`RealEmissionsTrend`,
+        # services/dashboard).
+        await _warm(
+            "emissions_timeseries",
+            lambda db: (
+                redis.delete(
+                    f"emissions:timeseries:v1:hour:7:None:{now.strftime('%Y%m%d%H')}"
+                ),
+                get_emissions_timeseries(
+                    bucket="hour", days=7, region=None, db=db, redis=redis, settings=settings
+                ),
+            )[1],
+        )
+        await _warm(
+            "demand_summary",
+            lambda db: (
+                redis.delete(f"demand:summary:v1:ytd:{now.year}"),
+                get_demand_summary(since=None, until=None, db=db, redis=redis, settings=settings),
+            )[1],
+        )
+        await _warm(
+            "generation_mix",
+            lambda db: (
+                redis.delete(f"generation-mix:v1:None:ytd:{now.year}"),
+                get_generation_mix(
+                    region=None, since=None, until=None, db=db, redis=redis, settings=settings
+                ),
+            )[1],
+        )
+        await _warm(
+            "training_runs",
+            lambda db: (
+                redis.delete("model:training_runs:v1:20"),
+                get_training_runs(limit=20, db=db, redis=redis, settings=settings),
+            )[1],
+        )
+
+        # `region="NEM"` -- the Demand Forecast Preview's own default
+        # real call (`fetchDemandForecast("NEM")`, services/dashboard).
+        # Separate from the DB-session-per-call pattern above since
+        # `get_forecast` also needs the model registry, not just `db`.
+        try:
+            bundle = registry.bundle
+            if bundle is not None:
+                async with db_session_factory() as db:
+                    from app.api.v1.forecast.routes import forecast_local_cache, get_forecast
+
+                    forecast_key = f"forecast:v1:NEM:{bundle.version}"
+                    await redis.delete(forecast_key)
+                    # Also invalidate the L1 process-local cache
+                    # (`app.core.local_cache`) `get_forecast` checks
+                    # *before* Redis -- an unexpired local entry would
+                    # otherwise short-circuit this forced refresh and
+                    # hand back the exact stale response this warmer
+                    # exists to replace.
+                    forecast_local_cache.delete(forecast_key)
+                    await get_forecast(
+                        region="NEM",
+                        horizon=None,
+                        interval=None,
+                        db=db,
+                        redis=redis,
+                        registry=registry,
+                        settings=settings,
+                    )
+        except Exception as exc:  # noqa: BLE001 - one bad pass must not stop future ones
+            log.error("cache_warmer.dashboard_essential_failed", target="forecast_nem", error=str(exc))
+
+        await asyncio.sleep(interval_seconds)

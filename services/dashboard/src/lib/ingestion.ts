@@ -436,9 +436,14 @@ export type PublicRunsList = {
   has_more: boolean;
 };
 
-export async function fetchPublicRuns(limit = 12, sourceId?: string): Promise<PublicRunsList> {
+export async function fetchPublicRuns(
+  limit = 12,
+  sourceId?: string,
+  cursor?: string,
+): Promise<PublicRunsList> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (sourceId) params.set("source_id", sourceId);
+  if (cursor) params.set("cursor", cursor);
   const res = await fetch(`${INGESTION_API_URL}/ingestion/public/runs?${params}`);
   if (!res.ok) {
     throw new Error(`GET /v1/ingestion/public/runs failed: ${res.status}`);
@@ -781,6 +786,7 @@ export type TrainTrigger = {
   window_until: string;
   anomalies_flagged: number;
   triggered_by: string;
+  architecture: string;
 };
 
 /** Live call to `POST /v1/model/train` (forecast-api) -- publishes the
@@ -793,6 +799,11 @@ export type TrainTrigger = {
 export async function triggerTraining(opts?: {
   regions?: string[];
   windowHours?: number;
+  /** `"lstm" | "tft" | "timesfm_correction"` -- forecast-api's
+   * `TrainRequest.architecture`. `undefined`/omitted defaults to
+   * `"lstm"` server-side, same as the automatic dbt-build-triggered
+   * path's own default. */
+  architecture?: string;
 }): Promise<TrainTrigger> {
   const res = await fetch(`${FORECAST_API_URL}/model/train`, {
     method: "POST",
@@ -800,6 +811,7 @@ export async function triggerTraining(opts?: {
     body: JSON.stringify({
       regions: opts?.regions ?? null,
       window_hours: opts?.windowHours ?? null,
+      architecture: opts?.architecture ?? null,
     }),
   });
   if (!res.ok) {

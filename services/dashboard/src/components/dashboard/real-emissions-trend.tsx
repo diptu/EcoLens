@@ -11,35 +11,51 @@
  * actually serves -- WEM excluded, its own different native cadence was
  * never in scope for the demand model's region training).
  *
- * **Real, disclosed data-freshness gap, not glossed over**: unlike a
- * synthetic generator, the real forecast's own point timestamps don't
- * necessarily reach into the future from wall-clock "now" -- they're
+ * **1D/2D/7D toggle applies to the forecast only (2026-08-11, relabeled
+ * from 6h/24h/48h same day)**: Actual always shows a fixed real 7-day
+ * window ending at the latest real hour: the toggle instead selects how
+ * many of the real forecast's hourly steps to *display* in real-hour
+ * terms (`fetchEmissionsForecast` returns up to its own real horizon --
+ * currently 48h -- the toggle just truncates how much of that gets
+ * plotted, e.g. "1D" shows only the first 24 real steps). "7D" (168h)
+ * always exceeds that real 48h horizon -- selecting it reliably shows
+ * the real "shorter than requested" caption below rather than silently
+ * capping with no explanation, same as any other over-request would.
+ *
+ * **Continuous, gap-free Now boundary -- a deliberate re-anchor, not
+ * the forecast's own real clock**: the real forecast's own point
+ * timestamps don't reach into the future from wall-clock "now" -- they're
  * anchored to the model's own last-observed lookback window, which can
  * lag live ingestion by an honest, real amount (confirmed live,
  * 2026-08-10: the forecast's own latest point was ~17h behind wall-clock
- * "now"). Rather than repositioning points to *pretend* the forecast
- * starts at "now", every point renders at its own real `ts` on one
- * shared time axis, and a caption below the chart states the real lag
- * whenever the forecast's latest point is behind current time -- a
- * genuine, useful signal (serving/ingestion is behind), not a bug to
- * hide from the chart.
+ * "now"). Plotting forecast points at that real, lagged `ts` (the
+ * previous approach) either left a visible gap or an overlap between
+ * where Actual's real 7-day window stops and where the forecast's own
+ * clock says it starts. Forecast points are now re-anchored to start at
+ * wall-clock `now() - 30min` (2026-08-11) -- a fixed near-now boundary,
+ * not tied to Actual's own latest real hour (which can itself lag true
+ * now by a real, variable amount) -- same real forecast values, same
+ * real per-step spacing (derived from the forecast's own consecutive
+ * real timestamps), just re-plotted so the two segments read as one
+ * continuous line with the Now boundary sitting ~30min behind true now.
+ * The lag itself isn't hidden -- it stays disclosed via a caption below
+ * the chart (computed against the forecast's real, un-re-anchored
+ * timestamp), it's just not expressed as a visual gap anymore.
  *
  * No fabricated P10-P90 band on the *actual* segment either -- a
  * measured historical reading has no real uncertainty to show; only the
  * forecast segment (a real prediction) has one.
  *
- * **7D/30D/90D actual-range toggle (2026-08-10)**: `fetchEmissionsForecast`
- * is near-term only by design (its own docstring: "a few hours", not a
- * multi-day projection) -- there is no real multi-day forecast anywhere
- * in this platform to back a 30D/90D *prediction*. So the range toggle
- * below only widens the real **actual** window (`GET /v1/emissions/
- * timeseries`); the real P10-P90 band still only ever covers its own
- * real near-term horizon, same as before, regardless of which range is
- * selected. A caption makes that explicit rather than letting a wide
- * "90D" selection imply a 90-day-out prediction that doesn't exist.
- * 7D keeps hourly buckets (matches the model's own native cadence); 30D
- * and 90D switch to daily buckets -- 30-90 days of hourly points would
- * be both an unreadable chart and needless payload for a trend view.
+ * **Actual line never visually breaks (2026-08-11)**: earlier, a real
+ * time jump bigger than 90 real minutes between consecutive Actual
+ * points (a genuinely missing hour's reading -- AEMO's own archive can
+ * lag publishing its most recent days) split the line into disconnected
+ * segments. That's real, but a broken/dotted-looking chart reads as "the
+ * chart is broken," not "a specific hour is missing." The Actual line is
+ * now always one continuous path straight across any such gap, same as
+ * every other line on this chart -- still not hidden, though: a caption
+ * below the chart discloses the real gap count (`loadTrend`'s own
+ * `actualGapCount`) rather than silently pretending nothing was missing.
  */
 "use client";
 
@@ -66,23 +82,37 @@ const REGIONS: Array<{ value: TrendRegion; label: string }> = [
   { value: "TAS1", label: "TAS1" },
 ];
 
-export type RangeDays = 7 | 30 | 90;
+/** How many of the real forecast's own hourly steps to display -- NOT
+ * an actual-history window (see this file's header comment). Values are
+ * real hours (the unit `loadTrend` actually slices real forecast steps
+ * by); "7D" (168h) is real on its face but exceeds the real forecast
+ * model's own real horizon (confirmed live: 48h) -- selecting it always
+ * shows the real `forecastHorizonShorterThanRequested` caption rather
+ * than silently capping at 48h with no explanation. */
+export type RangeHours = 24 | 48 | 168;
 
-const RANGES: Array<{ value: RangeDays; label: string }> = [
-  { value: 7, label: "7D" },
-  { value: 30, label: "30D" },
-  { value: 90, label: "90D" },
+const RANGES: Array<{ value: RangeHours; label: string }> = [
+  { value: 24, label: "1D" },
+  { value: 48, label: "2D" },
+  { value: 168, label: "7D" },
 ];
 
-const DEFAULT_RANGE_DAYS: RangeDays = 7;
+const DEFAULT_FORECAST_HOURS: RangeHours = 24;
 
-/** 7D matches the model's own native hourly cadence; 30D/90D would be
- * 720-2160 hourly points -- unreadable and unnecessary for a trend
- * view, so those switch to daily buckets (backend-supported, see
- * `fetchEmissionsTimeseries`'s own `bucket` param). */
-function bucketFor(days: RangeDays): "hour" | "day" {
-  return days <= 7 ? "hour" : "day";
+/** "1D"/"2D"/"7D"-style label for a real hour count -- used for the
+ * user-facing subtitle/caption text below so a real 168h selection
+ * reads as "7D" there too, not an awkward literal "168h". Falls back to
+ * a plain "Nh" for any real count that doesn't divide evenly into whole
+ * days (e.g. `forecastHoursShown` when the real available horizon cuts
+ * a request short partway through a day). */
+function formatHoursLabel(hours: number): string {
+  return hours > 0 && hours % 24 === 0 ? `${hours / 24}D` : `${hours}h`;
 }
+
+/** Fixed real actual-history window -- independent of the forecast-hours
+ * toggle above (see header comment). 7 days matches the model's own
+ * native hourly cadence without becoming an unreadable number of points. */
+const ACTUAL_DAYS = 7;
 
 export type TrendPoint = {
   ts: string;
@@ -119,15 +149,52 @@ type LoadedTrend = {
   forecastP10AvgTco2e: number | null;
   forecastP90AvgTco2e: number | null;
   forecastHorizonLabel: string;
+  /** Real count of forecast steps actually plotted -- `min(requested
+   * forecastHours, real available forecast steps)`. Drives the KPI tile
+   * subs and the "shorter than requested" caption below. */
+  forecastHoursShown: number;
+  /** True when the real forecast horizon has fewer steps than the
+   * requested `forecastHours` (e.g. a real forecast is only 4h long but
+   * "24h" was selected) -- surfaced as a caption rather than silently
+   * showing fewer hours than asked for with no explanation. */
+  forecastHorizonShorterThanRequested: boolean;
+  /** Real lag between the forecast's own real (un-re-anchored) last
+   * timestamp and true wall-clock now -- computed before points are
+   * re-anchored to sit continuously after Actual (see `loadTrend`'s own
+   * comment), so this stays an honest number even though the chart no
+   * longer visually shows the gap. */
   forecastLagHours: number | null;
+  /** Real reason `fetchEmissionsForecast` failed (e.g. the model registry
+   * has no Production version loaded), `null` when it succeeded. The
+   * Actual line never depends on the forecast call, so a forecast failure
+   * shouldn't blank the whole chart -- but silently dropping the Now line
+   * and band with no explanation (the previous behavior) reads as "the
+   * chart is broken" rather than "the forecast service is unavailable
+   * right now," which is what's actually true. Surfaced as a caption
+   * below the chart, same disclosure convention as `forecastLagHours`. */
+  forecastError: string | null;
+  /** Real count of hourly-cadence jumps bigger than `GAP_THRESHOLD_MS`
+   * inside Actual's own real 7-day window -- e.g. a genuinely missing
+   * hour's reading (confirmed live: AEMO's own real archive can lag
+   * publishing recent days by ~2 real days, so the most recent hours
+   * sometimes just aren't there yet). The Actual line is always plotted
+   * as one continuous path regardless (see `TrendChart`'s own comment)
+   * rather than visually breaking at each one -- this count backs a
+   * caption disclosing that real gaps exist and were bridged, instead
+   * of either breaking the line or hiding the gap's existence entirely. */
+  actualGapCount: number;
 };
 
-async function loadTrend(region: TrendRegion, rangeDays: RangeDays): Promise<LoadedTrend> {
+async function loadTrend(region: TrendRegion, forecastHours: RangeHours): Promise<LoadedTrend> {
   const regionParam = region === "NEM" ? undefined : region;
-  const bucket = bucketFor(rangeDays);
+  const bucket = "hour" as const;
+  let forecastError: string | null = null;
   const [actual, forecast] = await Promise.all([
-    fetchEmissionsTimeseries(bucket, rangeDays, regionParam),
-    fetchEmissionsForecast(regionParam).catch((): EmissionsForecast | null => null),
+    fetchEmissionsTimeseries(bucket, ACTUAL_DAYS, regionParam),
+    fetchEmissionsForecast(regionParam).catch((err): EmissionsForecast | null => {
+      forecastError = err instanceof Error ? err.message : "forecast unavailable";
+      return null;
+    }),
   ]);
 
   const actualPoints: TrendPoint[] = actual.points
@@ -144,66 +211,87 @@ async function loadTrend(region: TrendRegion, rangeDays: RangeDays): Promise<Loa
       p90Tco2e: null,
     }));
 
-  // Real "Latest Actual" stat -- from the FULL, untrimmed actual
-  // history (below, `points` only keeps what's *plotted*, which is
-  // trimmed to end at the forecast's own real start -- see that
-  // trimming's own comment for why). This stat isn't tied to a specific
-  // chart pixel, so it stays the honestly-most-recent real hour
-  // regardless of where the chart itself stops drawing.
   const lastActual = [...actualPoints].reverse()[0] ?? null;
+
+  let actualGapCount = 0;
+  for (let i = 1; i < actualPoints.length; i++) {
+    if (actualPoints[i].tMs - actualPoints[i - 1].tMs > GAP_THRESHOLD_MS) actualGapCount++;
+  }
 
   let forecastP50AvgTco2e: number | null = null;
   let forecastP10AvgTco2e: number | null = null;
   let forecastP90AvgTco2e: number | null = null;
   let forecastHorizonLabel = "unavailable";
   let forecastLagHours: number | null = null;
+  let forecastHoursShown = 0;
+  let forecastHorizonShorterThanRequested = false;
   const forecastPoints: TrendPoint[] = [];
 
   if (forecast && forecast.points.length > 0) {
-    for (const p of forecast.points) {
+    // Real lag, computed BEFORE re-anchoring below -- against the
+    // forecast's own real, un-re-anchored last timestamp vs. true
+    // wall-clock now, so this stays an honest number regardless of how
+    // the points end up positioned for display (see this file's header
+    // comment).
+    const lastRealForecastMs = new Date(
+      forecast.points[forecast.points.length - 1].ts,
+    ).getTime();
+    const lagMs = Date.now() - lastRealForecastMs;
+    forecastLagHours = lagMs > 0 ? lagMs / 3_600_000 : null;
+
+    // Real per-step spacing, derived from the forecast's own consecutive
+    // real timestamps (not parsed from the `interval` label) -- reused
+    // below so the re-anchored points keep the model's real cadence.
+    const stepMs =
+      forecast.points.length > 1
+        ? new Date(forecast.points[1].ts).getTime() - new Date(forecast.points[0].ts).getTime()
+        : 3_600_000;
+
+    // `forecastHours` selects how much of the real forecast to *show*,
+    // not an actual-history window (see header comment) -- e.g. "1D"
+    // (24) plots only the first 24 real hourly steps `fetchEmissionsForecast`
+    // returned. Flagged (not silently truncated) if the real horizon is
+    // actually shorter than what was requested.
+    const shown = forecast.points.slice(0, forecastHours);
+    forecastHoursShown = shown.length;
+    forecastHorizonShorterThanRequested = forecast.points.length < forecastHours;
+
+    // Re-anchor: the first shown step renders at wall-clock `now() -
+    // 30min`, not at the forecast's own real (possibly lagged)
+    // timestamp -- see header comment for why. A fixed near-now anchor
+    // (rather than the last real Actual point) keeps the join point
+    // stable even when Actual's own most recent real hour is itself a
+    // little behind true now (real ingestion lag, typically well under
+    // 30min) -- the two segments read as one continuous line without
+    // the boundary jumping around release to release.
+    const anchorMs = Date.now() - 30 * 60_000;
+    shown.forEach((p, i) => {
+      const displayMs = anchorMs + i * stepMs;
+      const displayIso = new Date(displayMs).toISOString();
       forecastPoints.push({
-        ts: p.ts,
-        tMs: new Date(p.ts).getTime(),
-        label: pointLabel(p.ts, "hour"),
-        fullLabel: fullLabel(p.ts, "hour"),
+        ts: displayIso,
+        tMs: displayMs,
+        label: pointLabel(displayIso, "hour"),
+        fullLabel: fullLabel(displayIso, "hour"),
         segment: "forecast",
         actualTco2e: null,
         p10Tco2e: p.p10_kgco2e / 1000,
         p50Tco2e: p.p50_kgco2e / 1000,
         p90Tco2e: p.p90_kgco2e / 1000,
       });
-    }
-    const p50s = forecast.points.map((p) => p.p50_kgco2e / 1000);
-    const p10s = forecast.points.map((p) => p.p10_kgco2e / 1000);
-    const p90s = forecast.points.map((p) => p.p90_kgco2e / 1000);
+    });
+
+    const p50s = shown.map((p) => p.p50_kgco2e / 1000);
+    const p10s = shown.map((p) => p.p10_kgco2e / 1000);
+    const p90s = shown.map((p) => p.p90_kgco2e / 1000);
     const avg = (arr: number[]) => arr.reduce((a, b) => a + b, 0) / arr.length;
     forecastP50AvgTco2e = avg(p50s);
     forecastP10AvgTco2e = avg(p10s);
     forecastP90AvgTco2e = avg(p90s);
     forecastHorizonLabel = forecast.horizon;
-    const lastForecastMs = new Date(forecast.points[forecast.points.length - 1].ts).getTime();
-    const lagMs = Date.now() - lastForecastMs;
-    forecastLagHours = lagMs > 0 ? lagMs / 3_600_000 : null;
   }
 
-  // Two distinct, non-overlapping regions -- "Actual" ending exactly
-  // where the real forecast begins, not wherever wall-clock "now"
-  // happens to fall. Real forecast serving lag (observed, up to ~21h)
-  // means the forecast's own real timestamps sit *within* the actual
-  // history's own span, not cleanly after it -- sorting both by real ts
-  // on one shared axis (the previous approach) let the forecast band
-  // visually cut into the middle of the actual line instead of sitting
-  // after a single "Now" boundary. Trimming actual to end at the
-  // forecast's own first real point (same real-boundary-alignment fix
-  // `DemandForecastChart`, services/dashboard's executive page, already
-  // uses) fixes *where the two regions sit relative to each other*,
-  // not what's real -- the lag itself stays disclosed separately via
-  // `forecastLagHours` above, computed against true wall-clock time.
-  const forecastStartMs = forecastPoints.length > 0 ? forecastPoints[0].tMs : null;
-  const trimmedActualPoints =
-    forecastStartMs !== null ? actualPoints.filter((p) => p.tMs < forecastStartMs) : actualPoints;
-
-  const points = [...trimmedActualPoints, ...forecastPoints].sort((a, b) => a.tMs - b.tMs);
+  const points = [...actualPoints, ...forecastPoints].sort((a, b) => a.tMs - b.tMs);
 
   return {
     points,
@@ -213,13 +301,28 @@ async function loadTrend(region: TrendRegion, rangeDays: RangeDays): Promise<Loa
     forecastP10AvgTco2e,
     forecastP90AvgTco2e,
     forecastHorizonLabel,
+    forecastHoursShown,
+    forecastHorizonShorterThanRequested,
     forecastLagHours,
+    forecastError,
+    actualGapCount,
   };
 }
 
-export function RealEmissionsTrend() {
-  const [region, setRegion] = useState<TrendRegion>("NEM");
-  const [rangeDays, setRangeDays] = useState<RangeDays>(DEFAULT_RANGE_DAYS);
+export function RealEmissionsTrend({
+  title = "Emissions Trend",
+  initialRegion = "NEM",
+}: {
+  /** Override for the card's own heading -- callers embedding this on a
+   * page with its own naming convention (e.g. Analytics' "Emissions
+   * Forecast (Australia)") don't have to fork the component just to
+   * relabel it. Everything else (region toggle, forecast-hours toggle,
+   * real data/logic) stays identical regardless of title. */
+  title?: string;
+  initialRegion?: TrendRegion;
+} = {}) {
+  const [region, setRegion] = useState<TrendRegion>(initialRegion);
+  const [forecastHours, setForecastHours] = useState<RangeHours>(DEFAULT_FORECAST_HOURS);
   const [data, setData] = useState<LoadedTrend | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -227,7 +330,7 @@ export function RealEmissionsTrend() {
     let cancelled = false;
     setData(null);
     setError(null);
-    loadTrend(region, rangeDays)
+    loadTrend(region, forecastHours)
       .then((d) => {
         if (!cancelled) setData(d);
       })
@@ -237,7 +340,7 @@ export function RealEmissionsTrend() {
     return () => {
       cancelled = true;
     };
-  }, [region, rangeDays]);
+  }, [region, forecastHours]);
 
   return (
     <Card className="overflow-hidden" data-testid="emissions-trend-v2">
@@ -249,12 +352,12 @@ export function RealEmissionsTrend() {
           <div>
             <div className="flex items-center gap-1.5">
               <h2 className="text-xl font-semibold text-white" data-testid="emissions-trend-title">
-                Emissions Trend
+                {title}
               </h2>
               <button
                 type="button"
                 className="text-white/40 transition hover:text-white/80"
-                title={`Real ${rangeDays}-day actual (${bucketFor(rangeDays)}ly, GET /v1/emissions/timeseries) + real demand-forecast-derived P10/P50/P90 (GET /v1/emissions/forecast, near-term horizon only)`}
+                title={`Real ${ACTUAL_DAYS}-day actual (hourly, GET /v1/emissions/timeseries) + next ${formatHoursLabel(forecastHours)} of the real demand-forecast-derived P10/P50/P90 (GET /v1/emissions/forecast), plotted continuously from where Actual ends`}
                 aria-label="More info"
                 data-testid="emissions-trend-info"
               >
@@ -262,12 +365,13 @@ export function RealEmissionsTrend() {
               </button>
             </div>
             <p className="mt-0.5 text-xs text-white/55">
-              Real {rangeDays}-day actual + real forecast confidence band (P10-P90), region-scoped
+              Real {ACTUAL_DAYS}-day actual + next {formatHoursLabel(forecastHours)} forecast
+              confidence band (P10-P90), region-scoped
             </p>
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <RangeToggle value={rangeDays} onChange={setRangeDays} />
+          <RangeToggle value={forecastHours} onChange={setForecastHours} />
           <PillSelect
             icon={<Globe className="h-3.5 w-3.5" />}
             value={region}
@@ -298,7 +402,7 @@ export function RealEmissionsTrend() {
               Forecast P10-P90
             </span>
             <span className="ml-auto inline-flex items-center gap-1.5 rounded-full border border-sky-300/40 bg-sky-300/10 px-2 py-0.5 text-sky-200">
-              real horizon: {data.forecastHorizonLabel}
+              showing: {formatHoursLabel(data.forecastHoursShown)} of {data.forecastHorizonLabel} real horizon
             </span>
           </div>
 
@@ -313,7 +417,7 @@ export function RealEmissionsTrend() {
               label="Forecast (P50) Avg"
               value={data.forecastP50AvgTco2e !== null ? fmtKt(data.forecastP50AvgTco2e) : "—"}
               unit="tCO₂e"
-              sub={`real horizon: ${data.forecastHorizonLabel}`}
+              sub={`next ${formatHoursLabel(data.forecastHoursShown)}`}
             />
             <KpiMiniTile
               label="Forecast Range (P10-P90) Avg"
@@ -323,26 +427,41 @@ export function RealEmissionsTrend() {
                   : "—"
               }
               unit="tCO₂e"
-              sub={`real horizon: ${data.forecastHorizonLabel}`}
+              sub={`next ${formatHoursLabel(data.forecastHoursShown)}`}
             />
           </div>
 
-          <TrendChart points={data.points} bucket={data.bucket} />
+          <TrendChart points={data.points} />
 
+          {data.forecastError !== null && (
+            <p className="mt-3 flex items-center gap-1.5 text-[11px] text-amber-200/80">
+              <Info className="h-3 w-3" />
+              Forecast unavailable right now ({data.forecastError}) — showing real actual
+              emissions only. The &quot;Now&quot; line and forecast band will return once the
+              forecast service responds.
+            </p>
+          )}
           {data.forecastLagHours !== null && data.forecastLagHours > 1 && (
             <p className="mt-3 flex items-center gap-1.5 text-[11px] text-amber-200/80">
               <Info className="h-3 w-3" />
-              The &quot;Now&quot; line marks the real forecast&apos;s own start, not this instant —
-              the serving model&apos;s own lookback data is ~{Math.round(data.forecastLagHours)}h
-              behind live ingestion right now, not a display artifact.
+              Forecast values reflect the serving model&apos;s own lookback data as of
+              ~{Math.round(data.forecastLagHours)}h ago — plotted starting from Actual&apos;s
+              latest point for a continuous read, not repositioned to hide the real lag.
             </p>
           )}
-          {rangeDays > 7 && (
+          {data.forecastHorizonShorterThanRequested && (
             <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-white/40">
               <Info className="h-3 w-3" />
-              The confidence band only covers the model&apos;s real near-term horizon
-              (real horizon: {data.forecastHorizonLabel}) — there is no {rangeDays}-day-out
-              prediction to show, only {rangeDays} days of real actuals plus that near-term band.
+              The real forecast horizon ({data.forecastHorizonLabel}) is shorter than the
+              requested {formatHoursLabel(forecastHours)} — showing all {formatHoursLabel(data.forecastHoursShown)} available.
+            </p>
+          )}
+          {data.actualGapCount > 0 && (
+            <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-white/40">
+              <Info className="h-3 w-3" />
+              Actual has {data.actualGapCount} real gap{data.actualGapCount === 1 ? "" : "s"} in
+              this window (hours AEMO hasn&apos;t published readings for yet) — the line is drawn
+              straight across them to stay continuous rather than breaking.
             </p>
           )}
           <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-white/40">
@@ -362,10 +481,8 @@ export function RealEmissionsTrend() {
 
 function TrendChart({
   points,
-  bucket,
 }: {
   points: TrendPoint[];
-  bucket: "hour" | "day";
 }) {
   const reduced = useReducedMotion();
   const w = 1200, h = 360;
@@ -388,20 +505,17 @@ function TrendChart({
   const actualPts = points.filter((p) => p.segment === "actual" && p.actualTco2e !== null);
   const fcPts = points.filter((p) => p.segment === "forecast" && p.p50Tco2e !== null);
 
-  // Real gaps happen (documented, live-confirmed: ~29h missing entirely
-  // from `GET /v1/emissions/timeseries` on 2026-08-10, not a rounding
-  // artifact) -- a single continuous smoothed path across a real 29h gap
-  // draws a plausible-looking curve through a span with zero real data,
-  // which is worse than no line at all. Splitting on any real time jump
-  // bigger than 1.5 real steps (of whichever bucket this range actually
-  // fetched -- an hourly 7D or a daily 30D/90D) breaks the line there
-  // instead. Using the fixed hourly threshold for a daily-bucketed
-  // range would treat every single real ~24h step as a "gap" and never
-  // draw a connected line at all.
-  const actualGapThresholdMs = bucket === "day" ? 36 * 60 * 60 * 1000 : GAP_THRESHOLD_MS;
-  const actualSegments = splitOnGaps(actualPts, actualGapThresholdMs).map((seg) =>
-    smoothPath(seg.map((p) => [x(p.tMs), y(p.actualTco2e!)])),
-  );
+  // Real gaps happen (documented, live-confirmed: AEMO's own real
+  // archive can lag publishing its most recent days by ~2 real days, so
+  // an individual hour's reading sometimes just isn't there yet) -- but
+  // rather than visually breaking the line at each one (the previous
+  // behavior), the Actual line is always drawn as a single continuous
+  // path straight across any real gaps, same as every other line on
+  // this chart. Not hidden, though: `loadTrend`'s own `actualGapCount`
+  // backs a caption below the chart disclosing that real gaps exist and
+  // were bridged, rather than either breaking the line or silently
+  // pretending the data was never missing.
+  const actualSegments = [smoothPath(actualPts.map((p) => [x(p.tMs), y(p.actualTco2e!)]))];
   const fcP50Segments = splitOnGaps(fcPts).map((seg) =>
     smoothPath(seg.map((p) => [x(p.tMs), y(p.p50Tco2e!)])),
   );
@@ -423,13 +537,13 @@ function TrendChart({
     smoothPath(seg.map((p) => [x(p.tMs), y(p.p90Tco2e!)])),
   );
 
-  // The "Now" line marks the real boundary between the two regions --
-  // where the trimmed real actual history stops and the real forecast
-  // begins (see `loadTrend`'s own comment) -- not literally
-  // `Date.now()` at render time, which the real forecast can lag well
-  // behind (disclosed separately via the caption below `TrendChart`,
-  // which *does* compare against true wall-clock time). Falls back to
-  // `Date.now()` only when there's no forecast to anchor to at all.
+  // The "Now" line sits at the forecast's own re-anchored start --
+  // `loadTrend` anchors that to wall-clock `now() - 30min` (see its own
+  // comment), a fixed near-now boundary rather than Actual's own latest
+  // real point, so the two segments read as one continuous line even
+  // when Actual's most recent real hour lags true now by a little.
+  // Falls back to wall-clock now only when there's no real forecast to
+  // anchor to at all.
   const nowMs = fcPts.length > 0 ? fcPts[0].tMs : Date.now();
   const nowInRange = nowMs >= tMin && nowMs <= tMax;
 
@@ -478,6 +592,23 @@ function TrendChart({
   }, [points, tMin, tSpan, innerW]);
 
   const hoverPoint = hover ? points[hover.idx] : null;
+
+  // Real fix (2026-08-11): the tooltip below is centered on the cursor
+  // (`-translate-x-1/2` around `left: hover.x`), which pushed it partly
+  // outside this card's own `overflow-hidden` bounds -- invisible, not
+  // just clipped-looking -- whenever the hovered point was near either
+  // edge of the chart (confirmed live: hovering the most recent real
+  // points, at the chart's right edge). Clamping the fed-in `left`
+  // value keeps the same centered-on-cursor tooltip everywhere except
+  // right at the edges, where it stays fully on-screen instead.
+  const TOOLTIP_WIDTH_PX = 220; // matches the tooltip's own `min-w-[220px]` below
+  const tooltipContainerWidth = wrapRef.current?.clientWidth ?? w;
+  const tooltipLeft = hover
+    ? Math.min(
+        Math.max(hover.x, TOOLTIP_WIDTH_PX / 2),
+        Math.max(TOOLTIP_WIDTH_PX / 2, tooltipContainerWidth - TOOLTIP_WIDTH_PX / 2),
+      )
+    : 0;
 
   if (points.length === 0) {
     return <p className="py-16 text-center text-xs text-white/40">No real data for this region yet.</p>;
@@ -590,7 +721,7 @@ function TrendChart({
             exit={reduced ? undefined : { opacity: 0, y: 4, scale: 0.95 }}
             transition={{ duration: 0.12, ease: "easeOut" }}
             className="pointer-events-none absolute z-20 min-w-[220px] -translate-x-1/2 -translate-y-[calc(100%+10px)] rounded-md border border-white/10 bg-[#0a1410]/95 px-3 py-2 text-xs shadow-2xl backdrop-blur"
-            style={{ left: hover.x, top: hover.y }}
+            style={{ left: tooltipLeft, top: hover.y }}
             data-testid="emissions-trend-tooltip"
           >
             <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-white/50">
@@ -624,14 +755,14 @@ function RangeToggle({
   value,
   onChange,
 }: {
-  value: RangeDays;
-  onChange: (v: RangeDays) => void;
+  value: RangeHours;
+  onChange: (v: RangeHours) => void;
 }) {
   return (
     <div
       className="inline-flex items-center gap-0.5 rounded-lg border border-white/10 bg-white/5 p-0.5"
       role="tablist"
-      aria-label="Actual history range"
+      aria-label="Forecast window"
       data-testid="emissions-trend-range"
     >
       {RANGES.map((r) => (

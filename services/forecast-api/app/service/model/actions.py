@@ -39,14 +39,19 @@ from app.schemas.model import TrainingRunOut, TrainTriggerResponse
 
 
 async def _build_and_publish_training_trigger(
-    regions: list[str], window_hours: int, *, triggered_by: str
+    regions: list[str], window_hours: int, *, triggered_by: str, architecture: str = "lstm"
 ) -> dict:
     """Same payload shape `services/waerehouse`'s identical function
     builds -- see that module's docstring for the full field-by-field
     reasoning. This service's own copy exists only because
     `POST /v1/model/train` is a manual trigger this API process needs
     to publish itself, not because the automatic path lives here too
-    (it doesn't -- `services/waerehouse` owns `dbt build` now)."""
+    (it doesn't -- `services/waerehouse` owns `dbt build` now).
+
+    `architecture` used to be hardcoded to `"lstm"` regardless of the
+    caller's request -- selecting TFT or TimesFM in the dashboard's
+    Fine-tune form and submitting silently fine-tuned LSTM instead. Now
+    threaded through from `trigger_training`'s own `architecture` param."""
     window_until = datetime.now(UTC)
     window_since = window_until - timedelta(hours=window_hours)
     async with get_session() as db:
@@ -66,7 +71,7 @@ async def _build_and_publish_training_trigger(
         "window_since": window_since.isoformat(),
         "window_until": window_until.isoformat(),
         "anomalies_flagged": anomalies_flagged,
-        "architecture": "lstm",
+        "architecture": architecture,
         "triggered_by": triggered_by,
     }
     await publish_training_trigger_event(payload)
@@ -78,13 +83,18 @@ async def trigger_training(
     window_hours: int | None,
     *,
     triggered_by: str,
+    architecture: str | None = None,
 ) -> TrainTriggerResponse:
     settings = get_settings()
     resolved_regions = regions or settings.model_default_regions
     resolved_window_hours = window_hours or settings.incremental_train_window_hours
+    resolved_architecture = architecture or "lstm"
 
     payload = await _build_and_publish_training_trigger(
-        resolved_regions, resolved_window_hours, triggered_by="manual"
+        resolved_regions,
+        resolved_window_hours,
+        triggered_by="manual",
+        architecture=resolved_architecture,
     )
 
     return TrainTriggerResponse(
@@ -94,6 +104,7 @@ async def trigger_training(
         window_until=payload["window_until"],
         anomalies_flagged=payload["anomalies_flagged"],
         triggered_by=triggered_by,
+        architecture=payload["architecture"],
     )
 
 

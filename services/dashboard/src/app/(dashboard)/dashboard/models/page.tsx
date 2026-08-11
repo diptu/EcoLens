@@ -68,20 +68,35 @@ type Tab = "registry" | "comparison" | "train" | "fine-tune";
 //
 // Train tab still honest for TimesFM: it's permanently disabled
 // regardless of architecture (raw zero-shot TimesFM itself has nothing
-// to retrain; the correction layer trains via its own separate CLI
-// command, `train-timesfm-correction`, not `POST /v1/model/train`).
-// Fine-tune tab caveat, pre-existing and unrelated to TimesFM:
-// `POST /v1/model/train` (`triggerTraining`) takes no architecture
-// parameter at all -- `service/model/actions.py`'s
-// `_build_and_publish_training_trigger` hardcodes `"architecture":
-// "lstm"` server-side regardless of which tab is selected client-side,
-// so selecting TFT *or* TimesFM and clicking "Start fine-tune" already
-// silently fine-tunes LSTM today, same as it does for TFT.
+// to retrain -- only its correction layer does, via the Fine-tune tab
+// below).
+//
+// Fine-tune tab (fixed 2026-08-11): `POST /v1/model/train`
+// (`triggerTraining`) now takes a real `architecture` parameter --
+// `service/model/actions.py`'s `_build_and_publish_training_trigger`
+// used to hardcode `"architecture": "lstm"` server-side regardless of
+// which tab was selected client-side, so selecting TFT or TimesFM and
+// clicking "Start fine-tune" silently fine-tuned LSTM instead. See
+// `TRAIN_TRIGGER_ARCHITECTURE` below for the modelName -> training-
+// trigger-architecture-code mapping `FineTuneForm` now sends.
 const MODEL_ARCHITECTURES = [
   { modelName: "lstm_demand", label: "LSTM" },
   { modelName: "lstm_demand_tft", label: "TFT" },
   { modelName: "timesfm_demand_correction", label: "TimesFM" },
 ] as const;
+
+// `MODEL_ARCHITECTURES[*].modelName` (a real MLflow registry name) ->
+// the short code `training_worker.handle_training_trigger`'s
+// `payload["architecture"]` actually switches on (`service/
+// training_worker.py`, `service/ml/timesfm_correction.py`'s
+// `TIMESFM_CORRECTION_MODEL_NAME`). Two different vocabularies for the
+// same three architectures -- this is the one place that translates
+// between them for the Fine-tune form.
+const TRAIN_TRIGGER_ARCHITECTURE: Record<string, string> = {
+  lstm_demand: "lstm",
+  lstm_demand_tft: "tft",
+  timesfm_demand_correction: "timesfm_correction",
+};
 
 export default function AdminModelsPage() {
   const [tab, setTab] = useState<Tab>("registry");
@@ -1261,14 +1276,19 @@ type FineTuneState =
   | { state: "error"; message: string };
 
 /** Real, wired to `POST /v1/model/train` (Model Operations TODO.md
- * Phase 2). Only exposes the fields that endpoint actually accepts --
- * `regions`/`window_hours` -- not a base-version picker, learning rate,
- * or epoch count: `train_and_register_incremental` fine-tunes from
- * whatever the current Production/Staging version is and always uses
- * `Settings.incremental_train_epochs`/`incremental_train_lr`, neither
- * of which is configurable per-trigger. Fabricating those controls
- * (like the old mock did) would suggest a precision this endpoint
- * doesn't have. */
+ * Phase 2), now sending the selected `architecture` too (fixed
+ * 2026-08-11 -- see `TRAIN_TRIGGER_ARCHITECTURE` above). Only exposes
+ * the fields that endpoint actually accepts -- `regions`/`window_hours`
+ * -- not a base-version picker, learning rate, or epoch count: LSTM/TFT
+ * fine-tune from whatever the current Production/Staging version is
+ * (`train_and_register_incremental`/`_tft_incremental`) and always use
+ * `Settings.incremental_train_epochs`/`incremental_train_lr`; TimesFM
+ * instead re-fits its Ridge correction layer fresh on the selected
+ * window each time (`service/ml/timesfm_correction.py` -- there's no
+ * "previous version" to warm-start a plain Ridge regression from the
+ * way there is for a neural net's weights). Neither path exposes
+ * per-trigger tuning knobs -- fabricating those controls (like the old
+ * mock did) would suggest a precision this endpoint doesn't have. */
 function FineTuneForm({
   currentVersion,
   architecture,
@@ -1298,7 +1318,11 @@ function FineTuneForm({
 
     cancelPoll.current?.();
     setStatus({ state: "idle" });
-    triggerTraining({ regions: regions.length ? regions : undefined, windowHours })
+    triggerTraining({
+      regions: regions.length ? regions : undefined,
+      windowHours,
+      architecture: TRAIN_TRIGGER_ARCHITECTURE[architecture] ?? "lstm",
+    })
       .then((trigger) => {
         setStatus({ state: "queued", trigger });
         cancelPoll.current = pollForNewModelVersion(
@@ -1313,6 +1337,22 @@ function FineTuneForm({
           5000,
           120_000,
           architecture,
+          // Real bug fix (2026-08-11): previously nothing ever left this
+          // form stuck on "Waiting for the worker..." forever if the
+          // real training-trigger consumer crashed or the real run
+          // genuinely failed (e.g. a real window too short to build a
+          // train/val/cal split) -- see `pollForNewModelVersion`'s own
+          // comment. Surfaced as a real error now instead of an
+          // unexplained stuck spinner.
+          () => {
+            setStatus({
+              state: "error",
+              message:
+                "No new version registered within 2 minutes. The training worker may have failed " +
+                "(check Recent Training Runs below) or the window may be too short -- a real " +
+                "lookback+horizon of history is needed to train at all.",
+            });
+          },
         );
       })
       .catch((err) => {

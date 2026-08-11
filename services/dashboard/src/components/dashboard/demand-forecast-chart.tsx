@@ -28,6 +28,13 @@
  * lag itself stays disclosed separately (the caption below the chart),
  * computed against true wall-clock time, so "Now" being behind live
  * right now is never silently hidden by the realignment.
+ *
+ * Actual line never visually breaks (2026-08-11, same fix as
+ * `RealEmissionsTrend`'s identical one): a real missing hour's reading
+ * no longer splits the line into disconnected segments -- it's always
+ * one continuous path straight across any such gap, with a caption
+ * below the chart disclosing the real gap count instead of either
+ * breaking the line or silently pretending nothing was missing.
  */
 "use client";
 
@@ -194,9 +201,17 @@ export function DemandForecastChart({
   const actualPts = points.filter((p) => p.segment === "actual" && p.actualMw !== null);
   const fcPts = points.filter((p) => p.segment === "forecast" && p.p50Mw !== null);
 
-  const actualSegments = splitOnGaps(actualPts).map((seg) =>
-    smoothPath(seg.map((p) => [x(p.tMs), y(p.actualMw!)])),
-  );
+  // Real gaps happen (a genuinely missing hour's reading -- same real
+  // cause `RealEmissionsTrend`'s own Actual line can hit, see that
+  // component's header comment). Always drawn as a single continuous
+  // path straight across any such gap rather than visually breaking
+  // the line -- not hidden, though: `actualGapCount` below backs a
+  // caption disclosing that real gaps exist and were bridged.
+  const actualSegments = [smoothPath(actualPts.map((p) => [x(p.tMs), y(p.actualMw!)]))];
+  let actualGapCount = 0;
+  for (let i = 1; i < actualPts.length; i++) {
+    if (actualPts[i].tMs - actualPts[i - 1].tMs > GAP_THRESHOLD_MS) actualGapCount++;
+  }
   const fcP50Segments = splitOnGaps(fcPts).map((seg) =>
     smoothPath(seg.map((p) => [x(p.tMs), y(p.p50Mw!)])),
   );
@@ -450,6 +465,14 @@ export function DemandForecastChart({
           The &quot;Now&quot; line marks the real forecast&apos;s own start, not this instant — the
           serving model&apos;s own lookback data is ~{Math.round(forecastLagHours)}h behind live
           ingestion right now, not a display artifact.
+        </p>
+      )}
+      {actualGapCount > 0 && (
+        <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-white/40">
+          <Info className="h-3 w-3" />
+          Actual has {actualGapCount} real gap{actualGapCount === 1 ? "" : "s"} in this window
+          (hours with no real reading yet) — the line is drawn straight across them to stay
+          continuous rather than breaking.
         </p>
       )}
     </div>

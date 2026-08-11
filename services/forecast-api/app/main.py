@@ -24,7 +24,11 @@ from app.core.middleware import CacheControlMiddleware
 from app.core.tracing import configure_tracing
 from app.db.session import dispose, get_engine, get_session
 from app.db.redis import get_redis
-from app.service.cache_warmer import run_emissions_forecast_warmer, run_model_drift_warmer
+from app.service.cache_warmer import (
+    run_dashboard_essentials_warmer,
+    run_emissions_forecast_warmer,
+    run_model_drift_warmer,
+)
 from app.service.ml.energy_registry import EnergyModelRegistry
 from app.service.ml.forecast_reconciliation import watch_and_reconcile
 from app.service.ml.registry import ModelRegistry
@@ -125,6 +129,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             get_redis(), settings, settings.model_drift_warmer_interval_seconds
         )
     )
+    # Was written (`cache_warmer.py`'s own "make every real endpoint
+    # reliably fast" pass) but never actually started here -- a real,
+    # confirmed-live bug (2026-08-11): `GET /v1/forecast?region=NEM`
+    # (the `forecast_cache_ttl_seconds`=60s cache this warms) went cold
+    # between real requests with nothing proactively refreshing it,
+    # measured taking ~20s to recompute -- longer than the dashboard's
+    # own 15s client-side fetch timeout, so a real cold hit surfaced as
+    # a hard failure ("Request timed out after 15s"), not just a slow
+    # load. Started here now, same pattern as the two warmers above.
+    dashboard_essentials_warmer_task = asyncio.create_task(
+        run_dashboard_essentials_warmer(
+            get_redis(),
+            get_session,
+            registry,
+            settings,
+            settings.dashboard_essentials_warmer_interval_seconds,
+        )
+    )
 
     logger.info(
         "forecast_api_startup",
@@ -139,6 +161,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         reconcile_task.cancel()
         emissions_warmer_task.cancel()
         drift_warmer_task.cancel()
+        dashboard_essentials_warmer_task.cancel()
         await dispose()
         logger.info("forecast_api_shutdown")
 

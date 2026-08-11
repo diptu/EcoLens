@@ -20,9 +20,11 @@ import { RealEmissionsTrend } from "@/components/dashboard/real-emissions-trend"
 import { cn } from "@/lib/utils";
 import { formatRelativeTime } from "@/lib/ingestion";
 import { getExecutiveKpis, type ExecutiveKpi } from "@/lib/dashboards";
+import { getCached, getCachedAgeMs, setCached } from "@/lib/local-cache";
 import {
-  fetchYtdEmissions, fetchCurrentEmissions, fetchEmissionsTimeseries,
+  fetchCurrentEmissions, fetchEmissionsTimeseries,
   fetchGenerationMix, fetchDemandSummary, fetchDemandForecast,
+  fetchRecentBacktest,
   fuelColor, formatFuelType, type GenerationMix,
 } from "@/lib/emissions";
 import { fetchPublicDataQualitySummary } from "@/lib/data-quality";
@@ -60,6 +62,18 @@ type ForecastPreview = {
   scope: string;
 };
 
+// Demand Forecast Preview's own `localStorage` cache (`lib/local-cache.ts`)
+// -- separate from `forecast-api`'s own Redis caching of `GET /v1/forecast`
+// itself (that cache makes a real miss here cheap; this one survives a
+// full page reload so the card can paint real data immediately on mount
+// instead of "Loading…" on every visit, then quietly refresh). 2h max
+// age: stale enough data isn't worth showing instantly in place of a real
+// loading state, but generous enough that same-session revisits and most
+// next-morning reloads render instantly.
+const DEMAND_FORECAST_CACHE_KEY = "executive:demand-forecast-preview";
+const DEMAND_ACTUAL_CACHE_KEY = "executive:demand-actual-preview";
+const DEMAND_PREVIEW_CACHE_MAX_AGE_MS = 2 * 60 * 60 * 1000;
+
 // `DemandActualPoint`/`DemandForecastChart` now live in
 // `@/components/dashboard/demand-forecast-chart` (extracted 2026-08-10,
 // shared with the Forecast Explorer page's own "Actual vs Predicted"
@@ -79,6 +93,14 @@ type EmissionsSnapshot = {
   intensitySparkline: number[];
   labels: string[];
   fullLabels: string[];
+  /** Real `ts` of the most recent point in `sparkline` -- this card's
+   * own sparklines plot points index-by-index with no timestamp-aware
+   * gap logic (unlike `RealEmissionsTrend`'s Actual line), so a missing
+   * recent hour never renders as a visible break -- it just silently
+   * shifts the whole window backward in time instead, while the "last
+   * 24h" label keeps claiming to be current. This backs a real staleness
+   * caption instead of leaving that silent. */
+  latestPointIso: string;
 };
 
 /** Live, recent-window snapshot for the "Live Grid Status" panel --
@@ -90,14 +112,28 @@ type LiveGridStatus = {
   windowHours: number;
 };
 
-// Real daily-bucketed actual emissions for "Emissions Trend (compact)" --
-// no `forecast_p10/p50/p90` band (unlike the formerly-mock
-// `EmissionsTrendPoint`): there's no real multi-day emissions forecast,
-// so this only ever shows what's real, a plain actual-only line.
+// Real daily-bucketed actual emissions for "Emission History" -- plus
+// an optional real derived P10/P50/P90 band (2026-08-11, replacing the
+// earlier "no real multi-day emissions forecast" state): there's still
+// no real *emissions* forecast model in this platform, but the real
+// walk-forward *demand* backtest (`GET /v1/forecast/recent-actual-vs-
+// predicted`) already exists, and every one of its real hourly steps
+// has a real historical grid intensity (`GET /v1/emissions/timeseries`)
+// this platform already knows -- multiplying the two (same real
+// methodology `GET /v1/emissions/forecast` already uses for the
+// near-term future, demand × intensity, just with each hour's own real
+// historical intensity instead of holding "now"'s intensity constant)
+// gives a real, honestly-derived historical emissions confidence band,
+// not a fabricated one. See `historicalForecastByDate`'s own comment
+// for why this only ever covers a bounded recent real window, not
+// whichever period (7D/15D/30D) is currently selected.
 type CompactTrendPoint = {
   date: string;
   ts: string;
   actualTco2e: number;
+  forecastP10Tco2e?: number;
+  forecastP50Tco2e?: number;
+  forecastP90Tco2e?: number;
 };
 
 // Icon + accent color per KPI, keyed by label -- purely presentational
@@ -105,7 +141,7 @@ type CompactTrendPoint = {
 // bearing on which fetch backs the value. Falls back to a neutral
 // gauge icon for any label not listed here.
 const KPI_ICONS: Record<string, { icon: React.ComponentType<{ className?: string }>; className: string }> = {
-  "Total CO₂e (YTD)":              { icon: Cloud,       className: "bg-emerald-200/10 text-emerald-100" },
+  "Total CO₂e (MTD)":              { icon: Cloud,       className: "bg-emerald-200/10 text-emerald-100" },
   "Carbon Intensity":              { icon: Leaf,        className: "bg-lime-200/10 text-lime-100" },
   "Renewable Share":               { icon: Wind,        className: "bg-sky-300/10 text-sky-200" },
   "Avg Wholesale Price (YTD)":     { icon: DollarSign,  className: "bg-amber-300/10 text-amber-200" },
@@ -121,16 +157,16 @@ const KPI_ICONS: Record<string, { icon: React.ComponentType<{ className?: string
 // endpoint to build one from, so they're deliberately absent rather than
 // backed by a fabricated flat line.
 const KPI_SPARK_COLOR: Record<string, string> = {
-  "Total CO₂e (YTD)":          "#6ee7b7",
+  "Total CO₂e (MTD)":          "#6ee7b7",
   "Carbon Intensity":          "#bef264",
   "Renewable Share":           "#7dd3fc",
   "Avg Wholesale Price (YTD)": "#fcd34d",
 };
 
-// "Total CO₂e (YTD)" has no real prior-year comparison available (real
-// data collection only starts partway through the current calendar
-// year) -- omitted here, not defaulted to "vs last period", so that KPI
-// honestly never renders a delta row.
+// "Total CO₂e (MTD)" has no real prior-period comparison available (a
+// full prior calendar month to compare against isn't always available
+// this early in real data collection) -- omitted here, not defaulted to
+// "vs last period", so that KPI honestly never renders a delta row.
 const KPI_COMPARISON_LABEL: Record<string, string> = {
   "Carbon Intensity": "vs yesterday",
   "Renewable Share": "vs yesterday",
@@ -261,11 +297,11 @@ export default function ExecutiveDashboardPage() {
   const [compactTrend, setCompactTrend] = useState<CompactTrendPoint[] | null>(null);
   const [compactTrendError, setCompactTrendError] = useState<string | null>(null);
 
-  // "Emissions Trend (compact)"'s own 7D/30D/90D period toggle -- kept
+  // "Emission History"'s own 7D/15D/30D period toggle -- kept
   // separate from `compactTrend` above (always a fixed real 8 days) so
-  // switching this period never changes the "Total CO₂e (YTD)" KPI
+  // switching this period never changes the "Total CO₂e (MTD)" KPI
   // card's own sparkline out from under it.
-  const PERIOD_DAYS = { "7D": 7, "30D": 30, "90D": 90 } as const;
+  const PERIOD_DAYS = { "7D": 7, "15D": 15, "30D": 30 } as const;
   type TrendPeriod = keyof typeof PERIOD_DAYS;
   const [trendPeriod, setTrendPeriod] = useState<TrendPeriod>("7D");
   const [periodTrend, setPeriodTrend] = useState<CompactTrendPoint[] | null>(null);
@@ -310,6 +346,85 @@ export default function ExecutiveDashboardPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [trendPeriod]);
 
+  // Real historical demand-backtest × real historical intensity, bucketed
+  // by real day -- backs "Emission History"'s optional forecast band (see
+  // `CompactTrendPoint`'s own comment for the full methodology). Fixed
+  // real 7-day window, independent of `trendPeriod`'s own 7D/15D/30D
+  // selection (same "don't widen the expensive real fetch just because a
+  // wider actual-history window was picked" reasoning `RealEmissionsTrend`
+  // already applies) -- confirmed live: `region=NEM` over 30 real days
+  // took ~50s to compute uncached, well past this fetch's own timeout,
+  // while 7 real days stays a safe ~15s. A caption below the chart
+  // discloses the narrower real band window whenever a wider period is
+  // selected, rather than silently truncating with no explanation.
+  const HISTORICAL_BAND_DAYS = 7;
+  const [historicalForecastByDate, setHistoricalForecastByDate] = useState<
+    Map<string, { p10: number; p50: number; p90: number }>
+  >(new Map());
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([
+      fetchRecentBacktest("NEM", HISTORICAL_BAND_DAYS),
+      // +1 real day of buffer so every real backtest hour near the
+      // window's own start still has a real intensity match.
+      fetchEmissionsTimeseries("hour", HISTORICAL_BAND_DAYS + 1),
+    ])
+      .then(([backtest, series]) => {
+        if (cancelled) return;
+        const intensityByHour = new Map<string, number>();
+        for (const p of series.points) {
+          if (p.intensity_kgco2e_per_mwh != null) {
+            intensityByHour.set(new Date(p.bucket).toISOString(), p.intensity_kgco2e_per_mwh);
+          }
+        }
+        const byDate = new Map<string, { p10: number; p50: number; p90: number }>();
+        for (const pt of backtest.points) {
+          const intensity = intensityByHour.get(new Date(pt.ts).toISOString());
+          // No real intensity for this exact real hour -- skip it rather
+          // than guess one, same "real data or nothing" convention every
+          // other derived number on this page follows.
+          if (intensity == null) continue;
+          const dateKey = pt.ts.slice(0, 10);
+          const existing = byDate.get(dateKey) ?? { p10: 0, p50: 0, p90: 0 };
+          // Real per-point energy is `p50 (MW) * 1 real hour` -- every
+          // point is one real hourly step (`RecentBacktestResponse.
+          // interval` is always real "1h"), NOT `pt.step_hours` (a real
+          // but different thing: the 1-48 "hours-ahead-of-its-own-origin"
+          // label `evaluate.py`'s `RecentBacktestPoint` docstring
+          // defines -- multiplying by that instead of 1 was a real bug
+          // caught before shipping, confirmed live: it inflated daily
+          // totals ~10x above the real `GET /v1/generation-mix` figure
+          // for the same real day).
+          existing.p10 += (pt.p10 * intensity) / 1000; // kgCO2e -> tCO2e
+          existing.p50 += (pt.p50 * intensity) / 1000;
+          existing.p90 += (pt.p90 * intensity) / 1000;
+          byDate.set(dateKey, existing);
+        }
+        setHistoricalForecastByDate(byDate);
+      })
+      .catch(() => {
+        if (!cancelled) setHistoricalForecastByDate(new Map());
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // `periodTrend` (real actual, whichever period is selected) + the
+  // real derived band above, joined by real calendar date -- the band
+  // only attaches to days actually inside its own bounded real window;
+  // every other day keeps its real actual-only point, unchanged.
+  const periodTrendWithBand = useMemo(() => {
+    if (!periodTrend) return null;
+    if (historicalForecastByDate.size === 0) return periodTrend;
+    return periodTrend.map((d) => {
+      const band = historicalForecastByDate.get(d.ts.slice(0, 10));
+      return band
+        ? { ...d, forecastP10Tco2e: band.p10, forecastP50Tco2e: band.p50, forecastP90Tco2e: band.p90 }
+        : d;
+    });
+  }, [periodTrend, historicalForecastByDate]);
+
   const periodTrendStats = useMemo(() => {
     if (!periodTrend || periodTrend.length === 0) return null;
     const values = periodTrend.map((d) => d.actualTco2e);
@@ -344,8 +459,26 @@ export default function ExecutiveDashboardPage() {
     [emissionsBySource],
   );
 
+  // Starts `null` on every render, server or client -- `localStorage`
+  // hydration happens in a mount-only `useEffect` below instead of a
+  // lazy `useState` initializer, deliberately: this page is a client
+  // component but still server-rendered for its initial HTML, and
+  // `getCached` can only ever see real `localStorage` state on the
+  // client (`typeof window === "undefined"` server-side). A lazy
+  // initializer would make the client's first render diverge from what
+  // the server actually sent, a real hydration mismatch -- the
+  // mount-effect pattern below keeps the first render identical on both
+  // sides, then repaints with the cached value one tick later.
   const [forecastPreview, setForecastPreview] = useState<ForecastPreview | null>(null);
   const [forecastError, setForecastError] = useState<string | null>(null);
+  // Real age of the cached value this card painted from on mount (`null`
+  // if there wasn't one) -- set once by the same mount-effect that
+  // hydrates `forecastPreview`, not re-read on every render, so it
+  // reflects "how stale was the instant-paint" rather than ticking live.
+  // Cleared once the real fetch below lands a fresh response, so the
+  // "cached" note never lingers after this session's own live data has
+  // actually arrived.
+  const [forecastCachedAgeMs, setForecastCachedAgeMs] = useState<number | null>(null);
 
   const [emissionsSnapshot, setEmissionsSnapshot] = useState<EmissionsSnapshot | null>(null);
   const [snapshotError, setSnapshotError] = useState<string | null>(null);
@@ -358,7 +491,9 @@ export default function ExecutiveDashboardPage() {
   // Real "Actual" demand history for the Demand Forecast Preview chart
   // -- see `DemandActualPoint`'s own comment. Derived from the exact
   // same 48h `fetchEmissionsTimeseries` call `emissionsSnapshot` above
-  // uses, not a separate fetch.
+  // uses, not a separate fetch. Same mount-effect `localStorage`
+  // hydration as `forecastPreview` above (same hydration-mismatch
+  // reasoning -- see that state's own comment).
   const [demandActual, setDemandActual] = useState<DemandActualPoint[] | null>(null);
 
   // Real last-7-real-days of `GET /v1/demand/summary`, one call per
@@ -395,6 +530,32 @@ export default function ExecutiveDashboardPage() {
   const [alerts, setAlerts] = useState<Anomaly[] | null>(null);
   const [alertsError, setAlertsError] = useState<string | null>(null);
 
+  // Mount-only `localStorage` hydration for the Demand Forecast Preview
+  // card (`forecastPreview`/`demandActual`/`forecastCachedAgeMs` all
+  // start `null` above specifically so this runs after the same first
+  // render on both server and client -- see those states' own comments).
+  // Runs once, before the real fetch effect below starts (React runs
+  // effects in declaration order within one commit), so a cached value
+  // paints on the very next tick instead of the "Loading…" state ever
+  // being visible when a usable cache entry exists. Deliberately doesn't
+  // touch any other KPI/section on this page -- this is scoped to only
+  // the two states that back this one card, per what was actually asked.
+  useEffect(() => {
+    const cachedForecast = getCached<ForecastPreview>(
+      DEMAND_FORECAST_CACHE_KEY,
+      DEMAND_PREVIEW_CACHE_MAX_AGE_MS,
+    );
+    if (cachedForecast) {
+      setForecastPreview(cachedForecast);
+      setForecastCachedAgeMs(getCachedAgeMs(DEMAND_FORECAST_CACHE_KEY));
+    }
+    const cachedActual = getCached<DemandActualPoint[]>(
+      DEMAND_ACTUAL_CACHE_KEY,
+      DEMAND_PREVIEW_CACHE_MAX_AGE_MS,
+    );
+    if (cachedActual) setDemandActual(cachedActual);
+  }, []);
+
   // Every fetch below hits a real backend endpoint (forecast-api, plus
   // data-pipeline's one unauthenticated data-quality summary). "Data
   // Quality Score"/"Open Risks" are real ingestion/data-quality signals,
@@ -405,17 +566,27 @@ export default function ExecutiveDashboardPage() {
   useEffect(() => {
     let cancelled = false;
 
-    fetchYtdEmissions()
-      .then((ytd) => {
-        if (cancelled || ytd.total_emissions_tco2e == null) return;
+    // Real month-to-date total, not YTD: `GET /v1/emissions/ytd` is
+    // hardcoded to Jan-1-to-now server-side with no period param, so
+    // this reuses `GET /v1/generation-mix` (already real, already used
+    // below for the "Emissions by Source" donut) with an explicit
+    // `since` at this real calendar month's start instead -- same real
+    // `fct_generation_mix` rows, just summed over a real MTD window.
+    const now = new Date();
+    const monthStartIso = new Date(Date.UTC(now.getFullYear(), now.getMonth(), 1)).toISOString();
+
+    fetchGenerationMix(undefined, monthStartIso)
+      .then((mix) => {
+        if (cancelled) return;
+        const mtdTco2e = mix.total_emissions_kgco2e / 1000;
         setKpis((prev) =>
           prev.map((k) =>
-            k.label === "Total CO₂e (YTD)"
-              ? { ...k, value: Math.round(ytd.total_emissions_tco2e!).toLocaleString() }
+            k.label === "Total CO₂e (MTD)"
+              ? { ...k, value: Math.round(mtdTco2e).toLocaleString() }
               : k,
           ),
         );
-        setLiveKpiLabels((prev) => new Set(prev).add("Total CO₂e (YTD)"));
+        setLiveKpiLabels((prev) => new Set(prev).add("Total CO₂e (MTD)"));
       })
       .catch(() => {});
 
@@ -580,6 +751,7 @@ export default function ExecutiveDashboardPage() {
           intensitySparkline: todayPoints.map((p) => Math.round(p.intensity_kgco2e_per_mwh ?? 0)),
           labels: todayPoints.map((p) => formatHourLabel(p.bucket)),
           fullLabels: todayPoints.map((p) => formatFullDateTime(p.bucket)),
+          latestPointIso: todayPoints[todayPoints.length - 1].bucket,
         });
         // Full 3-day series, NOT sliced to the last 24h like
         // `emissionsSnapshot` above -- the Demand Forecast Preview
@@ -587,15 +759,15 @@ export default function ExecutiveDashboardPage() {
         // back far enough to find real actual points ending exactly at
         // the forecast's own real start, which can itself be well
         // behind live.
-        setDemandActual(
-          series.points
-            .filter((p) => p.total_generation_mwh !== null)
-            .map((p) => ({
-              ts: p.bucket,
-              tMs: new Date(p.bucket).getTime(),
-              mw: Math.round(p.total_generation_mwh!),
-            })),
-        );
+        const freshDemandActual = series.points
+          .filter((p) => p.total_generation_mwh !== null)
+          .map((p) => ({
+            ts: p.bucket,
+            tMs: new Date(p.bucket).getTime(),
+            mw: Math.round(p.total_generation_mwh!),
+          }));
+        setDemandActual(freshDemandActual);
+        setCached(DEMAND_ACTUAL_CACHE_KEY, freshDemandActual);
 
         if (yesterdayPoints.length > 0) {
           const yEmissions = sumEmissions(yesterdayPoints);
@@ -648,7 +820,7 @@ export default function ExecutiveDashboardPage() {
       .then(({ forecast, scope }) => {
         if (cancelled || forecast.points.length === 0) return;
         const p50s = forecast.points.map((p) => p.p50);
-        setForecastPreview({
+        const freshForecastPreview: ForecastPreview = {
           current: Math.round(p50s[0]),
           peak: Math.round(Math.max(...p50s)),
           min: Math.round(Math.min(...p50s)),
@@ -661,7 +833,10 @@ export default function ExecutiveDashboardPage() {
           })),
           horizonLabel: `next ${forecast.horizon}`,
           scope,
-        });
+        };
+        setForecastPreview(freshForecastPreview);
+        setCached(DEMAND_FORECAST_CACHE_KEY, freshForecastPreview);
+        setForecastCachedAgeMs(null);
       })
       .catch((err) => {
         if (!cancelled) setForecastError(err instanceof Error ? err.message : "failed to load");
@@ -755,7 +930,7 @@ export default function ExecutiveDashboardPage() {
     const renewableSeries = dailySummary?.map((d) => d.renewablePct) ?? null;
     const priceSeries = dailySummary?.map((d) => d.priceMwh) ?? null;
     return {
-      "Total CO₂e (YTD)": compactTrend ? compactTrend.map((d) => Math.round(d.actualTco2e)) : undefined,
+      "Total CO₂e (MTD)": compactTrend ? compactTrend.map((d) => Math.round(d.actualTco2e)) : undefined,
       "Carbon Intensity": emissionsSnapshot?.intensitySparkline,
       "Renewable Share": renewableSeries && allPresent(renewableSeries) ? renewableSeries : undefined,
       "Avg Wholesale Price (YTD)": priceSeries && allPresent(priceSeries) ? priceSeries : undefined,
@@ -806,6 +981,14 @@ export default function ExecutiveDashboardPage() {
                 <p className="text-xs text-white/50">
                   P50 forecast with P10 – P90 range
                   {forecastPreview && forecastPreview.scope !== "NEM" ? ` · ${forecastPreview.scope} only` : ""}
+                  {forecastCachedAgeMs !== null && (
+                    <span
+                      className="ml-1 text-white/30"
+                      title="Showing a cached value from your browser's localStorage while a fresh forecast loads in the background"
+                    >
+                      · cached {formatRelativeTime(new Date(Date.now() - forecastCachedAgeMs).toISOString())}
+                    </span>
+                  )}
                 </p>
               </div>
             </div>
@@ -858,7 +1041,7 @@ export default function ExecutiveDashboardPage() {
             <div className="mb-3 flex items-center justify-between">
               <div>
                 <h2 className="text-base font-semibold text-white">Emissions Snapshot</h2>
-                <p className="text-xs text-white/50">last 24h · Scope 2 (grid)</p>
+                <p className="text-xs text-white/50">most recent 24 real hours · Scope 2 (grid)</p>
               </div>
               <Link href="/dashboard/carbon/" className="inline-flex items-center gap-1 text-xs text-emerald-100 hover:underline" data-testid="emissions-preview-link">
                 View details →
@@ -894,6 +1077,25 @@ export default function ExecutiveDashboardPage() {
                   label="Renewable %"
                   value={`${emissionsSnapshot.renewablePct.toFixed(1)}%`}
                 />
+                {(() => {
+                  // Real staleness disclosure -- this card's sparklines plot
+                  // points index-by-index (see `EmissionsSnapshot.
+                  // latestPointIso`'s own comment), so a real ingestion gap
+                  // never shows up as a visible break the way `RealEmissions
+                  // Trend`'s Actual line does; it just silently shifts this
+                  // "most recent 24h" window further behind true now. 90min
+                  // threshold matches `RealEmissionsTrend`'s own real-gap
+                  // convention (`GAP_THRESHOLD_MS`).
+                  const staleMs = Date.now() - new Date(emissionsSnapshot.latestPointIso).getTime();
+                  if (staleMs <= 90 * 60 * 1000) return null;
+                  return (
+                    <p className="flex items-center gap-1.5 text-[11px] text-amber-200/80">
+                      <Info className="h-3 w-3" />
+                      Most recent real reading is from {formatRelativeTime(emissionsSnapshot.latestPointIso)}
+                      , not this instant — real ingestion is currently behind live.
+                    </p>
+                  );
+                })()}
               </div>
             )}
           </div>
@@ -1012,8 +1214,10 @@ export default function ExecutiveDashboardPage() {
         <Card className="lg:col-span-2">
           <div className="mb-3 flex items-center justify-between">
             <div>
-              <h2 className="text-base font-semibold text-white">Emissions Trend</h2>
-              <p className="text-xs text-white/50">Daily total emissions (tCO₂e, actual only, real)</p>
+              <h2 className="text-base font-semibold text-white">Emission History</h2>
+              <p className="text-xs text-white/50">
+                Daily total emissions (tCO₂e, real) + real historical forecast confidence band
+              </p>
             </div>
             <div className="flex items-center gap-1 rounded-full border border-white/10 bg-white/5 p-0.5">
               {(Object.keys(PERIOD_DAYS) as TrendPeriod[]).map((p) => (
@@ -1038,7 +1242,15 @@ export default function ExecutiveDashboardPage() {
             </p>
           ) : (
             <>
-              <CompactTrendChart data={periodTrend} />
+              <CompactTrendChart data={periodTrendWithBand ?? periodTrend} />
+              {PERIOD_DAYS[trendPeriod] > HISTORICAL_BAND_DAYS && (
+                <p className="mt-2 flex items-center gap-1.5 text-[11px] text-white/40">
+                  <Info className="h-3 w-3" />
+                  The forecast confidence band only covers the most recent {HISTORICAL_BAND_DAYS} real
+                  days — a real walk-forward re-forecast that wide gets expensive fast (confirmed
+                  live: 30 real days took ~50s to compute).
+                </p>
+              )}
               {periodTrendStats && (
                 <div className="mt-4 grid grid-cols-2 gap-4 border-t border-white/5 pt-4 text-[11px] md:grid-cols-4">
                   <div>
@@ -1315,27 +1527,53 @@ function Sparkline({
 }
 
 /**
- * CompactTrendChart — simple animated area chart (actual line + P10-P90
- * band, index-spaced x-axis) for the "Emissions Trend (compact)" panel.
- * Ported from the v18x prototype's own simple inline `MiniChart(data)`
- * (`/Users/macbook/Downloads/executive-page-zip/page.tsx`) -- explicitly
- * mock/demo, fed by `getEmissionsTrend()` (`@/lib/dashboards`), same
- * disclosure as `EmissionsTrendV2` above. Distinct from that component's
- * own, much more developed chart -- this one is deliberately simple
- * (no region/horizon selectors, no smoothing), matching the reference
- * screenshot's smaller bottom-left panel.
+ * CompactTrendChart — animated area chart for the "Emission History"
+ * panel: real actual line + an optional real derived forecast confidence
+ * band (see `CompactTrendPoint`'s own comment for the full methodology
+ * -- real historical demand-backtest quantiles × real historical grid
+ * intensity, not fabricated). Ported from the v18x prototype's own
+ * simple inline `MiniChart(data)` layout, but real data since the
+ * 2026-08-08 cutover -- `data` is real `fetchEmissionsTimeseries` points
+ * (`periodTrend`/`compactTrend`), not `getEmissionsTrend()`'s mock
+ * (unused anywhere in this file now). Distinct from `RealEmissionsTrend`
+ * -- this one is deliberately simpler (no region/horizon selectors),
+ * matching the reference screenshot's smaller bottom-left panel.
  */
 function CompactTrendChart({ data }: { data: CompactTrendPoint[] }) {
   const reduced = useReducedMotion();
   const gradId = useId().replace(/:/g, "");
   const w = 720, h = 200, padL = 40, padR = 8, padT = 8, padB = 28;
   const innerW = w - padL - padR, innerH = h - padT - padB;
-  const yMax = Math.max(...data.map((d) => d.actualTco2e), 1) * 1.1;
+  const yMax =
+    Math.max(...data.map((d) => Math.max(d.actualTco2e, d.forecastP90Tco2e ?? 0)), 1) * 1.1;
   const stepX = innerW / Math.max(1, data.length - 1);
   const x = (i: number) => padL + i * stepX;
   const y = (v: number) => padT + innerH - (v / yMax) * innerH;
   const actualPath = data.map((d, i) => `${i === 0 ? "M" : "L"} ${x(i).toFixed(1)} ${y(d.actualTco2e).toFixed(1)}`).join(" ");
   const areaPath = `${actualPath} L ${x(data.length - 1).toFixed(1)} ${padT + innerH} L ${x(0).toFixed(1)} ${padT + innerH} Z`;
+
+  // Real forecast band -- only the (in practice contiguous, most-recent)
+  // days `historicalForecastByDate` actually covers carry these fields;
+  // every other day is plotted as real actual-only, same as before.
+  const bandPoints = data
+    .map((d, i) => ({ i, d }))
+    .filter(
+      (
+        p,
+      ): p is { i: number; d: CompactTrendPoint & { forecastP10Tco2e: number; forecastP50Tco2e: number; forecastP90Tco2e: number } } =>
+        p.d.forecastP10Tco2e !== undefined && p.d.forecastP50Tco2e !== undefined && p.d.forecastP90Tco2e !== undefined,
+    );
+  const bandAreaPath =
+    bandPoints.length > 0
+      ? [
+          ...bandPoints.map(({ i, d }, j) => `${j === 0 ? "M" : "L"} ${x(i).toFixed(1)} ${y(d.forecastP90Tco2e).toFixed(1)}`),
+          ...[...bandPoints].reverse().map(({ i, d }) => `L ${x(i).toFixed(1)} ${y(d.forecastP10Tco2e).toFixed(1)}`),
+          "Z",
+        ].join(" ")
+      : "";
+  const forecastP50Path = bandPoints
+    .map(({ i, d }, j) => `${j === 0 ? "M" : "L"} ${x(i).toFixed(1)} ${y(d.forecastP50Tco2e).toFixed(1)}`)
+    .join(" ");
 
   // Real peak/low day, highlighted with a bigger marker -- ties (more
   // than one day sharing the exact max/min) highlight every matching
@@ -1343,7 +1581,7 @@ function CompactTrendChart({ data }: { data: CompactTrendPoint[] }) {
   const maxVal = Math.max(...data.map((d) => d.actualTco2e));
   const minVal = Math.min(...data.map((d) => d.actualTco2e));
 
-  // Longer real windows (30D/90D) can't label every single day without
+  // Longer real windows (15D/30D) can't label every single day without
   // the axis becoming unreadable -- thin to roughly the same visual
   // density the 7D view already has.
   const labelEvery = data.length > 45 ? 15 : data.length > 14 ? 5 : 1;
@@ -1376,12 +1614,39 @@ function CompactTrendChart({ data }: { data: CompactTrendPoint[] }) {
   const hoverPoint = hover ? data[hover.idx] : null;
   const hoverLabel = hoverPoint ? hoverPoint.date : null;
 
+  // Same real edge-clipping fix `RealEmissionsTrend`'s own tooltip
+  // needed (2026-08-11): centering on the cursor pushed the tooltip
+  // partly outside this card's `overflow-hidden` bounds near either
+  // edge of the chart. Clamped to stay fully on-screen everywhere.
+  const TOOLTIP_WIDTH_PX = 190; // matches this tooltip's own `min-w-[180px]` below, plus margin
+  const tooltipContainerWidth = wrapRef.current?.clientWidth ?? w;
+  const tooltipLeft = hover
+    ? Math.min(
+        Math.max(hover.x, TOOLTIP_WIDTH_PX / 2),
+        Math.max(TOOLTIP_WIDTH_PX / 2, tooltipContainerWidth - TOOLTIP_WIDTH_PX / 2),
+      )
+    : 0;
+
   if (data.length === 0) {
     return <p className="py-16 text-center text-xs text-white/40">No real data for this window yet.</p>;
   }
 
   return (
-    <div ref={wrapRef} className="relative" data-testid="emissions-trend-compact-chart">
+    <>
+      {bandPoints.length > 0 && (
+        <div className="mb-2 flex flex-wrap items-center gap-3 text-[10px] text-white/55">
+          <span className="inline-flex items-center gap-1.5">
+            <span className="h-1.5 w-3 rounded-full bg-emerald-300" /> Actual
+          </span>
+          <span className="inline-flex items-center gap-1.5">
+            <span className="h-0.5 w-3 rounded-full border-t-2 border-dashed border-sky-300" /> Forecast (P50)
+          </span>
+          <span className="inline-flex items-center gap-1.5">
+            <span className="h-2.5 w-3.5 rounded-sm border border-sky-300/40 bg-sky-300/15" /> P10-P90
+          </span>
+        </div>
+      )}
+      <div ref={wrapRef} className="relative" data-testid="emissions-trend-compact-chart">
       <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" className="h-48 w-full">
         <defs>
           <linearGradient id={gradId} x1="0" x2="0" y1="0" y2="1">
@@ -1397,6 +1662,32 @@ function CompactTrendChart({ data }: { data: CompactTrendPoint[] }) {
             </text>
           </g>
         ))}
+
+        {bandAreaPath && (
+          <m.path
+            d={bandAreaPath}
+            fill="rgba(56,189,248,0.16)"
+            stroke="none"
+            initial={reduced ? false : { opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.6, delay: 0.2 }}
+            data-testid="emissions-trend-compact-forecast-band"
+          />
+        )}
+        {forecastP50Path && (
+          <m.path
+            d={forecastP50Path}
+            fill="none"
+            stroke="#7dd3fc"
+            strokeWidth={1.75}
+            strokeDasharray="6 4"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            initial={reduced ? false : { pathLength: 0 }}
+            animate={{ pathLength: 1 }}
+            transition={{ duration: 0.9, delay: 0.3, ease: "easeInOut" }}
+          />
+        )}
 
         <m.path
           d={areaPath}
@@ -1446,6 +1737,9 @@ function CompactTrendChart({ data }: { data: CompactTrendPoint[] }) {
           <m.g initial={reduced ? false : { opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.1 }}>
             <line x1={x(hover.idx)} x2={x(hover.idx)} y1={padT} y2={padT + innerH} stroke="rgba(132,204,22,0.4)" strokeWidth={0.5} strokeDasharray="2 2" />
             <circle cx={x(hover.idx)} cy={y(hoverPoint.actualTco2e)} r={5} fill="#34d399" stroke="#0a1410" strokeWidth={1.5} />
+            {hoverPoint.forecastP50Tco2e !== undefined && (
+              <circle cx={x(hover.idx)} cy={y(hoverPoint.forecastP50Tco2e)} r={5} fill="#0a1410" stroke="#7dd3fc" strokeWidth={2} />
+            )}
           </m.g>
         )}
       </svg>
@@ -1458,7 +1752,7 @@ function CompactTrendChart({ data }: { data: CompactTrendPoint[] }) {
             exit={reduced ? undefined : { opacity: 0, y: 4, scale: 0.95 }}
             transition={{ duration: 0.12, ease: "easeOut" }}
             className="pointer-events-none absolute z-20 min-w-[180px] -translate-x-1/2 -translate-y-[calc(100%+10px)] rounded-md border border-white/10 bg-[#0a1410]/95 px-3 py-2 text-xs shadow-2xl backdrop-blur"
-            style={{ left: hover.x, top: hover.y }}
+            style={{ left: tooltipLeft, top: hover.y }}
             data-testid="emissions-trend-compact-tooltip"
           >
             <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-white/50">{hoverLabel}</div>
@@ -1469,10 +1763,30 @@ function CompactTrendChart({ data }: { data: CompactTrendPoint[] }) {
                 {hoverPoint.actualTco2e.toLocaleString(undefined, { maximumFractionDigits: 0 })} tCO₂e
               </span>
             </div>
+            {hoverPoint.forecastP50Tco2e !== undefined && (
+              <>
+                <div className="flex items-center gap-2 py-0.5">
+                  <span className="h-1.5 w-1.5 rounded-full bg-sky-300" />
+                  <span className="text-white/65">Forecast P50</span>
+                  <span className="ml-auto font-mono font-medium text-white">
+                    {hoverPoint.forecastP50Tco2e.toLocaleString(undefined, { maximumFractionDigits: 0 })} tCO₂e
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 py-0.5">
+                  <span className="h-1.5 w-1.5 rounded-full border border-sky-300/40" />
+                  <span className="text-white/65">Forecast P10-P90</span>
+                  <span className="ml-auto font-mono text-white/80">
+                    {hoverPoint.forecastP10Tco2e?.toLocaleString(undefined, { maximumFractionDigits: 0 })} –{" "}
+                    {hoverPoint.forecastP90Tco2e?.toLocaleString(undefined, { maximumFractionDigits: 0 })} tCO₂e
+                  </span>
+                </div>
+              </>
+            )}
           </m.div>
         )}
       </AnimatePresence>
-    </div>
+      </div>
+    </>
   );
 }
 

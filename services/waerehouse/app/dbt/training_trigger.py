@@ -24,11 +24,18 @@ from app.db.session import get_session
 
 log = get_logger(__name__)
 
-#: Architectures that get a warm-started incremental fine-tune off of
-#: every training-trigger event -- same set data-pipeline's identical
-#: `INCREMENTAL_ARCHITECTURES` used (TimesFM is zero-shot, no weights to
-#: incrementally update).
-INCREMENTAL_ARCHITECTURES: tuple[str, ...] = ("lstm", "tft")
+#: Architectures that get a fine-tune off of every training-trigger
+#: event. `"lstm"`/`"tft"` are warm-started incremental fine-tunes of
+#: their own weights. `"timesfm_correction"` (added 2026-08-11) is
+#: different in kind but the same in spirit: raw TimesFM itself is
+#: zero-shot and genuinely has no weights to update, but forecast-api's
+#: `service/ml/timesfm_correction.py` fits a small, real Ridge
+#: residual-correction layer *on top of* TimesFM's frozen output, and
+#: that layer *can* (and should) keep re-fitting as new data lands --
+#: excluding it here would leave TimesFM as the one architecture in the
+#: platform's "continuously adapts to new data" story that never
+#: actually does.
+INCREMENTAL_ARCHITECTURES: tuple[str, ...] = ("lstm", "tft", "timesfm_correction")
 
 
 async def publish_training_trigger(
@@ -43,11 +50,12 @@ async def publish_training_trigger(
     incremental trainer should query, and a real anomaly-flag count from
     `meta.anomalies` over that same window -- not a placeholder field.
 
-    `architecture` (`"lstm"` or `"tft"`) is threaded into the payload so
-    `training_worker.handle_training_trigger` dispatches to the right
-    incremental trainer and registered model name -- callers that want
-    both fine-tuned from the same build call this once per
-    `INCREMENTAL_ARCHITECTURES` entry, not once overall.
+    `architecture` (one of `INCREMENTAL_ARCHITECTURES`) is threaded into
+    the payload so `training_worker.handle_training_trigger` dispatches
+    to the right incremental trainer and registered model name --
+    callers that want every architecture fine-tuned from the same build
+    call this once per `INCREMENTAL_ARCHITECTURES` entry, not once
+    overall.
 
     `triggered_by` defaults to `"schedule"` (the automatic post-build
     path, `api/v1/dbt/routes.py`'s `trigger_dbt_build`); a manual

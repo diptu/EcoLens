@@ -1,7 +1,11 @@
 """Ported verbatim from data-pipeline's identical `tests/
 test_training_worker.py` as part of the training-code migration --
 `app.service.training_worker` here is a byte-for-byte port of that
-module (see its own docstring), so the same test cases apply unchanged."""
+module (see its own docstring), so the same test cases apply unchanged.
+
+`TestHandleTrainingTrigger`'s `timesfm_correction` dispatch test is new
+(2026-08-11, not part of the original port) -- data-pipeline's version
+of this module predates `service/ml/timesfm_correction.py` entirely."""
 
 from __future__ import annotations
 
@@ -11,6 +15,7 @@ from app.core.config import get_settings
 from app.service import training_worker
 from app.service.model import actions as model_actions
 from app.service.ml.train import TrainAndRegisterResult
+from app.service.ml.timesfm_correction import TrainAndRegisterCorrectionResult
 
 pytestmark = pytest.mark.anyio
 
@@ -229,6 +234,51 @@ class TestHandleTrainingTrigger:
 
         assert calls == ["tft"]
         assert captured["model_name"] == training_worker.TFT_MODEL_NAME
+
+    async def test_dispatches_to_timesfm_correction_when_architecture_is_timesfm_correction(
+        self, monkeypatch
+    ):
+        calls = []
+        captured = {}
+
+        async def fake_lstm(model_name, regions, since):
+            calls.append("lstm")
+            return TrainAndRegisterResult(
+                run_id="run-1", model_version="1", test_metrics={}, final_val_mape=None
+            )
+
+        async def fake_tft(model_name, regions, since):
+            calls.append("tft")
+            return TrainAndRegisterResult(
+                run_id="run-1", model_version="1", test_metrics={}, final_val_mape=None
+            )
+
+        async def fake_correction(model_name, regions, *, since):
+            calls.append("timesfm_correction")
+            captured["model_name"] = model_name
+            captured["regions"] = regions
+            captured["since"] = since
+            return TrainAndRegisterCorrectionResult(
+                run_id="run-1", model_version="1", metrics={}
+            )
+
+        monkeypatch.setattr(
+            training_worker, "train_and_register_incremental", fake_lstm
+        )
+        monkeypatch.setattr(
+            training_worker, "train_and_register_tft_incremental", fake_tft
+        )
+        monkeypatch.setattr(
+            training_worker, "train_and_register_correction", fake_correction
+        )
+
+        await training_worker.handle_training_trigger(
+            {"regions": ["NSW1"], "architecture": "timesfm_correction"}
+        )
+
+        assert calls == ["timesfm_correction"]
+        assert captured["model_name"] == training_worker.TIMESFM_CORRECTION_MODEL_NAME
+        assert captured["regions"] == ["NSW1"]
 
     async def test_runs_the_live_eval_gate_after_a_successful_registration(
         self, monkeypatch, fake_live_eval_gate

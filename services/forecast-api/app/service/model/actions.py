@@ -39,7 +39,12 @@ from app.schemas.model import TrainingRunOut, TrainTriggerResponse
 
 
 async def _build_and_publish_training_trigger(
-    regions: list[str], window_hours: int, *, triggered_by: str, architecture: str = "lstm"
+    regions: list[str],
+    window_hours: int,
+    *,
+    triggered_by: str,
+    architecture: str = "lstm",
+    full_retrain: bool = False,
 ) -> dict:
     """Same payload shape `services/waerehouse`'s identical function
     builds -- see that module's docstring for the full field-by-field
@@ -73,6 +78,7 @@ async def _build_and_publish_training_trigger(
         "anomalies_flagged": anomalies_flagged,
         "architecture": architecture,
         "triggered_by": triggered_by,
+        "full_retrain": full_retrain,
     }
     await publish_training_trigger_event(payload)
     return payload
@@ -84,7 +90,21 @@ async def trigger_training(
     *,
     triggered_by: str,
     architecture: str | None = None,
+    full_retrain: bool = False,
 ) -> TrainTriggerResponse:
+    """Real bug, confirmed live 2026-08-11: this used to hardcode
+    `triggered_by="manual"` in the call below regardless of the
+    `triggered_by` this function was actually given (`routes.py`'s
+    `trigger_training_endpoint` passes `"public"`) -- so the
+    `TrainTriggerResponse` the caller got back said `"public"` while the
+    published event, and therefore `meta._training_log.triggered_by`
+    (`training_worker.handle_training_trigger`'s
+    `payload.get("triggered_by")`), always said `"manual"` instead. Any
+    caller trying to correlate its own trigger response with the
+    resulting training-run row by `triggered_by` (the dashboard's
+    Fine-tune form, once it started polling `GET /v1/model/training-runs`
+    for real progress) could never find a match. Now the same value
+    flows through end to end."""
     settings = get_settings()
     resolved_regions = regions or settings.model_default_regions
     resolved_window_hours = window_hours or settings.incremental_train_window_hours
@@ -93,8 +113,9 @@ async def trigger_training(
     payload = await _build_and_publish_training_trigger(
         resolved_regions,
         resolved_window_hours,
-        triggered_by="manual",
+        triggered_by=triggered_by,
         architecture=resolved_architecture,
+        full_retrain=full_retrain,
     )
 
     return TrainTriggerResponse(
@@ -105,6 +126,7 @@ async def trigger_training(
         anomalies_flagged=payload["anomalies_flagged"],
         triggered_by=triggered_by,
         architecture=payload["architecture"],
+        full_retrain=payload["full_retrain"],
     )
 
 

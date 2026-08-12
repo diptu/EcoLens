@@ -90,26 +90,50 @@ async def run(
 
 
 async def _try_live_api(lookback_minutes: int) -> pd.DataFrame | None:
-    """Try AEMO WEM's published CSV. Returns None on failure."""
-    import httpx
+    """Real fetch, reusing `_fetch_historical_range`'s already-verified
+    per-day archive endpoints instead of a dead URL.
 
-    from app.core.config import get_settings
-    from app.service.pipeline.http_retry import DEFAULT_LIMITS
+    Real bug, confirmed live 2026-08-11/12: the URL this function used
+    to hit (`.../datafiles/balancing-summary/balancing-summary-30min.csv`)
+    was never real (this module's own header docstring already said so:
+    "confirmed 404 -- a leftover guess"), and this returned `None`
+    *unconditionally* even on a successful HTTP response ("Real parsing
+    would go here" -- it never was). `_do_fetch` therefore fell through
+    to `_synthetic_stub` on literally every scheduled call, forever --
+    combined with that function's own real bug (see its docstring),
+    WEM's real warehouse data was frozen at one fake constant for every
+    row from 2026-08-07 07:00 UTC through this fix, ~4.5 real days,
+    silently (`_synthetic_stub`'s fallback was only ever a `log.warning`,
+    never a real failure signal).
 
-    settings = get_settings()
-    url = "https://data.wa.aemo.com.au/datafiles/balancing-summary/balancing-summary-30min.csv"
+    AEMO WA's real daily archive files publish with a real ~2-day lag,
+    confirmed live: `OperationalDemandAndWithdrawal_{today}.json` and
+    `{yesterday}` both 404 today, `{2 days ago}` is the most recent real
+    file that exists. So "live" for this source honestly means "whatever
+    AEMO has most recently published", not literally today -- unlike
+    the 5-min-fresh NEM sources, `lookback_minutes` (usually 30, the
+    scheduled beat's own default) doesn't meaningfully bound how "fresh"
+    a real WEM row can be, so it's not applied as a cutoff filter here.
+    4 real calendar days of margin comfortably covers the observed ~2-day
+    lag. Re-fetching an already-ingested real day on every scheduled
+    call is deliberately not a problem -- harmless/idempotent
+    (`load_to_postgres`'s `ON CONFLICT DO NOTHING`, same tolerance
+    `backfill.py`'s own docstring already establishes for a "genuine
+    double-fetch") -- so there's no need to track exactly which day is
+    newly published; the next real day just starts showing up in the
+    real result once AEMO WA publishes it.
+    """
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=4)
     try:
-        async with httpx.AsyncClient(
-            timeout=settings.aemo_request_timeout_seconds, limits=DEFAULT_LIMITS
-        ) as client:
-            r = await client.get(url)
-            r.raise_for_status()
-            log.info("aemo_wem.live_fetch_ok", bytes=len(r.content))
-            # Real parsing would go here.
-            return None
+        df = await _fetch_historical_range(start, end)
     except Exception as e:
         log.warning("aemo_wem.live_fetch_failed", error=str(e))
         return None
+    if df.empty:
+        return None
+    log.info("aemo_wem.live_fetch_ok", rows=len(df))
+    return df
 
 
 def _read_cached(lookback_minutes: int) -> pd.DataFrame:
@@ -128,11 +152,23 @@ def _read_cached(lookback_minutes: int) -> pd.DataFrame:
 
 
 def _synthetic_stub(lookback_minutes: int) -> pd.DataFrame:
-    """Deterministic stub. NOT for production use."""
+    """Fallback stub. NOT for production use.
+
+    Real bug, confirmed live 2026-08-07 through 2026-08-11/12: this used
+    to reseed `np.random.default_rng(0xC0FFEE)` -- a fixed constant --
+    on *every* call. With the scheduled lookback always resolving to a
+    single 30-min period, the first draw of a freshly-seeded RNG is
+    bit-identical every time, so every "fake" row was actually a frozen
+    constant for ~4.5 real days (`demand_mw` stuck at
+    `2580.5315403312247`, etc). An unseeded `default_rng()` draws fresh
+    OS entropy per call instead, so repeated stub calls vary like the
+    "at least plausible" fallback this was always meant to be -- still
+    fake, no longer frozen.
+    """
     periods = max(1, lookback_minutes // 30)
     end = pd.Timestamp.now(tz="UTC").floor("30min")
     ts_index = pd.date_range(end=end, periods=periods, freq="30min")
-    rng = np.random.default_rng(0xC0FFEE)
+    rng = np.random.default_rng()
     df = pd.DataFrame(
         {
             "ts": ts_index,
@@ -164,7 +200,12 @@ def _synthetic_stub(lookback_minutes: int) -> pd.DataFrame:
     df["source"] = "aemo_wem"
     df["ingested_at"] = pd.Timestamp.now(tz="UTC")
     df["ingest_run_id"] = str(uuid.uuid4())
-    log.warning("aemo_wem.using_synthetic_stub", rows=len(df))
+    log.error(
+        "aemo_wem.using_synthetic_stub",
+        rows=len(df),
+        detail="live fetch and cache both unavailable -- WEM data for this "
+        "run is fake, not real AEMO WA data",
+    )
     return df
 
 

@@ -11,16 +11,17 @@
  * actually serves -- WEM excluded, its own different native cadence was
  * never in scope for the demand model's region training).
  *
- * **1D/2D/7D toggle applies to the forecast only (2026-08-11, relabeled
- * from 6h/24h/48h same day)**: Actual always shows a fixed real 7-day
- * window ending at the latest real hour: the toggle instead selects how
- * many of the real forecast's hourly steps to *display* in real-hour
- * terms (`fetchEmissionsForecast` returns up to its own real horizon --
+ * **12h/24h/48h toggle applies to the forecast only (2026-08-11,
+ * relabeled again from 1D/2D/7D/24h-48h-168h -- see `RangeHours`'s own
+ * docstring for why)**: Actual always shows a fixed real 7-day window
+ * ending at the latest real hour: the toggle instead selects how many
+ * of the real forecast's hourly steps to *display* in real-hour terms
+ * (`fetchEmissionsForecast` returns up to its own real horizon --
  * currently 48h -- the toggle just truncates how much of that gets
- * plotted, e.g. "1D" shows only the first 24 real steps). "7D" (168h)
- * always exceeds that real 48h horizon -- selecting it reliably shows
- * the real "shorter than requested" caption below rather than silently
- * capping with no explanation, same as any other over-request would.
+ * plotted, e.g. "12h" shows only the first 12 real steps). Selecting
+ * "48h" shows the real "shorter than requested" caption below only if
+ * the real horizon is genuinely under 48h that day, not on every
+ * selection like the old 168h option always did.
  *
  * **Continuous, gap-free Now boundary -- a deliberate re-anchor, not
  * the forecast's own real clock**: the real forecast's own point
@@ -85,28 +86,33 @@ const REGIONS: Array<{ value: TrendRegion; label: string }> = [
 /** How many of the real forecast's own hourly steps to display -- NOT
  * an actual-history window (see this file's header comment). Values are
  * real hours (the unit `loadTrend` actually slices real forecast steps
- * by); "7D" (168h) is real on its face but exceeds the real forecast
- * model's own real horizon (confirmed live: 48h) -- selecting it always
- * shows the real `forecastHorizonShorterThanRequested` caption rather
- * than silently capping at 48h with no explanation. */
-export type RangeHours = 24 | 48 | 168;
+ * by). Relabeled 2026-08-11 from the previous 1D/2D/7D (24h/48h/168h) --
+ * "7D" (168h) always exceeded the real forecast model's own real
+ * horizon (confirmed live: 48h), so selecting it *always* showed the
+ * `forecastHorizonShorterThanRequested` caption, not just sometimes.
+ * 12h/24h/48h keeps every option within the real horizon (48h is an
+ * exact match, not an over-request), so that caption now only fires in
+ * the real edge case where the horizon is genuinely shorter than 48h
+ * that day, which is what it was always meant to disclose. */
+export type RangeHours = 12 | 24 | 48;
 
 const RANGES: Array<{ value: RangeHours; label: string }> = [
-  { value: 24, label: "1D" },
-  { value: 48, label: "2D" },
-  { value: 168, label: "7D" },
+  { value: 12, label: "12h" },
+  { value: 24, label: "24h" },
+  { value: 48, label: "48h" },
 ];
 
 const DEFAULT_FORECAST_HOURS: RangeHours = 24;
 
-/** "1D"/"2D"/"7D"-style label for a real hour count -- used for the
- * user-facing subtitle/caption text below so a real 168h selection
- * reads as "7D" there too, not an awkward literal "168h". Falls back to
- * a plain "Nh" for any real count that doesn't divide evenly into whole
- * days (e.g. `forecastHoursShown` when the real available horizon cuts
- * a request short partway through a day). */
+/** Plain "Nh" label for a real hour count -- used for the user-facing
+ * subtitle/caption text below so it always reads consistently with the
+ * "12h"/"24h"/"48h" toggle above (2026-08-11: previously converted
+ * whole-day counts to "1D"/"2D"/etc, which read inconsistently once the
+ * toggle itself switched to hour-only labels -- "48h" the button next
+ * to "next 2D forecast" the caption was the same real number said two
+ * different ways for no reason). */
 function formatHoursLabel(hours: number): string {
-  return hours > 0 && hours % 24 === 0 ? `${hours / 24}D` : `${hours}h`;
+  return `${hours}h`;
 }
 
 /** Fixed real actual-history window -- independent of the forecast-hours
@@ -248,8 +254,8 @@ async function loadTrend(region: TrendRegion, forecastHours: RangeHours): Promis
         : 3_600_000;
 
     // `forecastHours` selects how much of the real forecast to *show*,
-    // not an actual-history window (see header comment) -- e.g. "1D"
-    // (24) plots only the first 24 real hourly steps `fetchEmissionsForecast`
+    // not an actual-history window (see header comment) -- e.g. "12h"
+    // (12) plots only the first 12 real hourly steps `fetchEmissionsForecast`
     // returned. Flagged (not silently truncated) if the real horizon is
     // actually shorter than what was requested.
     const shown = forecast.points.slice(0, forecastHours);
@@ -400,9 +406,6 @@ export function RealEmissionsTrend({
             <span className="inline-flex items-center gap-1.5">
               <span className="h-2.5 w-3.5 rounded-sm border border-sky-300/40 bg-sky-300/15" />
               Forecast P10-P90
-            </span>
-            <span className="ml-auto inline-flex items-center gap-1.5 rounded-full border border-sky-300/40 bg-sky-300/10 px-2 py-0.5 text-sky-200">
-              showing: {formatHoursLabel(data.forecastHoursShown)} of {data.forecastHorizonLabel} real horizon
             </span>
           </div>
 

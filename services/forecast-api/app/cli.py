@@ -757,8 +757,19 @@ def evaluate(
 @click.option(
     "--max-regression-pct",
     type=float,
-    default=2.0,
+    default=1.0,
     help="Max acceptable relative walk-forward MAPE regression vs. the unpruned version, in percent.",
+)
+@click.option(
+    "--recovery-epochs",
+    type=int,
+    default=None,
+    help=(
+        "Recovery-fine-tune epochs (default: Settings.prune_recovery_epochs, 20). "
+        "A more aggressive --keep-fraction may need more than the default to "
+        "converge within --max-regression-pct -- see Settings.prune_recovery_epochs' "
+        "own docstring for the measured 3-vs-20-epoch numbers this default replaced."
+    ),
 )
 @click.option(
     "--no-register",
@@ -772,6 +783,7 @@ def prune(
     regions: tuple[str, ...],
     keep_fraction: float,
     max_regression_pct: float,
+    recovery_epochs: int | None,
     no_register: bool,
 ) -> None:
     """Real structured pruning + fine-tune recovery for a registered LSTM
@@ -793,6 +805,7 @@ def prune(
                 resolved_regions,
                 keep_fraction,
                 settings=settings,
+                recovery_epochs=recovery_epochs,
                 max_relative_mape_regression_pct=max_regression_pct,
                 register=not no_register,
             )

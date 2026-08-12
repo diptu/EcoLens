@@ -93,13 +93,20 @@ type EmissionsSnapshot = {
   intensitySparkline: number[];
   labels: string[];
   fullLabels: string[];
-  /** Real `ts` of the most recent point in `sparkline` -- this card's
-   * own sparklines plot points index-by-index with no timestamp-aware
-   * gap logic (unlike `RealEmissionsTrend`'s Actual line), so a missing
-   * recent hour never renders as a visible break -- it just silently
-   * shifts the whole window backward in time instead, while the "last
-   * 24h" label keeps claiming to be current. This backs a real staleness
-   * caption instead of leaving that silent. */
+  /** Real epoch-ms timestamp per point, same order as `sparkline`/
+   * `intensitySparkline`/`labels` -- backs `Sparkline`'s real
+   * time-proportional x-axis (2026-08-11 fix, see that component's own
+   * `timestampsMs` docstring). `todayPoints.slice(-24)` takes the last
+   * 24 *array* entries, not the last 24 *calendar* hours -- a real
+   * ingestion gap means those 24 points can span meaningfully more than
+   * 24h (confirmed live: as much as 30h), and plotting them at even
+   * index spacing silently claimed a uniform hourly cadence that wasn't
+   * real. */
+  timestampsMs: number[];
+  /** Real `ts` of the most recent point in `sparkline` -- backs a real
+   * staleness caption when the whole window is behind live (the
+   * time-proportional x-axis above handles gaps *within* the window;
+   * this handles the window's own end lagging behind `now`). */
   latestPointIso: string;
 };
 
@@ -348,16 +355,26 @@ export default function ExecutiveDashboardPage() {
 
   // Real historical demand-backtest × real historical intensity, bucketed
   // by real day -- backs "Emission History"'s optional forecast band (see
-  // `CompactTrendPoint`'s own comment for the full methodology). Fixed
-  // real 7-day window, independent of `trendPeriod`'s own 7D/15D/30D
-  // selection (same "don't widen the expensive real fetch just because a
-  // wider actual-history window was picked" reasoning `RealEmissionsTrend`
-  // already applies) -- confirmed live: `region=NEM` over 30 real days
-  // took ~50s to compute uncached, well past this fetch's own timeout,
-  // while 7 real days stays a safe ~15s. A caption below the chart
-  // discloses the narrower real band window whenever a wider period is
-  // selected, rather than silently truncating with no explanation.
-  const HISTORICAL_BAND_DAYS = 7;
+  // `CompactTrendPoint`'s own comment for the full methodology). Matches
+  // `PERIOD_DAYS.30D` (the widest period the toggle above offers), not
+  // `trendPeriod`'s own currently-selected value -- fetched once,
+  // independent of which period is selected, so switching 7D/15D/30D
+  // never re-fetches; `periodTrendWithBand`'s join below only attaches a
+  // band to whichever dates are actually visible in the current period.
+  //
+  // 2026-08-11: previously fixed at a real 7-day window regardless of
+  // the selected period (`region=NEM` over 30 real days confirmed live
+  // at ~50s to compute uncached, well past this fetch's own timeout) --
+  // real user ask: "forecast should also show full historical forecast",
+  // not just the most recent week of whatever period was selected. Now
+  // safe to widen to the full 30 days because `GET /v1/forecast/
+  // recent-actual-vs-predicted?region=NEM&days=30` is kept warm
+  // server-side (`app.service.cache_warmer.run_recent_backtest_warmer`,
+  // forecast-api) -- confirmed live the uncached cost actually grew to
+  // ~158s as real history accumulated, making "warmed, never computed
+  // inline" the only viable way to widen this honestly rather than
+  // just raising the timeout and making a real user wait.
+  const HISTORICAL_BAND_DAYS = PERIOD_DAYS["30D"];
   const [historicalForecastByDate, setHistoricalForecastByDate] = useState<
     Map<string, { p10: number; p50: number; p90: number }>
   >(new Map());
@@ -751,6 +768,7 @@ export default function ExecutiveDashboardPage() {
           intensitySparkline: todayPoints.map((p) => Math.round(p.intensity_kgco2e_per_mwh ?? 0)),
           labels: todayPoints.map((p) => formatHourLabel(p.bucket)),
           fullLabels: todayPoints.map((p) => formatFullDateTime(p.bucket)),
+          timestampsMs: todayPoints.map((p) => new Date(p.bucket).getTime()),
           latestPointIso: todayPoints[todayPoints.length - 1].bucket,
         });
         // Full 3-day series, NOT sliced to the last 24h like
@@ -1060,6 +1078,7 @@ export default function ExecutiveDashboardPage() {
                   sparkline={emissionsSnapshot.sparkline}
                   labels={emissionsSnapshot.labels}
                   fullLabels={emissionsSnapshot.fullLabels}
+                  timestampsMs={emissionsSnapshot.timestampsMs}
                   unit="tCO₂e/h"
                   testId="emissions-sparkline"
                 />
@@ -1070,6 +1089,7 @@ export default function ExecutiveDashboardPage() {
                   sparkline={emissionsSnapshot.intensitySparkline}
                   labels={emissionsSnapshot.labels}
                   fullLabels={emissionsSnapshot.fullLabels}
+                  timestampsMs={emissionsSnapshot.timestampsMs}
                   unit="g/kWh"
                 />
                 <SnapshotStatBox
@@ -1243,14 +1263,6 @@ export default function ExecutiveDashboardPage() {
           ) : (
             <>
               <CompactTrendChart data={periodTrendWithBand ?? periodTrend} />
-              {PERIOD_DAYS[trendPeriod] > HISTORICAL_BAND_DAYS && (
-                <p className="mt-2 flex items-center gap-1.5 text-[11px] text-white/40">
-                  <Info className="h-3 w-3" />
-                  The forecast confidence band only covers the most recent {HISTORICAL_BAND_DAYS} real
-                  days — a real walk-forward re-forecast that wide gets expensive fast (confirmed
-                  live: 30 real days took ~50s to compute).
-                </p>
-              )}
               {periodTrendStats && (
                 <div className="mt-4 grid grid-cols-2 gap-4 border-t border-white/5 pt-4 text-[11px] md:grid-cols-4">
                   <div>
@@ -1362,11 +1374,13 @@ function Sparkline({
   data,
   labels,
   fullLabels,
+  timestampsMs,
   unit,
   strokeColor,
   testId,
   padLabels = false,
   rotateLabels = false,
+  maxLabels,
 }: {
   data: number[];
   labels: string[];
@@ -1377,25 +1391,67 @@ function Sparkline({
    * Snapshot's 24h window can cross a midnight boundary). Falls back to
    * `labels` when omitted. */
   fullLabels?: string[];
+  /** Real epoch-ms timestamp per point, same order as `data` -- when
+   * given, x-position is proportional to real elapsed time instead of
+   * even index spacing (2026-08-11 fix: a real ingestion gap means
+   * "N points" isn't the same as "N evenly-spaced points", so index
+   * spacing was silently claiming a uniform cadence between them that
+   * wasn't real -- see `EmissionsSnapshot.timestampsMs`'s own
+   * docstring for the confirmed-live example). Omitted falls back to
+   * this component's original even index spacing. */
+  timestampsMs?: number[];
   unit: string;
   strokeColor: string;
   testId?: string;
   padLabels?: boolean;
   rotateLabels?: boolean;
+  /** Real bug, confirmed live 2026-08-11: `padLabels`'s fixed "every
+   * 3rd of N" stride always produced 8 labels from a 24-point series
+   * regardless of how wide the card actually is -- fine at this
+   * component's original (wide) call site, but for an ~260px-wide card
+   * (`SnapshotStatBox`'s Emissions Snapshot use) 8 "HH:MM AM/PM"-length
+   * labels have nowhere near enough room even before `justify-between`
+   * enters the picture; `rotateLabels`'s CSS transform doesn't shrink a
+   * flex item's *layout* footprint, so 8 unrotated-width boxes still
+   * fought for the same ~260px and visually collided. `maxLabels`
+   * evenly samples down to a caller-chosen count (always including the
+   * first and last point) instead -- the actual fix, rotation stays
+   * available for genuinely short labels (this component's own
+   * original "+30m"/"+1h" use case) where the layout-footprint problem
+   * doesn't arise. */
+  maxLabels?: number;
 }) {
   const reduced = useReducedMotion();
   const w = 100, h = 60;
   const max = Math.max(...data, 1);
   const min = Math.min(...data, 0);
   const range = max - min || 1;
-  const stepX = w / (data.length - 1);
-  const points = data.map((v, i) => [i * stepX, h - ((v - min) / range) * (h - 4) - 2] as [number, number]);
+  // Real time-proportional x-axis when `timestampsMs` is given (see this
+  // component's own `timestampsMs` docstring); even index spacing
+  // otherwise, unchanged from before.
+  const xPositions: number[] =
+    timestampsMs && timestampsMs.length === data.length && data.length > 1
+      ? (() => {
+          const tMin = timestampsMs[0];
+          const tRange = timestampsMs[timestampsMs.length - 1] - tMin || 1;
+          return timestampsMs.map((t) => ((t - tMin) / tRange) * w);
+        })()
+      : data.map((_, i) => (i * w) / Math.max(1, data.length - 1));
+  const points = data.map((v, i) => [xPositions[i], h - ((v - min) / range) * (h - 4) - 2] as [number, number]);
   const pathD = points
     .map((p, i) => `${i === 0 ? "M" : "L"} ${p[0].toFixed(2)} ${p[1].toFixed(2)}`)
     .join(" ");
 
   const wrapRef = useRef<HTMLDivElement>(null);
   const [hover, setHover] = useState<{ x: number; y: number; idx: number } | null>(null);
+
+  // Kept fresh every render (not a `useEffect` dependency) so the
+  // mousemove listener below -- attached once and reused across
+  // re-renders -- always finds the nearest point against the *current*
+  // x-positions, even when a later fetch changes `timestampsMs` without
+  // changing `data.length`.
+  const xPositionsRef = useRef(xPositions);
+  xPositionsRef.current = xPositions;
 
   useEffect(() => {
     const el = wrapRef.current;
@@ -1404,7 +1460,17 @@ function Sparkline({
       const rect = el!.getBoundingClientRect();
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
-      const idx = Math.max(0, Math.min(data.length - 1, Math.round((x / rect.width) * (data.length - 1))));
+      const relX = (x / rect.width) * w;
+      const positions = xPositionsRef.current;
+      let idx = 0;
+      let nearestDist = Infinity;
+      for (let i = 0; i < positions.length; i++) {
+        const dist = Math.abs(positions[i] - relX);
+        if (dist < nearestDist) {
+          nearestDist = dist;
+          idx = i;
+        }
+      }
       setHover({ x, y, idx });
     }
     function onLeave() {
@@ -1421,10 +1487,19 @@ function Sparkline({
   const hoverLabel = hover ? (fullLabels?.[hover.idx] ?? labels[hover.idx]) : null;
   const hoverValue = hover ? data[hover.idx] : 0;
 
-  // Filter labels to avoid overlap
-  const visibleLabels = padLabels
-    ? labels.filter((_, i) => i % 3 === 0)
-    : labels;
+  // Filter labels to avoid overlap. `maxLabels` (evenly sampled,
+  // first+last always included) takes priority over the older fixed-
+  // stride `padLabels` when both are given -- see this component's own
+  // `maxLabels` docstring for why the fixed stride alone isn't enough
+  // for a narrow card.
+  const visibleLabels =
+    maxLabels && maxLabels < labels.length
+      ? Array.from({ length: maxLabels }, (_, k) =>
+          labels[Math.round((k * (labels.length - 1)) / (maxLabels - 1))],
+        )
+      : padLabels
+        ? labels.filter((_, i) => i % 3 === 0)
+        : labels;
 
   return (
     <div ref={wrapRef} className="relative mt-3 h-16 w-full" data-testid={testId}>
@@ -1449,8 +1524,8 @@ function Sparkline({
             transition={{ duration: 0.1 }}
           >
             <line
-              x1={hover.idx * stepX}
-              x2={hover.idx * stepX}
+              x1={xPositions[hover.idx]}
+              x2={xPositions[hover.idx]}
               y1={0}
               y2={h}
               stroke="rgba(132,204,22,0.4)"
@@ -1458,7 +1533,7 @@ function Sparkline({
               strokeDasharray="1 1"
             />
             <circle
-              cx={hover.idx * stepX}
+              cx={xPositions[hover.idx]}
               cy={h - ((hoverValue - min) / range) * (h - 4) - 2}
               r={1.5}
               fill={strokeColor}
@@ -1467,17 +1542,32 @@ function Sparkline({
             />
           </m.g>
         )}
-        {/* Invisible hit areas for easier hovering */}
-        {data.map((_, i) => (
-          <rect
-            key={i}
-            x={i * stepX - stepX / 2}
-            y={0}
-            width={stepX}
-            height={h}
-            fill="transparent"
-          />
-        ))}
+        {/* Invisible hit areas for easier hovering -- boundaries are the
+            midpoints between neighboring (possibly unevenly time-spaced,
+            see `xPositions` above) points, not a constant width, so a
+            hover target still lines up with its own point rather than a
+            stale fixed-step slot. */}
+        {data.map((_, i) => {
+          const half = data.length < 2 ? w / 2 : undefined;
+          const left =
+            i === 0
+              ? xPositions[0] - (half ?? (xPositions[1] - xPositions[0]) / 2)
+              : (xPositions[i - 1] + xPositions[i]) / 2;
+          const right =
+            i === data.length - 1
+              ? xPositions[i] + (half ?? (xPositions[i] - xPositions[i - 1]) / 2)
+              : (xPositions[i] + xPositions[i + 1]) / 2;
+          return (
+            <rect
+              key={i}
+              x={left}
+              y={0}
+              width={Math.max(0, right - left)}
+              height={h}
+              fill="transparent"
+            />
+          );
+        })}
       </svg>
       {/* Labels -- rotated 90° when the chart has many short-interval
           steps (e.g. Demand Forecast Preview's "now/+30m/+1h/..."),
@@ -1485,13 +1575,32 @@ function Sparkline({
       <div
         className={cn(
           "mt-2 flex text-[11px] text-white/50",
-          rotateLabels ? "h-9 items-start justify-between" : "items-center justify-between",
+          // Real bug, confirmed live 2026-08-11: `h-9` (36px) reserved
+          // less layout height than an "HH:MM AM/PM"-length label
+          // actually renders at once rotated 90° (~50-55px at this
+          // 11px font) -- rotation is a visual transform only, so the
+          // *box* stayed 36px tall while the *text* spilled past it
+          // into whatever sat below (the next `SnapshotStatBox`'s icon
+          // row). `h-16` matches the sparkline's own height above it.
+          rotateLabels ? "h-16 items-start justify-between" : "items-center justify-between",
         )}
       >
         {visibleLabels.map((l, i) => (
           <span
             key={i}
-            className={rotateLabels ? "origin-top-left translate-y-1 whitespace-nowrap rotate-90" : undefined}
+            // `whitespace-nowrap` unconditionally now, not just when
+            // rotated -- real bug, confirmed live 2026-08-11: the
+            // default (horizontal) branch let a label like "03:00 PM"
+            // wrap internally ("03:00" / "PM" on separate lines) once
+            // `justify-between` squeezed its flex slot narrow, which
+            // then visually ran together with its neighbors' wrapped
+            // halves into an unreadable concatenated mess. `maxLabels`
+            // (above) is the real fix for *this* card's width; nowrap
+            // is still correct defensively for any other narrow caller.
+            className={cn(
+              "whitespace-nowrap",
+              rotateLabels && "origin-top-left translate-y-1 rotate-90",
+            )}
           >
             {l}
           </span>
@@ -2060,6 +2169,7 @@ function SnapshotStatBox({
   sparkline,
   labels,
   fullLabels,
+  timestampsMs,
   unit,
   testId,
 }: {
@@ -2069,6 +2179,7 @@ function SnapshotStatBox({
   sparkline?: number[];
   labels?: string[];
   fullLabels?: string[];
+  timestampsMs?: number[];
   unit?: string;
   testId?: string;
 }) {
@@ -2086,10 +2197,21 @@ function SnapshotStatBox({
           data={sparkline}
           labels={labels}
           fullLabels={fullLabels}
+          timestampsMs={timestampsMs}
           unit={unit ?? ""}
           strokeColor="#34d399"
           testId={testId}
-          padLabels
+          // Real bug, confirmed live 2026-08-11: `padLabels`'s fixed
+          // "every 3rd of 24" stride always showed 8 "HH:MM AM/PM"
+          // labels here regardless of this card's ~260px width --
+          // nowhere near enough room, so each label's own text wrapped
+          // internally ("03:00" / "PM" on separate lines) and
+          // `justify-between` packed the wrapped halves together into
+          // unreadable concatenated rows ("03:0006:0009:00..."),
+          // visually reading as broken/garbled chart rendering. 4 evenly
+          // sampled labels actually fits; see `Sparkline`'s own
+          // `maxLabels` docstring for why rotation alone wasn't enough.
+          maxLabels={4}
         />
       )}
     </div>

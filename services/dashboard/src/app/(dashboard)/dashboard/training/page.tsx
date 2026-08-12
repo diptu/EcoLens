@@ -19,9 +19,16 @@
  * implied. "Hyperparameter Tuning" is real now too (`POST /v1/
  * model/tune` triggers `ml/tune.py`'s real grid search; `GET /v1/
  * model/tuning-runs` lists real MLflow runs tagged `tuning=true`).
- * Feature-store listings and deployment status still have no backing
- * endpoint anywhere in this platform — those stay illustrative,
- * honestly marked (`IllustrativeBadge`) instead of presented as real.
+ * "Deployments" is real now too (2026-08-11): this platform's actual
+ * "deploy" action is `POST /v1/model/versions/{version}/promote`, so a
+ * version's registry `stage` (Production/Staging) already *is* its
+ * deployment status -- `GET /v1/model/versions` per architecture plus
+ * `GET /v1/model` (which version this process has actually loaded)
+ * needed no new endpoint, just honest framing instead of the old
+ * fabricated replica/CPU/traffic mock. The Feature Store tab is gone
+ * outright (not illustrative-marked) -- this platform has no
+ * feature-group store, registered or otherwise, so there was no real
+ * concept left to honestly represent even as a placeholder.
  */
 "use client";
 
@@ -29,23 +36,23 @@ import { useEffect, useMemo, useState } from "react";
 import { Beaker, Play, Clock } from "lucide-react";
 
 import { Card } from "@/components/dashboard/card";
-import { IllustrativeBadge } from "@/components/dashboard/illustrative-badge";
 import { cn } from "@/lib/utils";
 import {
   fetchModelVersions,
   fetchMlflowExperiments,
   fetchMlflowRuns,
   fetchTuningRuns,
+  fetchModelInfo,
   triggerTune,
   MODEL_ARCHITECTURES,
   type ModelVersion,
+  type ModelInfo,
   type MlflowExperiment,
   type MlflowRun,
   type TuningRun,
   type TuneTriggerResult,
 } from "@/lib/emissions";
 import { fetchTrainingRuns, formatRelativeTime, type TrainingRunLog } from "@/lib/ingestion";
-import { getFeatureGroups, getDeployments } from "@/lib/dashboards";
 
 function useModelVersions() {
   const [versions, setVersions] = useState<ModelVersion[] | null>(null);
@@ -131,6 +138,76 @@ function useMlflowRuns(limit: number) {
   return { runs, error };
 }
 
+function useServingModel() {
+  const [info, setInfo] = useState<ModelInfo | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchModelInfo()
+      .then((res) => {
+        if (!cancelled) setInfo(res);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : "failed to load");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return { info, error };
+}
+
+type DeployedVersion = {
+  architecture: string;
+  modelName: string;
+  version: string;
+  stage: string;
+  created_at: string;
+  metrics: Record<string, number>;
+};
+
+/** Real "deployments": this platform's own deploy action is `POST
+ * /v1/model/versions/{version}/promote`, so a version's registry
+ * `stage` already tells you whether (and where) it's deployed --
+ * Production and Staging both count, Archived/None don't. Fetches
+ * every registered architecture's versions and keeps only the
+ * deployed ones. */
+function useDeployments() {
+  const [rows, setRows] = useState<DeployedVersion[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all(MODEL_ARCHITECTURES.map((a) => fetchModelVersions(a.modelName)))
+      .then((results) => {
+        if (cancelled) return;
+        const deployed = results.flatMap((res, i) =>
+          res.data
+            .filter((v) => v.stage === "Production" || v.stage === "Staging")
+            .map((v) => ({
+              architecture: MODEL_ARCHITECTURES[i].label,
+              modelName: MODEL_ARCHITECTURES[i].modelName,
+              version: v.version,
+              stage: v.stage,
+              created_at: v.created_at,
+              metrics: v.metrics,
+            })),
+        );
+        setRows(deployed);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : "failed to load");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return { rows, error };
+}
+
 function useTuningRuns() {
   const [runs, setRuns] = useState<TuningRun[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -159,6 +236,8 @@ export default function TrainingPage() {
   const { experiments, error: experimentsError } = useMlflowExperiments();
   const { runs: mlflowRuns, error: mlflowRunsError } = useMlflowRuns(8);
   const { runs: tuningRuns, reload: reloadTuningRuns } = useTuningRuns();
+  const { info: servingModel, error: servingModelError } = useServingModel();
+  const { rows: deployments, error: deploymentsError } = useDeployments();
   const [tuneStatus, setTuneStatus] = useState<
     { state: "idle" } | { state: "running" } | { state: "error"; message: string } | { state: "done"; result: TuneTriggerResult }
   >({ state: "idle" });
@@ -175,16 +254,7 @@ export default function TrainingPage() {
       });
   }
 
-  // Feature Store / Deployments have no real backing concept anywhere
-  // in this platform (no registered feature-group store, no replica/
-  // traffic tracking for this single-process CPU-serving setup) -- see
-  // this page's own module docstring. Kept as static sample content
-  // (not deleted) so the tabs still show what the real thing would look
-  // like, `IllustrativeBadge`-marked per this app's own convention.
-  const featureGroups = useMemo(() => getFeatureGroups(), []);
-  const deployments = useMemo(() => getDeployments(), []);
-
-  const [tab, setTab] = useState<"jobs" | "hptune" | "experiments" | "datasets" | "deployments">("jobs");
+  const [tab, setTab] = useState<"jobs" | "hptune" | "experiments" | "deployments">("jobs");
 
   const kpis = useMemo(() => {
     const runningCount = runs?.filter((r) => r.status === "running").length ?? null;
@@ -204,7 +274,7 @@ export default function TrainingPage() {
           Model Training &amp; Experiments
         </h1>
         <p className="mt-1 text-sm text-white/60">
-          Train, tune, and track ML models. Hyperparameter search, experiment comparison, and feature store integration.
+          Train, tune, and track ML models. Hyperparameter search, experiment comparison, and deployment status.
         </p>
       </div>
 
@@ -225,7 +295,6 @@ export default function TrainingPage() {
           { id: "jobs",        label: "Training Jobs"   },
           { id: "hptune",      label: "Hyperparameter Tuning" },
           { id: "experiments", label: "Experiments"     },
-          { id: "datasets",    label: "Feature Store"   },
           { id: "deployments", label: "Deployments"     },
         ] as const).map((t) => (
           <button
@@ -281,6 +350,44 @@ export default function TrainingPage() {
                         )}>{r.status}</span>
                       </td>
                       <td className="py-2 font-mono text-[11px] text-purple-200">{r.model_version ?? "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </Card>
+
+          <Card>
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="text-base font-semibold text-white">Model Registry</h2>
+              <span className="text-[11px] text-white/40">GET /v1/model/versions (forecast-api)</span>
+            </div>
+            {versionsError ? (
+              <p className="py-6 text-center text-sm text-white/40">Couldn&apos;t load model versions ({versionsError}).</p>
+            ) : versions === null ? (
+              <p className="py-6 text-center text-sm text-white/40">Loading…</p>
+            ) : versions.length === 0 ? (
+              <p className="text-sm text-white/55">No registered versions yet.</p>
+            ) : (
+              <table className="w-full text-left text-sm">
+                <thead className="border-b border-white/5 text-[11px] uppercase tracking-wide text-white/40">
+                  <tr><th className="py-2">Version</th><th className="py-2">Stage</th><th className="py-2">Created</th><th className="py-2">Metrics</th></tr>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {versions.map((v) => (
+                    <tr key={v.version} className="text-white/85">
+                      <td className="py-2"><span className="rounded bg-purple-300/15 px-1.5 py-0.5 font-mono text-[11px] text-purple-200">v{v.version}</span></td>
+                      <td className="py-2">
+                        <span className={cn("rounded-md border px-2 py-0.5 text-[11px] font-medium",
+                          v.stage === "Production" ? "border-emerald-200/40 bg-emerald-200/10 text-emerald-100" :
+                          v.stage === "Staging"    ? "border-amber-300/40 bg-amber-300/10 text-amber-200" :
+                                                      "border-white/10 bg-white/5 text-white/60"
+                        )}>{v.stage}</span>
+                      </td>
+                      <td className="py-2 text-white/60">{formatRelativeTime(v.created_at)}</td>
+                      <td className="py-2 text-emerald-100 tabular-nums text-[11px]">
+                        {v.metrics.test_mape != null ? `MAPE ${v.metrics.test_mape.toFixed(2)}%` : "—"}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -466,58 +573,91 @@ export default function TrainingPage() {
         </div>
       )}
 
-      {tab === "datasets" && (
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+      {tab === "deployments" && (
+        <div className="space-y-4">
           <Card>
             <div className="mb-3 flex items-center justify-between">
-              <h2 className="text-base font-semibold text-white">Feature Groups</h2>
-              <IllustrativeBadge label="No feature-store listing endpoint exists yet" />
+              <h2 className="text-base font-semibold text-white">Currently Serving</h2>
+              <span className="text-[11px] text-white/40">GET /v1/model (forecast-api)</span>
             </div>
-            <ul className="space-y-1.5 text-sm opacity-60">
-              {featureGroups.map((f) => (
-                <li key={f.id} className="rounded-md border border-white/5 bg-white/[0.02] p-2.5">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <div className="text-white/85 font-mono">{f.name}</div>
-                      <div className="text-[11px] text-white/50">Entity: {f.entity} · {f.features} features</div>
-                    </div>
-                    <div className="text-[11px] text-white/60">{f.last_materialized}</div>
+            {servingModelError ? (
+              <p className="py-6 text-center text-sm text-white/40">Couldn&apos;t load serving model ({servingModelError}).</p>
+            ) : servingModel === null ? (
+              <p className="py-6 text-center text-sm text-white/40">Loading…</p>
+            ) : servingModel.status === "not_loaded" ? (
+              <p className="text-sm text-white/55">No model currently loaded ({servingModel.name}).</p>
+            ) : (
+              <div className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
+                <div>
+                  <div className="text-[11px] uppercase tracking-wide text-white/40">Model</div>
+                  <div className="mt-0.5 text-white/85">{servingModel.name}</div>
+                </div>
+                <div>
+                  <div className="text-[11px] uppercase tracking-wide text-white/40">Version / Stage</div>
+                  <div className="mt-0.5 flex items-center gap-1.5">
+                    <span className="rounded bg-purple-300/15 px-1.5 py-0.5 font-mono text-[11px] text-purple-200">v{servingModel.version}</span>
+                    <span className={cn("rounded-md border px-2 py-0.5 text-[11px] font-medium",
+                      servingModel.stage === "Production" ? "border-emerald-200/40 bg-emerald-200/10 text-emerald-100" :
+                      servingModel.stage === "Staging"    ? "border-amber-300/40 bg-amber-300/10 text-amber-200" :
+                                                            "border-white/10 bg-white/5 text-white/60"
+                    )}>{servingModel.stage}</span>
                   </div>
-                </li>
-              ))}
-            </ul>
+                </div>
+                <div>
+                  <div className="text-[11px] uppercase tracking-wide text-white/40">Loaded</div>
+                  <div className="mt-0.5 text-white/85">{servingModel.loaded_at ? formatRelativeTime(servingModel.loaded_at) : "—"}</div>
+                </div>
+                <div>
+                  <div className="text-[11px] uppercase tracking-wide text-white/40">Git SHA</div>
+                  <div className="mt-0.5 font-mono text-[11px] text-white/70">{servingModel.git_sha ? servingModel.git_sha.slice(0, 8) : "—"}</div>
+                </div>
+              </div>
+            )}
           </Card>
 
           <Card>
             <div className="mb-3 flex items-center justify-between">
-              <h2 className="text-base font-semibold text-white">Model Registry</h2>
-              <span className="text-[11px] text-white/40">GET /v1/model/versions (forecast-api)</span>
+              <h2 className="text-base font-semibold text-white">Deployed Versions</h2>
+              <span className="text-[11px] text-white/40">GET /v1/model/versions × {MODEL_ARCHITECTURES.length} architectures</span>
             </div>
-            {versionsError ? (
-              <p className="py-6 text-center text-sm text-white/40">Couldn&apos;t load model versions ({versionsError}).</p>
-            ) : versions === null ? (
+            <p className="mb-3 text-[11px] text-white/50">
+              This platform&apos;s deploy action is promoting a registered version to Production
+              or Staging (<code>POST /v1/model/versions/{"{version}"}/promote</code>) — a version&apos;s
+              registry stage is its real deployment status. There&apos;s no multi-replica/traffic-split
+              layer in front of this single-process serving setup, so replica count, CPU%, and
+              traffic split aren&apos;t shown here.
+            </p>
+            {deploymentsError ? (
+              <p className="py-6 text-center text-sm text-white/40">Couldn&apos;t load deployed versions ({deploymentsError}).</p>
+            ) : deployments === null ? (
               <p className="py-6 text-center text-sm text-white/40">Loading…</p>
-            ) : versions.length === 0 ? (
-              <p className="text-sm text-white/55">No registered versions yet.</p>
+            ) : deployments.length === 0 ? (
+              <p className="text-sm text-white/55">No versions currently in Production or Staging.</p>
             ) : (
               <table className="w-full text-left text-sm">
                 <thead className="border-b border-white/5 text-[11px] uppercase tracking-wide text-white/40">
-                  <tr><th className="py-2">Version</th><th className="py-2">Stage</th><th className="py-2">Created</th><th className="py-2">Metrics</th></tr>
+                  <tr>
+                    <th className="py-2">Architecture</th>
+                    <th className="py-2">Version</th>
+                    <th className="py-2">Stage</th>
+                    <th className="py-2">Deployed</th>
+                    <th className="py-2">Metrics</th>
+                  </tr>
                 </thead>
                 <tbody className="divide-y divide-white/5">
-                  {versions.map((v) => (
-                    <tr key={v.version} className="text-white/85">
-                      <td className="py-2"><span className="rounded bg-purple-300/15 px-1.5 py-0.5 font-mono text-[11px] text-purple-200">v{v.version}</span></td>
+                  {deployments.map((d) => (
+                    <tr key={`${d.modelName}-${d.version}`} className="text-white/85">
+                      <td className="py-2">{d.architecture}</td>
+                      <td className="py-2 font-mono text-[11px] text-purple-200">v{d.version}</td>
                       <td className="py-2">
                         <span className={cn("rounded-md border px-2 py-0.5 text-[11px] font-medium",
-                          v.stage === "Production" ? "border-emerald-200/40 bg-emerald-200/10 text-emerald-100" :
-                          v.stage === "Staging"    ? "border-amber-300/40 bg-amber-300/10 text-amber-200" :
-                                                      "border-white/10 bg-white/5 text-white/60"
-                        )}>{v.stage}</span>
+                          d.stage === "Production" ? "border-emerald-200/40 bg-emerald-200/10 text-emerald-100" :
+                                                      "border-amber-300/40 bg-amber-300/10 text-amber-200"
+                        )}>{d.stage}</span>
                       </td>
-                      <td className="py-2 text-white/60">{formatRelativeTime(v.created_at)}</td>
+                      <td className="py-2 text-white/60">{formatRelativeTime(d.created_at)}</td>
                       <td className="py-2 text-emerald-100 tabular-nums text-[11px]">
-                        {v.metrics.test_mape != null ? `MAPE ${v.metrics.test_mape.toFixed(2)}%` : "—"}
+                        {d.metrics.test_mape != null ? `MAPE ${d.metrics.test_mape.toFixed(2)}%` : "—"}
                       </td>
                     </tr>
                   ))}
@@ -526,47 +666,6 @@ export default function TrainingPage() {
             )}
           </Card>
         </div>
-      )}
-
-      {tab === "deployments" && (
-        <Card>
-          <div className="mb-3 flex items-center justify-between">
-            <h2 className="text-base font-semibold text-white">Active Deployments</h2>
-            <IllustrativeBadge label="No deployment-status endpoint exists yet" />
-          </div>
-          <table className="w-full text-left text-sm opacity-60">
-            <thead className="border-b border-white/5 text-[11px] uppercase tracking-wide text-white/40">
-              <tr>
-                <th className="py-2">Model</th>
-                <th className="py-2">Version</th>
-                <th className="py-2">Environment</th>
-                <th className="py-2">Replicas</th>
-                <th className="py-2">CPU%</th>
-                <th className="py-2">P95 (ms)</th>
-                <th className="py-2">Traffic</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-white/5">
-              {deployments.map((d) => (
-                <tr key={d.id} className="text-white/85">
-                  <td className="py-2">{d.model}</td>
-                  <td className="py-2 font-mono text-[11px] text-purple-200">{d.version}</td>
-                  <td className="py-2">
-                    <span className={cn("rounded-md border px-2 py-0.5 text-[11px] font-medium",
-                      d.environment === "production" ? "border-emerald-200/40 bg-emerald-200/10 text-emerald-100" :
-                      d.environment === "canary"     ? "border-cyan-300/40 bg-cyan-300/10 text-cyan-200" :
-                                                        "border-amber-300/40 bg-amber-300/10 text-amber-200"
-                    )}>{d.environment}</span>
-                  </td>
-                  <td className="py-2 text-white/60">{d.replicas}</td>
-                  <td className="py-2 text-white/60 tabular-nums">{d.cpu_pct}%</td>
-                  <td className="py-2 text-white/60 tabular-nums">{d.latency_p95_ms}</td>
-                  <td className="py-2 text-emerald-100 tabular-nums">{d.traffic_pct}%</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </Card>
       )}
     </div>
   );

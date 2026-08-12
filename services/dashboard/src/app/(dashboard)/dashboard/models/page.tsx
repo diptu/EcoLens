@@ -30,20 +30,27 @@ import {
 } from "lucide-react";
 
 import { Card } from "@/components/dashboard/card";
-import { PALETTE, RadarChart } from "@/components/dashboard/charts";
+import { LineChart, PALETTE, RadarChart } from "@/components/dashboard/charts";
 import { ArcGauge } from "@/components/dashboard/gauge";
 import { cn } from "@/lib/utils";
 import {
   deleteModelVersion,
+  fetchLossCurve,
   fetchModelEvaluation,
   fetchModelEvaluationHistory,
   fetchModelVersions,
-  pollForNewModelVersion,
   promoteModelVersion,
+  type LossCurve,
   type ModelVersion,
   type RegionEvaluation,
 } from "@/lib/emissions";
-import { formatRelativeTime, triggerTraining, type TrainTrigger } from "@/lib/ingestion";
+import {
+  formatRelativeTime,
+  pollForTrainingRun,
+  triggerTraining,
+  type TrainingRunLog,
+  type TrainTrigger,
+} from "@/lib/ingestion";
 
 type Tab = "registry" | "comparison" | "train" | "fine-tune";
 
@@ -265,18 +272,70 @@ export default function AdminModelsPage() {
       {tab === "comparison" && <ComparisonTab />}
 
       {/* ── Train tab ────────────────────────────────────────── */}
-      {tab === "train" && <TrainForm />}
+      {tab === "train" && (
+        <div className="space-y-3">
+          <div
+            className="flex flex-wrap gap-1"
+            role="tablist"
+            aria-label="Model to train"
+            data-testid="train-architecture-selector"
+          >
+            {MODEL_ARCHITECTURES.map((arch) => (
+              <TabButton
+                key={arch.modelName}
+                active={architecture === arch.modelName}
+                onClick={() => setArchitecture(arch.modelName)}
+                data-testid={`train-architecture-${arch.modelName}`}
+              >
+                {arch.label}
+              </TabButton>
+            ))}
+          </div>
+          <TrainForm
+            architecture={architecture}
+            architectureLabel={
+              MODEL_ARCHITECTURES.find((a) => a.modelName === architecture)?.label ?? architecture
+            }
+            // Unlike Fine-tune, deliberately does NOT switch to the
+            // Registry tab on success -- this tab's own "Training vs
+            // validation loss" card below the form is the whole reason
+            // to stay here and see the run that was just triggered.
+            onNewVersion={(fresh) => refreshVersions(fresh)}
+          />
+        </div>
+      )}
 
       {/* ── Fine-tune tab ───────────────────────────────────── */}
       {tab === "fine-tune" && (
-        <FineTuneForm
-          currentVersion={versions?.[0]?.version ?? null}
-          architecture={architecture}
-          onNewVersion={(fresh) => {
-            refreshVersions(fresh);
-            setTab("registry");
-          }}
-        />
+        <div className="space-y-3">
+          <div
+            className="flex flex-wrap gap-1"
+            role="tablist"
+            aria-label="Model to fine-tune"
+            data-testid="finetune-architecture-selector"
+          >
+            {MODEL_ARCHITECTURES.map((arch) => (
+              <TabButton
+                key={arch.modelName}
+                active={architecture === arch.modelName}
+                onClick={() => setArchitecture(arch.modelName)}
+                data-testid={`finetune-architecture-${arch.modelName}`}
+              >
+                {arch.label}
+              </TabButton>
+            ))}
+          </div>
+          <FineTuneForm
+            architecture={architecture}
+            architectureLabel={
+              MODEL_ARCHITECTURES.find((a) => a.modelName === architecture)?.label ?? architecture
+            }
+            onNewVersion={(fresh) => {
+              refreshVersions(fresh);
+              setTab("registry");
+            }}
+          />
+        </div>
       )}
     </div>
   );
@@ -321,6 +380,12 @@ function TabButton({
 // labeled `metricsSource: "training"`, and Stability stays `null`
 // (rendered as "not enough evaluation history yet") until `evaluate`
 // has actually been run at least twice for that version.
+//
+// Each side independently picks an architecture *and* a version
+// (2026-08-11) -- both sides can be the same architecture, so this
+// covers "LSTM v7 vs v8" as well as "LSTM vs TFT". Leaving a side's
+// version on "Auto" keeps the original default (current Production,
+// else the newest registered version).
 // ────────────────────────────────────────────────────────────────────
 
 type ComparisonCandidate = {
@@ -336,15 +401,45 @@ type ComparisonCandidate = {
   driftRunCount: number;
 };
 
+/** `candidate.label` alone is ambiguous once both comparison sides can
+ * be the same architecture (e.g. LSTM v7 vs LSTM v8) -- used anywhere
+ * the two candidates are named side by side outside their own score
+ * cards (which already show version separately). */
+function candidateDisplayName(candidate: ComparisonCandidate | null): string {
+  if (!candidate) return "—";
+  return candidate.version ? `${candidate.label} v${candidate.version.version}` : candidate.label;
+}
+
 function average(values: number[]): number | null {
   const finite = values.filter((v) => Number.isFinite(v));
   if (finite.length === 0) return null;
   return finite.reduce((a, b) => a + b, 0) / finite.length;
 }
 
+/** Real registry version list for one architecture -- split out from
+ * `loadComparisonCandidate` (2026-08-11) so `ComparisonTab` can
+ * populate a per-side version picker *before* deciding which version's
+ * metrics to load, letting a user compare two versions of the *same*
+ * architecture (e.g. LSTM v7 vs v8), not just two different
+ * architectures. `[]` on a failed/empty fetch, same as the old inline
+ * try/catch. */
+async function fetchComparisonVersions(modelName: string): Promise<ModelVersion[]> {
+  try {
+    return (await fetchModelVersions(modelName)).data;
+  } catch {
+    return [];
+  }
+}
+
 async function loadComparisonCandidate(
   modelName: string,
   label: string,
+  versions: ModelVersion[],
+  /** A specific version string to compare, or `null`/`""` for the old
+   * default (current Production, else the newest registered). Passing
+   * an explicit version lets the two sides of the comparison be the
+   * same architecture at different versions. */
+  selectedVersion: string | null,
 ): Promise<ComparisonCandidate> {
   const base: ComparisonCandidate = {
     modelName,
@@ -359,15 +454,12 @@ async function loadComparisonCandidate(
     driftRunCount: 0,
   };
 
-  let versions: ModelVersion[];
-  try {
-    versions = (await fetchModelVersions(modelName)).data;
-  } catch {
-    return base;
-  }
   if (versions.length === 0) return base;
 
-  const version = versions.find((v) => v.stage === "Production") ?? versions[0];
+  const version =
+    (selectedVersion ? versions.find((v) => v.version === selectedVersion) : null) ??
+    versions.find((v) => v.stage === "Production") ??
+    versions[0];
   base.version = version;
   const primaryCandidateName = `${modelName}_v${version.version}`;
   base.primaryCandidateName = primaryCandidateName;
@@ -487,6 +579,12 @@ function overallScore(scores: Array<number | null>): number | null {
 function ComparisonTab() {
   const [modelNameA, setModelNameA] = useState<string>(MODEL_ARCHITECTURES[1].modelName); // TFT
   const [modelNameB, setModelNameB] = useState<string>(MODEL_ARCHITECTURES[0].modelName); // LSTM
+  // "" = auto (current Production, else newest) -- same default the old
+  // hardcoded pick used, now just expressed as "no explicit choice".
+  const [selectedVersionA, setSelectedVersionA] = useState<string>("");
+  const [selectedVersionB, setSelectedVersionB] = useState<string>("");
+  const [versionsA, setVersionsA] = useState<ModelVersion[]>([]);
+  const [versionsB, setVersionsB] = useState<ModelVersion[]>([]);
   const [loading, setLoading] = useState(true);
   const [candA, setCandA] = useState<ComparisonCandidate | null>(null);
   const [candB, setCandB] = useState<ComparisonCandidate | null>(null);
@@ -496,14 +594,20 @@ function ComparisonTab() {
     setLoading(true);
     const labelA = MODEL_ARCHITECTURES.find((a) => a.modelName === modelNameA)?.label ?? modelNameA;
     const labelB = MODEL_ARCHITECTURES.find((a) => a.modelName === modelNameB)?.label ?? modelNameB;
-    Promise.all([
-      loadComparisonCandidate(modelNameA, labelA),
-      loadComparisonCandidate(modelNameB, labelB),
-    ])
-      .then(([a, b]) => {
-        if (!cancelled) {
-          setCandA(a);
-          setCandB(b);
+    Promise.all([fetchComparisonVersions(modelNameA), fetchComparisonVersions(modelNameB)])
+      .then(([vA, vB]) => {
+        if (cancelled) return null;
+        setVersionsA(vA);
+        setVersionsB(vB);
+        return Promise.all([
+          loadComparisonCandidate(modelNameA, labelA, vA, selectedVersionA),
+          loadComparisonCandidate(modelNameB, labelB, vB, selectedVersionB),
+        ]);
+      })
+      .then((result) => {
+        if (!cancelled && result) {
+          setCandA(result[0]);
+          setCandB(result[1]);
         }
       })
       .finally(() => {
@@ -512,7 +616,7 @@ function ComparisonTab() {
     return () => {
       cancelled = true;
     };
-  }, [modelNameA, modelNameB]);
+  }, [modelNameA, modelNameB, selectedVersionA, selectedVersionB]);
 
   const accA = accuracyScore(candA?.accuracyMape ?? null);
   const accB = accuracyScore(candB?.accuracyMape ?? null);
@@ -535,14 +639,24 @@ function ComparisonTab() {
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_1fr_320px]">
         <ComparisonPicker
           value={modelNameA}
-          onChange={setModelNameA}
-          exclude={modelNameB}
+          onChange={(v) => {
+            setModelNameA(v);
+            setSelectedVersionA("");
+          }}
+          versionValue={selectedVersionA}
+          onVersionChange={setSelectedVersionA}
+          versions={versionsA}
           testId="comparison-select-a"
         />
         <ComparisonPicker
           value={modelNameB}
-          onChange={setModelNameB}
-          exclude={modelNameA}
+          onChange={(v) => {
+            setModelNameB(v);
+            setSelectedVersionB("");
+          }}
+          versionValue={selectedVersionB}
+          onVersionChange={setSelectedVersionB}
+          versions={versionsB}
           testId="comparison-select-b"
         />
         <div />
@@ -561,6 +675,7 @@ function ComparisonTab() {
             stabilityScore={stabA}
             leading={leading === "A"}
             color={PALETTE.green}
+            side="a"
           />
           <ComparisonScoreCard
             candidate={candB}
@@ -571,6 +686,7 @@ function ComparisonTab() {
             stabilityScore={stabB}
             leading={leading === "B"}
             color={PALETTE.sky}
+            side="b"
           />
           <RecommendationPanel
             candA={candA}
@@ -598,8 +714,8 @@ function ComparisonTab() {
               axes={["Accuracy", "Reliability", "Consistency", "Stability"]}
               maxValue={100}
               series={[
-                { name: candA?.label ?? "A", color: PALETTE.green, values: [accA ?? 0, relA ?? 0, consA ?? 0, stabA ?? 0] },
-                { name: candB?.label ?? "B", color: PALETTE.sky, values: [accB ?? 0, relB ?? 0, consB ?? 0, stabB ?? 0] },
+                { name: candidateDisplayName(candA), color: PALETTE.green, values: [accA ?? 0, relA ?? 0, consA ?? 0, stabA ?? 0] },
+                { name: candidateDisplayName(candB), color: PALETTE.sky, values: [accB ?? 0, relB ?? 0, consB ?? 0, stabB ?? 0] },
               ]}
             />
             <p className="mt-3 text-[10px] leading-relaxed text-white/40">
@@ -616,15 +732,17 @@ function ComparisonTab() {
 }
 
 function ComparisonPicker({
-  value, onChange, exclude, testId,
+  value, onChange, versionValue, onVersionChange, versions, testId,
 }: {
   value: string;
   onChange: (v: string) => void;
-  exclude: string;
+  versionValue: string;
+  onVersionChange: (v: string) => void;
+  versions: ModelVersion[];
   testId: string;
 }) {
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex flex-wrap items-center gap-2">
       <label className="text-[10px] font-semibold uppercase tracking-wider text-white/40">
         Compare
       </label>
@@ -634,9 +752,25 @@ function ComparisonPicker({
         data-testid={testId}
         className="rounded-md border border-white/10 bg-white/[0.04] px-2.5 py-1.5 text-sm text-white focus:border-emerald-200/60 focus:outline-none"
       >
-        {MODEL_ARCHITECTURES.filter((a) => a.modelName !== exclude).map((a) => (
+        {MODEL_ARCHITECTURES.map((a) => (
           <option key={a.modelName} value={a.modelName} className="bg-[#0a1410]">
             {a.label}
+          </option>
+        ))}
+      </select>
+      {/* Same architecture on both sides is a valid comparison now
+          (e.g. LSTM v7 vs v8) -- this select just picks which of that
+          architecture's real registered versions to load. */}
+      <select
+        value={versionValue}
+        onChange={(e) => onVersionChange(e.target.value)}
+        data-testid={`${testId}-version`}
+        className="rounded-md border border-white/10 bg-white/[0.04] px-2.5 py-1.5 text-sm text-white focus:border-emerald-200/60 focus:outline-none"
+      >
+        <option value="" className="bg-[#0a1410]">Auto (Production)</option>
+        {versions.map((v) => (
+          <option key={v.version} value={v.version} className="bg-[#0a1410]">
+            v{v.version} ({v.stage})
           </option>
         ))}
       </select>
@@ -670,7 +804,7 @@ function MetricRow({
 
 function ComparisonScoreCard({
   candidate, overall, accuracyScore: accS, reliabilityScore: relS, consistencyScore: consS,
-  stabilityScore: stabS, leading, color,
+  stabilityScore: stabS, leading, color, side,
 }: {
   candidate: ComparisonCandidate | null;
   overall: number | null;
@@ -680,6 +814,10 @@ function ComparisonScoreCard({
   stabilityScore: number | null;
   leading: boolean;
   color: string;
+  /** Disambiguates the two card testids -- both sides can now be the
+   * same architecture (and, in the degenerate case, the same version)
+   * since a user can compare LSTM v7 vs v8. */
+  side: "a" | "b";
 }) {
   if (!candidate || !candidate.version) {
     return (
@@ -695,7 +833,7 @@ function ComparisonScoreCard({
     <Card
       noPadding
       className={leading ? "border-lime-200/25 bg-lime-100/[0.03]" : undefined}
-      data-testid={`comparison-card-${candidate.modelName}`}
+      data-testid={`comparison-card-${side}-${candidate.modelName}-v${version.version}`}
     >
       <div className="flex items-start justify-between gap-2 p-5 pb-0">
         <div>
@@ -914,11 +1052,14 @@ function RecommendationPanel({
           </span>
           <div>
             <p className="text-sm font-semibold text-white">
-              {alreadyProduction ? `${winner?.label} is already in Production` : `Promote ${winner?.label} to Production`}
+              {alreadyProduction
+                ? `${candidateDisplayName(winner)} is already in Production`
+                : `Promote ${candidateDisplayName(winner)} to Production`}
             </p>
             {winner && other && (
               <p className="mt-0.5 text-[11px] text-white/50">
-                {winner.label} ({winner.metricsSource ?? "no data"}) scores higher than {other.label} on available metrics.
+                {candidateDisplayName(winner)} ({winner.metricsSource ?? "no data"}) scores higher than{" "}
+                {candidateDisplayName(other)} on available metrics.
               </p>
             )}
           </div>
@@ -956,7 +1097,7 @@ function RecommendationPanel({
             data-testid="promote-recommended"
             className="flex w-full items-center justify-center gap-1.5 rounded-md bg-lime-100 px-4 py-2 text-sm font-semibold text-black hover:bg-lime-200 disabled:opacity-50"
           >
-            <Rocket className="h-3.5 w-3.5" /> {promoting ? "Promoting…" : `Promote ${winner.label} to Production`}
+            <Rocket className="h-3.5 w-3.5" /> {promoting ? "Promoting…" : `Promote ${candidateDisplayName(winner)} to Production`}
           </button>
         ) : null}
       </div>
@@ -990,8 +1131,8 @@ function KeyMetricsTable({
           <thead>
             <tr className="border-b border-white/5 text-[10px] uppercase tracking-wider text-white/40">
               <th className="px-4 py-2.5 font-medium">Metric</th>
-              <th className="px-4 py-2.5 font-medium">{candA?.label ?? "A"}</th>
-              <th className="px-4 py-2.5 font-medium">{candB?.label ?? "B"}</th>
+              <th className="px-4 py-2.5 font-medium">{candidateDisplayName(candA)}</th>
+              <th className="px-4 py-2.5 font-medium">{candidateDisplayName(candB)}</th>
               <th className="px-4 py-2.5 font-medium">Difference</th>
               <th className="px-4 py-2.5 font-medium">Better</th>
             </tr>
@@ -1019,7 +1160,7 @@ function KeyMetricsTable({
                     ) : (
                       <span className="inline-flex items-center gap-1 text-emerald-200">
                         {row.lowerIsBetter === (diff! < 0) ? <TrendingDown className="h-3 w-3" /> : <TrendingUp className="h-3 w-3" />}
-                        {better === "A" ? candA?.label : candB?.label}
+                        {better === "A" ? candidateDisplayName(candA) : candidateDisplayName(candB)}
                       </span>
                     )}
                   </td>
@@ -1214,66 +1355,361 @@ function Field({ label, value }: { label: string; value: string }) {
  * message via `setTimeout` with no backend behind it at all; showing
  * that fake success would just lie about a job having started. This
  * form is kept as a preview of the real request shape. */
-function TrainForm() {
-  const [windowDays, setWindowDays] = useState(1095);
-  const [epochs, setEpochs]         = useState(50);
-  const [batchSize, setBatchSize]   = useState(128);
-  const [hidden, setHidden]         = useState(128);
-  const [layers, setLayers]         = useState(2);
-  const [dropout, setDropout]       = useState(0.2);
+/** Real, wired to `POST /v1/model/train` with `full_retrain: true`
+ * (2026-08-11 -- previously this tab had no trigger endpoint at all,
+ * just a disabled preview button whose epochs/batch-size/hidden-size/
+ * layers/dropout fields didn't correspond to anything the backend
+ * actually accepted). `training_worker.handle_training_trigger`
+ * dispatches `full_retrain: true` to the real from-scratch trainer
+ * (`ml.train.train_and_register`/`ml.train_tft.train_and_register_tft`
+ * -- the same functions `ecolens-forecast train`/`train-tft` already
+ * use from the CLI) instead of the incremental warm-start path the
+ * Fine-tune tab's identical-looking trigger uses. Only exposes
+ * `regions`/`window_hours` -- same "don't fabricate knobs the endpoint
+ * doesn't accept" reasoning `FineTuneForm`'s own docstring states; a
+ * from-scratch retrain still doesn't take epoch count, batch size, or
+ * architecture hyperparameters over HTTP, those stay `Settings`-level
+ * (`model_train_epochs` etc.), tunable only via direct config/CLI. */
+function TrainForm({
+  architecture,
+  architectureLabel,
+  onNewVersion,
+}: {
+  architecture: string;
+  architectureLabel: string;
+  onNewVersion: (versions: ModelVersion[]) => void;
+}) {
+  const [regionsInput, setRegionsInput] = useState("");
+  // Real, much wider than Fine-tune's own 336h (14-day) default -- "full
+  // retrain" is meant to be comprehensive, not a small recent nudge.
+  // 8760h (365 days) safely exceeds every real region's current total
+  // warehouse history (WEM, the longest, is ~44 real days as of
+  // 2026-08-11), so this behaves like "use everything available" today
+  // without needing a separate "unlimited" sentinel/code path -- see
+  // `handle_training_trigger`'s own comment on why `full_retrain`
+  // reuses the exact same `window_hours` mechanism Fine-tune uses.
+  const [windowHours, setWindowHours] = useState(8760);
+  const [status, setStatus] = useState<FineTuneState>({ state: "idle" });
+  const cancelPoll = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    cancelPoll.current?.();
+    setStatus({ state: "idle" });
+    return () => {
+      cancelPoll.current?.();
+    };
+  }, [architecture]);
+
+  // Real "current latest version" for this architecture -- backs the
+  // loss-curve card below so it shows *something* real (whichever
+  // version is currently Production, else the newest) even before this
+  // session ever clicks "Start training", not just after.
+  const [latestVersion, setLatestVersion] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetchModelVersions(architecture)
+      .then((res) => {
+        if (cancelled) return;
+        const v = res.data.find((v) => v.stage === "Production") ?? res.data[0];
+        setLatestVersion(v?.version ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setLatestVersion(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [architecture]);
+
+  // Once this session's own trigger actually succeeds, show *that*
+  // fresh version's curve instead of the (now stale) previous latest --
+  // `status.run.model_version` is the real version `log_and_register_run`
+  // just registered.
+  const lossCurveVersion =
+    status.state === "success" ? status.run.model_version : latestVersion;
+
+  const [lossCurve, setLossCurve] = useState<LossCurve | null>(null);
+  const [lossCurveLoaded, setLossCurveLoaded] = useState(false);
+  useEffect(() => {
+    if (!lossCurveVersion) {
+      setLossCurve(null);
+      setLossCurveLoaded(true);
+      return;
+    }
+    let cancelled = false;
+    setLossCurveLoaded(false);
+    fetchLossCurve(lossCurveVersion, architecture)
+      .then((curve) => {
+        if (!cancelled) setLossCurve(curve);
+      })
+      .catch(() => {
+        if (!cancelled) setLossCurve(null);
+      })
+      .finally(() => {
+        if (!cancelled) setLossCurveLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [lossCurveVersion, architecture]);
+
+  const lossCurvePoints = lossCurve?.points ?? [];
+  const lossCurveLabels = lossCurvePoints.map((p) => `${p.epoch}`);
+  const trainLossSeries = lossCurvePoints.map((p) => p.train_loss ?? 0);
+  const valLossSeries = lossCurvePoints.map((p) => p.val_loss ?? 0);
+  const hasTrainLoss = lossCurvePoints.some((p) => p.train_loss !== null);
+  const hasValLoss = lossCurvePoints.some((p) => p.val_loss !== null);
+
+  function submit(e: React.FormEvent) {
+    e.preventDefault();
+    const regions = regionsInput
+      .split(",")
+      .map((r) => r.trim())
+      .filter(Boolean);
+
+    cancelPoll.current?.();
+    setStatus({ state: "idle" });
+    triggerTraining({
+      regions: regions.length ? regions : undefined,
+      windowHours,
+      architecture: TRAIN_TRIGGER_ARCHITECTURE[architecture] ?? "lstm",
+      fullRetrain: true,
+    })
+      .then((trigger) => {
+        setStatus({ state: "queued", trigger });
+        cancelPoll.current = pollForTrainingRun(
+          architecture,
+          trigger.triggered_by,
+          trigger.queued_at,
+          (match) => {
+            if (match.state === "waiting") return;
+            if (match.state === "running") {
+              setStatus({ state: "running", trigger, run: match.run });
+            } else if (match.state === "success") {
+              setStatus({ state: "success", run: match.run });
+              fetchModelVersions(architecture)
+                .then((fresh) => onNewVersion(fresh.data))
+                .catch(() => {});
+            } else {
+              setStatus({
+                state: "error",
+                message: match.run.error_message
+                  ? `Training run failed: ${match.run.error_message}`
+                  : "Training run failed (no error message logged).",
+              });
+            }
+          },
+          3000,
+          // A from-scratch retrain over more real history genuinely
+          // takes longer than an incremental fine-tune -- 4 minutes,
+          // not Fine-tune's 2, before surfacing the same "worker may not
+          // be running" real error instead of an unexplained spinner.
+          240_000,
+          () => {
+            setStatus({
+              state: "error",
+              message:
+                "No training run registered within 4 minutes. The training worker may not be " +
+                "running, or the trigger event never reached it -- check Recent Training Runs " +
+                "or the training-trigger dead-letter queue.",
+            });
+          },
+        );
+      })
+      .catch((err) => {
+        const message = err instanceof Error ? err.message : "training trigger failed";
+        setStatus({ state: "error", message });
+      });
+  }
+
+  const submitting = status.state === "queued" || status.state === "running";
 
   return (
+    <div className="space-y-4">
     <Card
       title={
         <span className="flex items-center gap-2">
           <Rocket className="h-4 w-4 text-emerald-200" />
-          Train a new version
+          Train {architectureLabel} from scratch
         </span>
       }
-      subtitle="Full retrain on the historical window. Not wired to a real endpoint yet -- see TODO.md's Model Operations Phase 2."
+      subtitle={
+        architecture === "timesfm_demand_correction"
+          ? "Publishes a real training-trigger event -- refits TimesFM's Ridge correction layer fresh on the selected window. Same real behavior as the Fine-tune tab for this architecture: frozen zero-shot TimesFM has no weights to warm-start from, so there's no separate 'from scratch' path to distinguish here."
+          : "Publishes a real training-trigger event -- app.service.training_worker's consumer picks it up and trains a brand new version completely from scratch (fresh random init, not warm-started from the current Production/Staging version)."
+      }
     >
-      <form className="space-y-4" data-testid="train-form" onSubmit={(e) => e.preventDefault()}>
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-          <NumberField label="Training window" unit="days" value={windowDays} onChange={setWindowDays} min={90} max={3650} />
-          <NumberField label="Epochs" value={epochs} onChange={setEpochs} min={5} max={200} />
-          <NumberField label="Batch size" value={batchSize} onChange={setBatchSize} min={16} max={512} />
-          <NumberField label="Hidden size" value={hidden} onChange={setHidden} min={32} max={512} />
-          <NumberField label="Num layers" value={layers} onChange={setLayers} min={1} max={4} />
-          <NumberField label="Dropout" value={dropout} onChange={setDropout} min={0} max={0.5} step={0.05} />
+      <form onSubmit={submit} className="space-y-4" data-testid="train-form">
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <div>
+            <label className="mb-1.5 block text-[10px] font-semibold uppercase tracking-wider text-white/40">
+              Regions (optional)
+            </label>
+            <input
+              type="text"
+              value={regionsInput}
+              onChange={(e) => setRegionsInput(e.target.value)}
+              placeholder="e.g. NSW1, QLD1 -- blank uses the server default"
+              data-testid="train-regions"
+              className="w-full rounded-md border border-white/10 bg-white/[0.04] px-3 py-1.5 text-sm text-white placeholder:text-white/35 focus:border-emerald-200/60 focus:outline-none"
+            />
+          </div>
+          <div>
+            <NumberField label="Window" unit="hours" value={windowHours} onChange={setWindowHours} min={1} max={87600} />
+            {architecture !== "timesfm_demand_correction" && windowHours < 240 && (
+              <p className="mt-1 text-[10px] text-amber-300/80">
+                LSTM/TFT need roughly ~230+ real hours of history to build even one
+                train/val/calibration window at this platform&apos;s current lookback/horizon --
+                a window this short will likely fail with "not enough history".
+              </p>
+            )}
+          </div>
         </div>
-        <div className="rounded-md border border-white/5 bg-white/[0.02] p-3 text-xs text-white/55">
-          <strong className="text-white">Plan:</strong> {windowDays} days of data
-          ({Math.round(windowDays * 17520).toLocaleString()} 30-min samples) · {epochs} epochs ·
-          batch {batchSize} · {hidden} hidden × {layers} layers · dropout {dropout}
-        </div>
+        {status.state === "queued" && (
+          <div className="rounded-md border border-sky-400/20 bg-sky-500/5 p-3 text-xs text-sky-200">
+            <PlayCircle className="mr-1 inline h-3.5 w-3.5 animate-pulse" />
+            Queued — {status.trigger.regions.join(", ")}, window {new Date(status.trigger.window_since).toLocaleString("en-AU")} → {new Date(status.trigger.window_until).toLocaleString("en-AU")}. Waiting for the training worker to pick it up…
+          </div>
+        )}
+        {status.state === "running" && (
+          <div className="rounded-md border border-sky-400/20 bg-sky-500/5 p-3 text-xs text-sky-200" data-testid="train-progress">
+            <div className="flex items-center gap-1.5">
+              <PlayCircle className="h-3.5 w-3.5 animate-pulse" />
+              Training run in progress — <ElapsedSince iso={status.run.started_at} /> elapsed.
+            </div>
+            <div className="mt-1 text-white/50">
+              Regions: {status.run.regions.join(", ")} · window {formatRelativeTime(status.run.window_start)} → {formatRelativeTime(status.run.window_end)}
+            </div>
+          </div>
+        )}
+        {status.state === "success" && (
+          <div className="rounded-md border border-emerald-200/30 bg-emerald-200/5 p-3 text-xs text-emerald-100" data-testid="train-success">
+            Done — v{status.run.model_version ?? "?"} registered
+            {status.run.finished_at
+              ? ` in ${formatDurationBetween(status.run.started_at, status.run.finished_at)}`
+              : ""}
+            . See its training vs validation loss below, or check the Registry tab.
+          </div>
+        )}
+        {status.state === "error" && (
+          <p className="text-xs text-rose-300" data-testid="train-error">{status.message}</p>
+        )}
         <div className="flex items-center gap-2">
           <button
             type="submit"
-            disabled
-            title="Not wired to a real endpoint yet"
+            disabled={submitting}
             data-testid="start-train"
-            className="inline-flex items-center gap-1.5 rounded-md bg-lime-100 px-4 py-2 text-sm font-semibold text-black opacity-50 cursor-not-allowed"
+            className={cn(
+              "inline-flex items-center gap-1.5 rounded-md px-4 py-2 text-sm font-semibold",
+              submitting
+                ? "cursor-not-allowed bg-white/10 text-white/40"
+                : "bg-lime-100 text-black hover:bg-lime-100",
+            )}
           >
             <PlayCircle className="h-3.5 w-3.5" /> Start training
           </button>
           <p className="text-[11px] text-white/45">
-            No trigger endpoint exists yet — this button is a preview of the
-            request shape, not a real action.
+            Runs in <code className="rounded bg-black/30 px-1 font-mono">forecast-api</code>'s
+            train-worker process, from scratch. The new version is registered in MLflow on completion.
           </p>
         </div>
       </form>
     </Card>
+
+    <Card
+      title="Training vs validation loss"
+      subtitle={
+        <>
+          <span>
+            Real per-epoch train_loss/val_loss for {architectureLabel}
+            {lossCurveVersion ? ` v${lossCurveVersion}` : ""}
+            {status.state === "success"
+              ? " (just trained)"
+              : lossCurveVersion
+                ? " (current latest version)"
+                : ""}
+          </span>
+          <br />
+          <span className="font-mono text-white/35">GET /v1/model/versions/&#123;version&#125;/loss-curve</span>
+        </>
+      }
+    >
+      {!lossCurveLoaded ? (
+        <p className="py-10 text-center text-xs text-white/40">Loading…</p>
+      ) : !lossCurveVersion ? (
+        <p className="py-10 text-center text-xs text-white/40">No registered version yet -- train one above.</p>
+      ) : !hasTrainLoss ? (
+        <p className="py-10 text-center text-xs text-white/40">v{lossCurveVersion} has no per-epoch history logged.</p>
+      ) : (
+        <>
+          <LineChart
+            series={[
+              { name: "train_loss", data: trainLossSeries, color: "rgba(132,204,22,0.95)", fill: true },
+              ...(hasValLoss ? [{ name: "val_loss", data: valLossSeries, color: "rgba(56,189,248,0.95)", dashed: true }] : []),
+            ]}
+            labels={lossCurveLabels}
+            height={200}
+            formatTooltip={(label, values) => (
+              <div>
+                <div className="mb-1 text-white/50">Epoch {label}</div>
+                {values.map((v) => (
+                  <div key={v.name} className="flex items-center gap-2 py-0.5">
+                    <span className="h-1.5 w-1.5 rounded-full" style={{ background: v.color }} />
+                    <span className="text-white/65">{v.name}</span>
+                    <span className="ml-auto font-mono font-medium text-white">{v.value.toFixed(3)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          />
+          {!hasValLoss && (
+            <p className="mt-2 text-center text-[10px] text-white/35">
+              v{lossCurveVersion} has no val_loss logged — showing train_loss only.
+            </p>
+          )}
+        </>
+      )}
+    </Card>
+    </div>
   );
 }
 
-/** Same "not wired yet" treatment as `TrainForm` -- see that component's
- * docstring. `baseVersion`'s options are hardcoded placeholders since
- * Phase 1's real version list doesn't exist yet either. */
+/** Real progress states, backed by `GET /v1/model/training-runs`
+ * (`pollForTrainingRun`) -- `"running"`/`"success"` carry the actual
+ * `meta._training_log` row so the UI can show real elapsed/duration
+ * time instead of an undifferentiated spinner. */
 type FineTuneState =
   | { state: "idle" }
   | { state: "queued"; trigger: TrainTrigger }
-  | { state: "polling"; trigger: TrainTrigger }
+  | { state: "running"; trigger: TrainTrigger; run: TrainingRunLog }
+  | { state: "success"; run: TrainingRunLog }
   | { state: "error"; message: string };
+
+function formatDurationBetween(startIso: string, endIso: string): string {
+  const totalSeconds = Math.max(
+    0,
+    Math.round((new Date(endIso).getTime() - new Date(startIso).getTime()) / 1000),
+  );
+  const m = Math.floor(totalSeconds / 60);
+  const s = totalSeconds % 60;
+  return m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
+
+/** Ticks once a second off the real `startIso` timestamp -- not a
+ * fabricated progress bar (there's no epoch/step count this platform's
+ * training code reports), just an honest "how long has this actually
+ * been running" clock. */
+function ElapsedSince({ iso }: { iso: string }) {
+  const [, forceTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => forceTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const seconds = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return <>{m}m {s}s</>;
+}
 
 /** Real, wired to `POST /v1/model/train` (Model Operations TODO.md
  * Phase 2), now sending the selected `architecture` too (fixed
@@ -1290,24 +1726,39 @@ type FineTuneState =
  * per-trigger tuning knobs -- fabricating those controls (like the old
  * mock did) would suggest a precision this endpoint doesn't have. */
 function FineTuneForm({
-  currentVersion,
   architecture,
+  architectureLabel,
   onNewVersion,
 }: {
-  currentVersion: string | null;
   architecture: string;
+  architectureLabel: string;
   onNewVersion: (versions: ModelVersion[]) => void;
 }) {
   const [regionsInput, setRegionsInput] = useState("");
-  const [windowHours, setWindowHours] = useState(24);
+  // Real bug, confirmed live 2026-08-11: this used to default to 24,
+  // matching forecast-api's own old (also-fixed) `Settings.
+  // incremental_train_window_hours` default -- both guaranteed
+  // `train_model`'s "not enough history to build train/val/calibration
+  // windows" error every time for LSTM/TFT (lookback=24, horizon=48
+  // needs ~196+ real hourly rows across train/val/cal; 24h of calendar
+  // time is at most 24 rows). 336h (14 days) matches forecast-api's new
+  // default -- see that field's own docstring for the full math.
+  const [windowHours, setWindowHours] = useState(336);
   const [status, setStatus] = useState<FineTuneState>({ state: "idle" });
   const cancelPoll = useRef<(() => void) | null>(null);
 
+  // Switching which model to fine-tune mid-poll would otherwise leave a
+  // stale "queued"/"polling"/"error" status from the *previous*
+  // architecture's trigger showing under the newly-selected one --
+  // cancel that poll and reset to idle so the form always reflects the
+  // currently-selected architecture only.
   useEffect(() => {
+    cancelPoll.current?.();
+    setStatus({ state: "idle" });
     return () => {
       cancelPoll.current?.();
     };
-  }, []);
+  }, [architecture]);
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -1325,32 +1776,43 @@ function FineTuneForm({
     })
       .then((trigger) => {
         setStatus({ state: "queued", trigger });
-        cancelPoll.current = pollForNewModelVersion(
-          currentVersion,
-          (versions) => {
-            setStatus({ state: "polling", trigger });
-            const newest = versions.data[0]?.version ?? null;
-            if (newest !== currentVersion) {
-              onNewVersion(versions.data);
+        cancelPoll.current = pollForTrainingRun(
+          architecture,
+          trigger.triggered_by,
+          trigger.queued_at,
+          (match) => {
+            if (match.state === "waiting") return; // still queued, no row yet -- keep showing "queued"
+            if (match.state === "running") {
+              setStatus({ state: "running", trigger, run: match.run });
+            } else if (match.state === "success") {
+              setStatus({ state: "success", run: match.run });
+              fetchModelVersions(architecture)
+                .then((fresh) => onNewVersion(fresh.data))
+                .catch(() => {}); // registry refresh is best-effort -- the success message above is already real
+            } else {
+              setStatus({
+                state: "error",
+                message: match.run.error_message
+                  ? `Training run failed: ${match.run.error_message}`
+                  : "Training run failed (no error message logged).",
+              });
             }
           },
-          5000,
+          3000,
           120_000,
-          architecture,
           // Real bug fix (2026-08-11): previously nothing ever left this
           // form stuck on "Waiting for the worker..." forever if the
           // real training-trigger consumer crashed or the real run
           // genuinely failed (e.g. a real window too short to build a
-          // train/val/cal split) -- see `pollForNewModelVersion`'s own
-          // comment. Surfaced as a real error now instead of an
-          // unexplained stuck spinner.
+          // train/val/cal split). Surfaced as a real error now instead
+          // of an unexplained stuck spinner.
           () => {
             setStatus({
               state: "error",
               message:
-                "No new version registered within 2 minutes. The training worker may have failed " +
-                "(check Recent Training Runs below) or the window may be too short -- a real " +
-                "lookback+horizon of history is needed to train at all.",
+                "No training run registered within 2 minutes. The training worker may not be " +
+                "running, or the trigger event never reached it -- check Recent Training Runs " +
+                "or the training-trigger dead-letter queue.",
             });
           },
         );
@@ -1361,17 +1823,21 @@ function FineTuneForm({
       });
   }
 
-  const submitting = status.state === "queued" || status.state === "polling";
+  const submitting = status.state === "queued" || status.state === "running";
 
   return (
     <Card
       title={
         <span className="flex items-center gap-2">
           <Sliders className="h-4 w-4 text-emerald-200" />
-          Fine-tune the production model
+          Fine-tune {architectureLabel}
         </span>
       }
-      subtitle="Publishes a real training-trigger event -- app.service.training_worker's consumer picks it up and runs a warm-started incremental fine-tune."
+      subtitle={
+        architecture === "timesfm_demand_correction"
+          ? "Publishes a real training-trigger event -- refits TimesFM's Ridge correction layer fresh on the selected window (no previous version to warm-start from)."
+          : "Publishes a real training-trigger event -- app.service.training_worker's consumer picks it up and runs a warm-started incremental fine-tune from the current Production/Staging version."
+      }
     >
       <form onSubmit={submit} className="space-y-4" data-testid="finetune-form">
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
@@ -1388,21 +1854,45 @@ function FineTuneForm({
               className="w-full rounded-md border border-white/10 bg-white/[0.04] px-3 py-1.5 text-sm text-white placeholder:text-white/35 focus:border-emerald-200/60 focus:outline-none"
             />
           </div>
-          <NumberField label="Window" unit="hours" value={windowHours} onChange={setWindowHours} min={1} max={720} />
+          <div>
+            <NumberField label="Window" unit="hours" value={windowHours} onChange={setWindowHours} min={1} max={720} />
+            {architecture !== "timesfm_demand_correction" && windowHours < 240 && (
+              <p className="mt-1 text-[10px] text-amber-300/80">
+                LSTM/TFT need roughly ~230+ real hours of recent history to build even one
+                train/val/calibration window at this platform&apos;s current lookback/horizon --
+                a window this short will likely fail with "not enough history".
+              </p>
+            )}
+          </div>
         </div>
         {status.state === "queued" && (
           <div className="rounded-md border border-sky-400/20 bg-sky-500/5 p-3 text-xs text-sky-200">
-            Queued — {status.trigger.regions.join(", ")}, window {new Date(status.trigger.window_since).toLocaleString("en-AU")} → {new Date(status.trigger.window_until).toLocaleString("en-AU")}.
+            <PlayCircle className="mr-1 inline h-3.5 w-3.5 animate-pulse" />
+            Queued — {status.trigger.regions.join(", ")}, window {new Date(status.trigger.window_since).toLocaleString("en-AU")} → {new Date(status.trigger.window_until).toLocaleString("en-AU")}. Waiting for the training worker to pick it up…
           </div>
         )}
-        {status.state === "polling" && (
-          <div className="rounded-md border border-sky-400/20 bg-sky-500/5 p-3 text-xs text-sky-200">
-            <PlayCircle className="mr-1 inline h-3.5 w-3.5 animate-pulse" />
-            Waiting for the worker to register a new version — this can take a few minutes.
+        {status.state === "running" && (
+          <div className="rounded-md border border-sky-400/20 bg-sky-500/5 p-3 text-xs text-sky-200" data-testid="finetune-progress">
+            <div className="flex items-center gap-1.5">
+              <PlayCircle className="h-3.5 w-3.5 animate-pulse" />
+              Training run in progress — <ElapsedSince iso={status.run.started_at} /> elapsed.
+            </div>
+            <div className="mt-1 text-white/50">
+              Regions: {status.run.regions.join(", ")} · window {formatRelativeTime(status.run.window_start)} → {formatRelativeTime(status.run.window_end)}
+            </div>
+          </div>
+        )}
+        {status.state === "success" && (
+          <div className="rounded-md border border-emerald-200/30 bg-emerald-200/5 p-3 text-xs text-emerald-100" data-testid="finetune-success">
+            Done — v{status.run.model_version ?? "?"} registered
+            {status.run.finished_at
+              ? ` in ${formatDurationBetween(status.run.started_at, status.run.finished_at)}`
+              : ""}
+            . Switching to the Registry tab…
           </div>
         )}
         {status.state === "error" && (
-          <p className="text-xs text-rose-300">{status.message}</p>
+          <p className="text-xs text-rose-300" data-testid="finetune-error">{status.message}</p>
         )}
         <div className="flex items-center gap-2">
           <button

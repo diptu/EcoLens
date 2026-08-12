@@ -13,12 +13,20 @@
  * columns -- see `services/ingestion/app/schemas/anomalies/response.py`'s
  * own docstring for exactly how (real, already-established thresholds/
  * score-presence rules, not invented in this client).
+ *
+ * `method: "rule"` is legacy-only, 2026-08-12 on -- the backend's
+ * rule-based signal (out-of-range bounds, missing-value flagging) was
+ * retired that date (real, live-observed reason: it accounted for the
+ * overwhelming majority of flagged rows, structurally expected rather
+ * than anomalous -- see `pipeline/anomaly.py`'s own docstring). A row
+ * detected going forward that only clears the statistical (z-score)
+ * signal is `"statistical"` instead of the old, cruder `"rule"` catch-all.
  */
 
 import { INGESTION_API_URL } from "./env";
 
 export type AnomalySeverity = "high" | "medium" | "low";
-export type AnomalyMethod = "rule" | "ml" | "hybrid";
+export type AnomalyMethod = "rule" | "statistical" | "ml" | "hybrid";
 export type AnomalyStatus = "new" | "acknowledged" | "resolved" | "false_positive";
 
 export type Anomaly = {
@@ -55,6 +63,32 @@ export type AnomalySummary = {
   by_method: Record<string, number>;
   by_reason_kind: Record<string, number>;
   daily_counts: { date: string; count: number }[];
+  /** Real `max(detected_at)` across all of `meta.anomalies` -- when the
+   * detector last actually flagged something, not a synthetic "job
+   * last ran" timestamp (this detector runs inline with every ingest,
+   * not as its own separate scheduled job). `null` if nothing has ever
+   * been flagged. */
+  latest_detected_at: string | null;
+};
+
+export type AnomalyTimeseriesPoint = {
+  ts: string;
+  value: number | null;
+  is_anomalous: boolean;
+  anomaly_score: number | null;
+  severity: AnomalySeverity | null;
+  expected_low: number | null;
+  expected_high: number | null;
+};
+
+export type AnomalyTimeseriesResponse = {
+  region: string;
+  metric: string;
+  start: string;
+  end: string;
+  total_points: number;
+  anomalous_points: number;
+  points: AnomalyTimeseriesPoint[];
 };
 
 export type AnomalyListFilters = {
@@ -88,6 +122,28 @@ export async function fetchAnomalySummary(): Promise<AnomalySummary> {
   const res = await fetch(`${INGESTION_API_URL}/anomalies/summary`);
   if (!res.ok) {
     throw new Error(`GET /v1/anomalies/summary failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export type AnomalyTimeseriesFilters = {
+  region: string;
+  metric?: "demand_mw" | "price_mwh";
+  start?: string;
+  end?: string;
+};
+
+export async function fetchAnomalyTimeseries(
+  filters: AnomalyTimeseriesFilters,
+): Promise<AnomalyTimeseriesResponse> {
+  const params = new URLSearchParams({ region: filters.region });
+  if (filters.metric) params.set("metric", filters.metric);
+  if (filters.start) params.set("start", filters.start);
+  if (filters.end) params.set("end", filters.end);
+
+  const res = await fetch(`${INGESTION_API_URL}/anomalies/timeseries?${params}`);
+  if (!res.ok) {
+    throw new Error(`GET /v1/anomalies/timeseries failed: ${res.status}`);
   }
   return res.json();
 }

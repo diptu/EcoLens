@@ -1,7 +1,19 @@
-"""Loss functions for `DemandLSTM` (`README.md`: "Huber (robust to
-dispatch spikes), with a separate pinball loss branch for 10/90 quantile
-heads") and `EnergyForecastLSTM` (`app/models/energy_forecast_lstm.py`,
-the multi-task demand + generation-mix model).
+"""Loss functions for `DemandLSTM`/`DemandTFT` and `EnergyForecastLSTM`
+(`app/models/energy_forecast_lstm.py`, the multi-task demand +
+generation-mix model).
+
+**2026-08-12, `demand_loss`'s P50 term changed from Huber to true
+pinball(0.5)** -- see `services/forecast-api/TODO.md` Phase 1 for the
+full real-evidence writeup (real per-region walk-forward bias measured
+as large as -343 MW, in both signs depending on region; Huber trains
+toward the conditional *mean*, not the median, and does so unevenly
+across regions because the target scaler is pooled, not per-region).
+`energy_forecast_loss` below already used true pinball(0.5) for its own
+point estimate before this change -- `demand_loss` now matches that
+already-proven pattern instead of being the odd one out. `README.md`'s
+"Huber (robust to dispatch spikes)" description of `DemandLSTM`'s
+training is stale as of this change; not updated here since this file
+doesn't own that doc.
 """
 
 from __future__ import annotations
@@ -43,14 +55,24 @@ def demand_loss(
     forecast: DemandForecast,
     target: Tensor,
     *,
-    huber_delta: float = HUBER_DELTA,
     quantile_weight: float = 1.0,
 ) -> Tensor:
-    """The full training objective: Huber on the P50 point head plus
-    `quantile_weight`-scaled pinball loss on each of the P10/P90 spread
-    heads. `quantile_weight` defaults to `1.0` (equal weighting) --
-    `ml/train.py` exposes it as a tunable hyperparameter for `make tune`."""
-    point = huber_loss(forecast.p50, target, delta=huber_delta)
+    """The full training objective: true pinball(0.5) on the P50 point
+    head plus `quantile_weight`-scaled pinball loss on each of the P10/
+    P90 spread heads -- all three heads now trained with the same loss
+    family, just at different quantile levels (0.1/0.5/0.9). `quantile_
+    weight` defaults to `1.0` (equal weighting) -- `ml/train.py` exposes
+    it as a tunable hyperparameter for `make tune`; it only ever scaled
+    the P10/P90 terms, never P50's, unchanged by this function's own
+    2026-08-12 Huber -> pinball(0.5) switch (module docstring has the
+    real evidence).
+
+    No `huber_delta` param anymore -- confirmed unused by every real
+    caller (`train.py`/`train_tft.py` never passed it), and the point
+    head no longer calls `huber_loss` at all. `huber_loss` itself stays
+    defined below (still real, still tested) in case a future tuning
+    experiment wants it back; this function just doesn't call it."""
+    point = pinball_loss(forecast.p50, target, 0.5)
     lower = pinball_loss(forecast.p10, target, LOWER_QUANTILE)
     upper = pinball_loss(forecast.p90, target, UPPER_QUANTILE)
     return point + quantile_weight * (lower + upper)

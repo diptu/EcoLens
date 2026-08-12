@@ -1,10 +1,10 @@
 /**
  * /dashboard/admin/anomaly-detection — anomaly log.
  *
- * Lists real records flagged by the ingestion-layer hybrid detector
- * (rule-based + IsolationForest ML) — `meta.anomalies`, 150K+ real rows
- * confirmed live 2026-08-08 (real `pipeline.anomaly.detect_anomalies`,
- * real `pipeline.ml_anomaly` IsolationForest per source). The admin can:
+ * Lists real records flagged by the ingestion-layer detector —
+ * `meta.anomalies`, 150K+ real rows confirmed live 2026-08-08 (real
+ * `pipeline.anomaly.detect_anomalies`, real `pipeline.ml_anomaly`
+ * IsolationForest per source). The admin can:
  *   - filter by severity / method / status / source / reason kind
  *   - search reason text / the flagged row's own snapshot
  *   - acknowledge / resolve / mark false-positive — real PATCH mutations
@@ -23,20 +23,42 @@
  * docstring), not separately tracked. "Type" used to be a fictional
  * 12-value enum (demand_spike/negative_price/etc.) this detector never
  * actually produces — replaced with the *real* reason-kind prefixes
- * that exist in the data: `missing_value` (121K), `ml_outlier` (25K),
- * `statistical_outlier` (4K), `out_of_range` (803).
+ * that exist in the data.
+ *
+ * **2026-08-12**: the rule-based signal (out-of-range bounds,
+ * missing-value flagging — real, live-observed cost: it accounted for
+ * 121K/150K+ of these rows, the overwhelming majority structurally
+ * expected rather than anomalous) was retired backend-side —
+ * `pipeline/anomaly.py`'s own docstring has the full reasoning. The
+ * detector is statistical (z-score) + ML now; `method: "rule"` and the
+ * `missing_value`/`out_of_range` reason kinds are real but legacy-only
+ * going forward, not removed from this page since the historical rows
+ * are still real data worth being able to see/filter.
+ *
+ * **2026-08-12, redesigned**: added the "Anomaly Overview" chart and
+ * the KPI row + master-detail (table + details panel) layout, backed by
+ * the new `GET /v1/anomalies/timeseries` (`services/ingestion`, real
+ * per-timestamp `raw_marts.fct_energy_demand` rows with the same
+ * `is_anomalous`/`anomaly_score` dbt already joins onto that mart, plus
+ * a real rolling-window expected-range band computed with the exact
+ * same z-score arithmetic `pipeline.anomaly.detect_anomalies` itself
+ * uses). The KPI row and chart are scoped to whichever region/metric is
+ * selected in the chart filters (real, not the same global scope as the
+ * table below, which keeps its own independent severity/method/status/
+ * reason filters) -- two real, honestly-different scopes, not the same
+ * number shown twice.
  */
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  Activity,
   AlertCircle,
   AlertTriangle,
   Bot,
   CheckCircle2,
-  ChevronDown,
-  ChevronRight,
-  Gauge,
+  Cpu,
+  Database,
   Layers,
   Lightbulb,
   Loader2,
@@ -54,13 +76,30 @@ import { cn } from "@/lib/utils";
 import {
   fetchAnomalies,
   fetchAnomalySummary,
+  fetchAnomalyTimeseries,
   updateAnomalyStatus,
   type Anomaly,
   type AnomalyMethod,
   type AnomalySeverity,
   type AnomalyStatus,
   type AnomalySummary,
+  type AnomalyTimeseriesPoint,
+  type AnomalyTimeseriesResponse,
 } from "@/lib/anomalies";
+
+const CHART_REGIONS: Array<{ value: string; label: string }> = [
+  { value: "NSW1", label: "NSW1" },
+  { value: "QLD1", label: "QLD1" },
+  { value: "VIC1", label: "VIC1" },
+  { value: "SA1", label: "SA1" },
+  { value: "TAS1", label: "TAS1" },
+  { value: "WEM", label: "WEM" },
+];
+
+const CHART_METRICS: Array<{ value: "demand_mw" | "price_mwh"; label: string }> = [
+  { value: "demand_mw", label: "Demand (MW)" },
+  { value: "price_mwh", label: "Price ($/MWh)" },
+];
 
 const SEVERITY_FILTERS: Array<{ value: AnomalySeverity | "all"; label: string }> = [
   { value: "all",    label: "All severities" },
@@ -70,10 +109,11 @@ const SEVERITY_FILTERS: Array<{ value: AnomalySeverity | "all"; label: string }>
 ];
 
 const METHOD_FILTERS: Array<{ value: AnomalyMethod | "all"; label: string }> = [
-  { value: "all",    label: "All methods" },
-  { value: "hybrid", label: "Hybrid"      },
-  { value: "rule",   label: "Rule"        },
-  { value: "ml",     label: "ML"          },
+  { value: "all",         label: "All methods"       },
+  { value: "hybrid",      label: "Hybrid"            },
+  { value: "statistical", label: "Statistical"       },
+  { value: "ml",          label: "ML"                },
+  { value: "rule",        label: "Rule (legacy)"     },
 ];
 
 const STATUS_FILTERS: Array<{ value: AnomalyStatus | "all"; label: string }> = [
@@ -86,12 +126,15 @@ const STATUS_FILTERS: Array<{ value: AnomalyStatus | "all"; label: string }> = [
 
 // Real reason-kind prefixes -- the only 4 that exist in `meta.anomalies`
 // (confirmed live), replacing the old mock's fictional 12-type taxonomy.
+// `missing_value`/`out_of_range` are legacy -- the rule-based signal
+// that produced them was retired 2026-08-12 (see this file's own header
+// docstring); real historical rows still carry these, nothing new does.
 const REASON_KIND_FILTERS: Array<{ value: string; label: string }> = [
   { value: "all", label: "All reasons" },
-  { value: "missing_value", label: "Missing value" },
-  { value: "out_of_range", label: "Out of range" },
   { value: "statistical_outlier", label: "Statistical outlier" },
   { value: "ml_outlier", label: "ML outlier" },
+  { value: "missing_value", label: "Missing value (legacy)" },
+  { value: "out_of_range", label: "Out of range (legacy)" },
 ];
 
 const SEVERITY_STYLES: Record<AnomalySeverity, { dot: string; text: string; chip: string }> = {
@@ -105,12 +148,6 @@ const STATUS_STYLES: Record<AnomalyStatus, { label: string; className: string; i
   acknowledged:  { label: "Acknowledged",  className: "border-amber-300/40 bg-amber-300/10 text-amber-200",   icon: ShieldAlert  },
   resolved:      { label: "Resolved",      className: "border-emerald-200/40 bg-emerald-200/10 text-emerald-100", icon: CheckCircle2 },
   false_positive:{ label: "False +",       className: "border-white/10 bg-white/5 text-white/60",            icon: XCircle      },
-};
-
-const METHOD_ICONS = {
-  rule: ShieldCheck,
-  ml: Bot,
-  hybrid: Sparkles,
 };
 
 function formatTs(iso: string): string {
@@ -134,8 +171,31 @@ export default function AdminAnomalyDetectionPage() {
   const [reasonKindFilter, setReasonKindFilter] = useState<string>("all");
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
-  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [mutating, setMutating] = useState<string | null>(null);
+
+  const [chartRegion, setChartRegion] = useState("NSW1");
+  const [chartMetric, setChartMetric] = useState<"demand_mw" | "price_mwh">("demand_mw");
+  const [timeseries, setTimeseries] = useState<AnomalyTimeseriesResponse | null>(null);
+  const [timeseriesError, setTimeseriesError] = useState<string | null>(null);
+
+  // Real per-timestamp series + anomaly overlay for the selected region/
+  // metric -- a genuinely different scope than the table below (which
+  // spans every region/source via its own independent filters), not the
+  // same number re-shown.
+  useEffect(() => {
+    let cancelled = false;
+    setTimeseries(null);
+    setTimeseriesError(null);
+    fetchAnomalyTimeseries({ region: chartRegion, metric: chartMetric })
+      .then((r) => {
+        if (!cancelled) setTimeseries(r);
+      })
+      .catch((err) => {
+        if (!cancelled) setTimeseriesError(err instanceof Error ? err.message : "failed to load");
+      });
+    return () => { cancelled = true; };
+  }, [chartRegion, chartMetric]);
 
   // Real server-side filtering/pagination -- 150K+ real rows, not
   // something to fetch-all-then-filter-client-side the way the old
@@ -178,6 +238,17 @@ export default function AdminAnomalyDetectionPage() {
     return anomalies.filter((a) => a.reason.startsWith(reasonKindFilter));
   }, [anomalies, reasonKindFilter]);
 
+  // The selected row for the details panel -- defaults to the first
+  // real row on the current page once one loads, so the panel isn't
+  // empty on first paint (matches the reference layout's default
+  // "details for the top row" state), but still respects an explicit
+  // pick, including one that's since scrolled off `filtered` (falls
+  // back to the first row rather than showing a stale/missing anomaly).
+  const selected = useMemo(() => {
+    if (filtered.length === 0) return null;
+    return filtered.find((a) => a.id === selectedId) ?? filtered[0];
+  }, [filtered, selectedId]);
+
   function clearFilters() {
     setSeverityFilter("all");
     setMethodFilter("all");
@@ -210,7 +281,7 @@ export default function AdminAnomalyDetectionPage() {
             Anomaly Detection
           </h1>
           <p className="mt-1 max-w-2xl text-sm text-white/60">
-            Real records flagged by the ingestion-layer hybrid detector (rule-based
+            Real records flagged by the ingestion-layer detector (statistical z-score
             + IsolationForest ML, per source). Suspicious records are tagged here, not
             dropped, so downstream systems can distinguish a real
             operational event from a data-quality issue.
@@ -226,60 +297,154 @@ export default function AdminAnomalyDetectionPage() {
         )}
       </div>
 
-      {/* KPI cards */}
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
+      {/* KPI cards -- scoped to the chart's region/metric selection below
+          (real `timeseries.total_points`/`anomalous_points`), a
+          genuinely different scope than the global breakdown/daily-count
+          cards further down (this file's own header comment). */}
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-5">
         <AnomalyKpi
-          label="New anomalies"
-          value={summary ? (summary.by_status.new ?? 0).toLocaleString() : "—"}
-          sub="Need acknowledgement"
-          tone={summary && (summary.by_status.new ?? 0) > 0 ? "warn" : "neutral"}
-          icon={AlertCircle}
+          label="Total Data Points"
+          value={timeseries ? timeseries.total_points.toLocaleString() : "—"}
+          sub={`${chartRegion}, last 7 days`}
+          tone="neutral"
+          icon={Database}
         />
         <AnomalyKpi
-          label="High severity"
-          value={summary ? (summary.by_severity.high ?? 0).toLocaleString() : "—"}
-          sub={`Of ${summary ? summary.total.toLocaleString() : "—"} total`}
-          tone={summary && (summary.by_severity.high ?? 0) > 0 ? "warn" : "neutral"}
+          label="Anomalies Detected"
+          value={timeseries ? timeseries.anomalous_points.toLocaleString() : "—"}
+          sub={
+            timeseries && timeseries.total_points > 0
+              ? `${((timeseries.anomalous_points / timeseries.total_points) * 100).toFixed(2)}% of total`
+              : "in selected period"
+          }
+          tone={timeseries && timeseries.anomalous_points > 0 ? "warn" : "neutral"}
           icon={AlertTriangle}
         />
         <AnomalyKpi
-          label="Detected today"
-          value={summary ? (summary.daily_counts.at(-1)?.count ?? 0).toLocaleString() : "—"}
-          sub="Real detections, last 24h"
-          tone="neutral"
-          icon={Gauge}
+          label="High Severity"
+          value={
+            timeseries
+              ? timeseries.points.filter((p) => p.severity === "high").length.toLocaleString()
+              : "—"
+          }
+          sub={
+            timeseries && timeseries.total_points > 0
+              ? `${((timeseries.points.filter((p) => p.severity === "high").length / timeseries.total_points) * 100).toFixed(2)}% of total`
+              : "in selected period"
+          }
+          tone="warn"
+          icon={AlertCircle}
         />
         <AnomalyKpi
-          label="Avg anomaly score"
-          value={summary ? summary.avg_score.toFixed(3) : "—"}
-          sub="Across all real flagged rows"
+          label="Normal Points"
+          value={
+            timeseries
+              ? (timeseries.total_points - timeseries.anomalous_points).toLocaleString()
+              : "—"
+          }
+          sub={
+            timeseries && timeseries.total_points > 0
+              ? `${(((timeseries.total_points - timeseries.anomalous_points) / timeseries.total_points) * 100).toFixed(2)}% of total`
+              : "in selected period"
+          }
           tone="neutral"
-          icon={TrendingUp}
+          icon={CheckCircle2}
+        />
+        <AnomalyKpi
+          label="Detection Model"
+          value="Statistical + ML"
+          sub={
+            summary?.latest_detected_at
+              ? `Last flagged ${formatTs(summary.latest_detected_at)}`
+              : "No detections yet"
+          }
+          tone="neutral"
+          icon={Cpu}
         />
       </div>
 
+      {/* Anomaly Overview chart */}
+      <Card>
+        <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <h2 className="flex items-center gap-2 text-sm font-semibold text-white">
+            <Activity className="h-4 w-4 text-sky-200" />
+            Anomaly Overview
+          </h2>
+          <div className="flex flex-wrap items-center gap-2">
+            <FilterSelect
+              label="Region"
+              value={chartRegion}
+              options={CHART_REGIONS.map((r) => ({ value: r.value, label: r.label }))}
+              onChange={setChartRegion}
+            />
+            <FilterSelect
+              label="Metric"
+              value={chartMetric}
+              options={CHART_METRICS}
+              onChange={(v) => setChartMetric(v as "demand_mw" | "price_mwh")}
+            />
+          </div>
+        </div>
+        {timeseriesError ? (
+          <p className="py-16 text-center text-xs text-white/40">
+            Unavailable — {timeseriesError}
+          </p>
+        ) : timeseries === null ? (
+          <p className="py-16 text-center text-xs text-white/40">Loading real demand data…</p>
+        ) : (
+          <>
+            <AnomalyOverviewChart points={timeseries.points} metric={timeseries.metric} />
+            <div className="mt-3 flex flex-wrap items-center gap-4 text-[11px] text-white/65">
+              <span className="inline-flex items-center gap-1.5">
+                <span className="h-2 w-2 rounded-full bg-emerald-300" />
+                Normal
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="h-2 w-2 rounded-full bg-amber-300" />
+                Moderate Anomaly
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="h-2 w-2 rounded-full bg-rose-400" />
+                High Anomaly
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="h-2.5 w-3.5 rounded-sm border border-white/20 bg-white/10" />
+                Expected Range (real, rolling {`±`}3{`σ`})
+              </span>
+            </div>
+          </>
+        )}
+      </Card>
+
       {/* Detection methods breakdown */}
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
         <MethodCard
-          label="Rule"
-          count={summary?.by_method.rule ?? 0}
-          icon={ShieldCheck}
-          color="emerald"
-          blurb="Missing values, out-of-range physical bounds, statistical (z-score) outliers."
+          label="Statistical"
+          count={summary?.by_method.statistical ?? 0}
+          icon={Activity}
+          color="sky"
+          blurb="Per-batch z-score against each column's own mean/std within the current fetch."
         />
         <MethodCard
           label="ML (IsolationForest)"
           count={summary?.by_method.ml ?? 0}
           icon={Bot}
           color="amber"
-          blurb="Per-source IsolationForest over numeric columns. Catches multivariate outliers rule checks miss."
+          blurb="Per-source IsolationForest over numeric columns. Catches multivariate outliers the statistical check misses."
         />
         <MethodCard
           label="Hybrid"
           count={summary?.by_method.hybrid ?? 0}
           icon={Sparkles}
           color="rose"
-          blurb="Both rule/statistical AND ML flagged the same row. Highest confidence."
+          blurb="Both statistical AND ML flagged the same row. Highest confidence."
+        />
+        <MethodCard
+          label="Rule (legacy)"
+          count={summary?.by_method.rule ?? 0}
+          icon={ShieldCheck}
+          color="emerald"
+          blurb="Retired 2026-08-12 -- out-of-range bounds and missing-value flagging. Historical rows only, nothing new lands here."
         />
       </div>
 
@@ -370,104 +535,137 @@ export default function AdminAnomalyDetectionPage() {
         </div>
       </Card>
 
-      {/* Anomaly table */}
-      <Card>
-        <div className="mb-3 flex items-center justify-between">
-          <h2 className="flex items-center gap-2 text-sm font-semibold text-white">
-            <AlertTriangle className="h-4 w-4 text-amber-200" />
-            Recent anomalies
-          </h2>
-          <div className="flex items-center gap-2 text-xs text-white/50">
-            <button
-              onClick={() => setPage((p) => Math.max(0, p - 1))}
-              disabled={page === 0 || loading}
-              className="rounded-md border border-white/10 bg-white/5 px-2 py-1 disabled:opacity-40"
-            >
-              Prev
-            </button>
-            <span>Page {page + 1} of {totalPages}</span>
-            <button
-              onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
-              disabled={page >= totalPages - 1 || loading}
-              className="rounded-md border border-white/10 bg-white/5 px-2 py-1 disabled:opacity-40"
-            >
-              Next
-            </button>
+      {/* Detected Anomalies (left) + Anomaly Details (right) --
+          master-detail, replacing the old single wide table + inline
+          accordion: clicking a row selects it into the details panel
+          instead of expanding inline, matching the reference layout. */}
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-5">
+        <Card className="xl:col-span-3">
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="flex items-center gap-2 text-sm font-semibold text-white">
+              <AlertTriangle className="h-4 w-4 text-amber-200" />
+              Detected Anomalies
+            </h2>
+            <div className="flex items-center gap-2 text-xs text-white/50">
+              <button
+                onClick={() => setPage((p) => Math.max(0, p - 1))}
+                disabled={page === 0 || loading}
+                className="rounded-md border border-white/10 bg-white/5 px-2 py-1 disabled:opacity-40"
+              >
+                Prev
+              </button>
+              <span>Page {page + 1} of {totalPages}</span>
+              <button
+                onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
+                disabled={page >= totalPages - 1 || loading}
+                className="rounded-md border border-white/10 bg-white/5 px-2 py-1 disabled:opacity-40"
+              >
+                Next
+              </button>
+            </div>
           </div>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm">
-            <thead className="border-b border-white/5 text-xs uppercase text-white/50">
-              <tr>
-                <th className="px-3 py-2">Detected</th>
-                <th className="px-3 py-2">Region</th>
-                <th className="px-3 py-2">Source</th>
-                <th className="px-3 py-2">Severity</th>
-                <th className="px-3 py-2">Method</th>
-                <th className="px-3 py-2 text-right">Score</th>
-                <th className="px-3 py-2">Status</th>
-                <th className="px-3 py-2 text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-white/5">
-              {loading && (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead className="border-b border-white/5 text-xs uppercase text-white/50">
                 <tr>
-                  <td colSpan={8} className="px-3 py-8 text-center text-sm text-white/50">
-                    <Loader2 className="mx-auto h-4 w-4 animate-spin" />
-                  </td>
+                  <th className="px-3 py-2">Detected</th>
+                  <th className="px-3 py-2">Region</th>
+                  <th className="px-3 py-2">Severity</th>
+                  <th className="px-3 py-2">Method</th>
+                  <th className="px-3 py-2 text-right">Score</th>
+                  <th className="px-3 py-2">Status</th>
                 </tr>
-              )}
-              {!loading && filtered.length === 0 && (
-                <tr>
-                  <td colSpan={8} className="px-3 py-8 text-center text-sm text-white/50">
-                    No anomalies match the current filters.
-                  </td>
-                </tr>
-              )}
-              {!loading && filtered.map((a) => {
-                const sev = SEVERITY_STYLES[a.severity];
-                const stat = STATUS_STYLES[a.status];
-                const statIcon = stat.icon;
-                const methodIcon = METHOD_ICONS[a.method];
-                const expanded = expandedId === a.id;
-                return (
-                  <AnomalyRow
-                    key={a.id}
-                    a={a}
-                    sev={sev}
-                    stat={stat}
-                    StatIcon={statIcon}
-                    MethodIcon={methodIcon}
-                    expanded={expanded}
-                    mutating={mutating === a.id}
-                    onToggle={() => setExpandedId(expanded ? null : a.id)}
-                    onAcknowledge={() => mutate(a.id, "acknowledged")}
-                    onResolve={() => mutate(a.id, "resolved")}
-                    onFalsePositive={() => mutate(a.id, "false_positive")}
-                  />
-                );
-              })}
-            </tbody>
-          </table>
+              </thead>
+              <tbody className="divide-y divide-white/5">
+                {loading && (
+                  <tr>
+                    <td colSpan={6} className="px-3 py-8 text-center text-sm text-white/50">
+                      <Loader2 className="mx-auto h-4 w-4 animate-spin" />
+                    </td>
+                  </tr>
+                )}
+                {!loading && filtered.length === 0 && (
+                  <tr>
+                    <td colSpan={6} className="px-3 py-8 text-center text-sm text-white/50">
+                      No anomalies match the current filters.
+                    </td>
+                  </tr>
+                )}
+                {!loading && filtered.map((a) => {
+                  const sev = SEVERITY_STYLES[a.severity];
+                  const stat = STATUS_STYLES[a.status];
+                  const isSelected = selected?.id === a.id;
+                  return (
+                    <tr
+                      key={a.id}
+                      onClick={() => setSelectedId(a.id)}
+                      data-testid={`anomaly-row-${a.id}`}
+                      className={cn(
+                        "cursor-pointer transition-colors hover:bg-white/[0.03]",
+                        isSelected && "bg-sky-300/[0.06]",
+                      )}
+                    >
+                      <td className="whitespace-nowrap px-3 py-2 text-white/80">
+                        {formatTs(a.detected_at)}
+                      </td>
+                      <td className="px-3 py-2 font-mono text-xs text-white/80">{a.region ?? "—"}</td>
+                      <td className="px-3 py-2">
+                        <span className={cn("inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[11px] font-medium", sev.chip, sev.text)}>
+                          <span className={cn("h-1.5 w-1.5 rounded-full", sev.dot)} />
+                          {a.severity}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2">
+                        <span className="inline-flex items-center gap-1.5 text-[11px] text-white/70">
+                          {a.method}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono text-xs text-white/80">
+                        {a.score.toFixed(2)}
+                      </td>
+                      <td className="px-3 py-2">
+                        <span className={cn("inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] font-medium", stat.className)}>
+                          {stat.label}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <div className="mt-3 text-xs text-white/50">
+            {loading ? "Loading…" : `Showing ${filtered.length} of ${total.toLocaleString()} real anomalies`}
+          </div>
+        </Card>
+
+        <div className="xl:col-span-2">
+          <AnomalyDetailsPanel
+            anomaly={selected}
+            mutating={selected ? mutating === selected.id : false}
+            onAcknowledge={() => selected && mutate(selected.id, "acknowledged")}
+            onResolve={() => selected && mutate(selected.id, "resolved")}
+            onFalsePositive={() => selected && mutate(selected.id, "false_positive")}
+          />
         </div>
-      </Card>
+      </div>
 
       {/* How it works */}
       <Card>
         <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-white">
           <Lightbulb className="h-4 w-4 text-amber-200" />
-          How the hybrid detector works
+          How the detector works
         </h2>
         <div className="grid grid-cols-1 gap-3 text-sm text-white/70 md:grid-cols-2">
           <div>
-            <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-emerald-100">
-              1. Rule / statistical layer
+            <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-sky-200">
+              1. Statistical layer
             </h3>
             <p className="leading-relaxed">
-              Each ingested record is checked for missing values on key
-              columns, physical out-of-range values, and statistical
-              (z-score) outliers against a rolling window. Failures land
-              on this page tagged <span className="font-mono text-xs">rule</span>.
+              Each ingested record is checked for statistical (z-score)
+              outliers against its own column's mean/std within the
+              current batch. Failures land on this page tagged{" "}
+              <span className="font-mono text-xs">statistical</span>.
             </p>
           </div>
           <div>
@@ -486,8 +684,8 @@ export default function AdminAnomalyDetectionPage() {
               3. Hybrid agreement
             </h3>
             <p className="leading-relaxed">
-              When both a rule/statistical check and the ML model flag
-              the same row, it&apos;s marked{" "}
+              When both the statistical check and the ML model flag the
+              same row, it&apos;s marked{" "}
               <span className="font-mono text-xs">hybrid</span> — the
               highest-confidence class.
             </p>
@@ -504,6 +702,15 @@ export default function AdminAnomalyDetectionPage() {
             </p>
           </div>
         </div>
+        <p className="mt-3 border-t border-white/10 pt-3 text-xs text-white/50">
+          A third, rule-based layer (out-of-range bounds, missing-value
+          flagging) ran until 2026-08-12, when it was retired — it
+          accounted for the large majority of flagged rows, most of them
+          structurally expected rather than anomalous. Rows it already
+          flagged are still real and still shown here, tagged{" "}
+          <span className="font-mono">rule</span> — nothing new lands in
+          that bucket going forward.
+        </p>
       </Card>
     </div>
   );
@@ -552,18 +759,20 @@ function MethodCard({
   label: string;
   count: number;
   icon: React.ComponentType<{ className?: string }>;
-  color: "emerald" | "amber" | "rose";
+  color: "emerald" | "amber" | "rose" | "sky";
   blurb: string;
 }) {
   const ring = {
     emerald: "border-emerald-200/30 from-emerald-200/10",
     amber:   "border-amber-300/30 from-amber-300/10",
     rose:    "border-rose-300/30 from-rose-300/10",
+    sky:     "border-sky-300/30 from-sky-300/10",
   }[color];
   const iconColor = {
     emerald: "text-emerald-100",
     amber: "text-amber-200",
     rose: "text-rose-200",
+    sky: "text-sky-200",
   }[color];
   return (
     <div
@@ -611,157 +820,518 @@ function FilterSelect({
   );
 }
 
-function AnomalyRow({
-  a,
-  sev,
-  stat,
-  StatIcon,
-  MethodIcon,
-  expanded,
+// ────────────────────────────────────────────────────────────────────
+// Anomaly Details panel
+// ────────────────────────────────────────────────────────────────────
+
+// Real threshold `ml_anomaly.ANOMALY_SCORE_THRESHOLD` uses (`services/
+// ingestion/app/service/pipeline/ml_anomaly.py`) -- only used here to
+// honestly label an ML-signal contributing factor, not re-derived.
+const ML_ANOMALY_SCORE_THRESHOLD = 0.5;
+const Z_SCORE_THRESHOLD = 3.0;
+
+/** Metrics `GET /v1/anomalies/timeseries` actually supports -- used to
+ * decide whether the Point Context mini chart below can fetch real data
+ * for a given anomaly's `metric` at all (e.g. `temp_c`/`wind_speed_kmh`
+ * flagged rows have no timeseries endpoint to draw from). */
+const TIMESERIES_METRICS = new Set(["demand_mw", "price_mwh"]);
+
+function AnomalyDetailsPanel({
+  anomaly,
   mutating,
-  onToggle,
   onAcknowledge,
   onResolve,
   onFalsePositive,
 }: {
-  a: Anomaly;
-  sev: { dot: string; text: string; chip: string };
-  stat: { label: string; className: string; icon: React.ComponentType<{ className?: string }> };
-  StatIcon: React.ComponentType<{ className?: string }>;
-  MethodIcon: React.ComponentType<{ className?: string }>;
-  expanded: boolean;
+  anomaly: Anomaly | null;
   mutating: boolean;
-  onToggle: () => void;
   onAcknowledge: () => void;
   onResolve: () => void;
   onFalsePositive: () => void;
 }) {
+  const [context, setContext] = useState<AnomalyTimeseriesPoint[] | null>(null);
+  const [contextError, setContextError] = useState<string | null>(null);
+
+  // Real, narrowly-scoped fetch (±2h around the selected anomaly's own
+  // `ts`) -- not a slice of the overview chart's own data, since that
+  // chart's region/metric selection is independent of whichever row is
+  // selected here (this file's own header comment).
+  useEffect(() => {
+    if (!anomaly || !anomaly.ts || !anomaly.region || !TIMESERIES_METRICS.has(anomaly.metric ?? "")) {
+      setContext(null);
+      setContextError(null);
+      return;
+    }
+    let cancelled = false;
+    setContext(null);
+    setContextError(null);
+    const center = new Date(anomaly.ts).getTime();
+    fetchAnomalyTimeseries({
+      region: anomaly.region,
+      metric: anomaly.metric as "demand_mw" | "price_mwh",
+      start: new Date(center - 2 * 3_600_000).toISOString(),
+      end: new Date(center + 2 * 3_600_000).toISOString(),
+    })
+      .then((r) => { if (!cancelled) setContext(r.points); })
+      .catch((err) => {
+        if (!cancelled) setContextError(err instanceof Error ? err.message : "failed to load");
+      });
+    return () => { cancelled = true; };
+  }, [anomaly?.id, anomaly?.ts, anomaly?.region, anomaly?.metric]);
+
+  if (!anomaly) {
+    return (
+      <Card className="flex h-full items-center justify-center">
+        <p className="py-16 text-center text-xs text-white/40">
+          Select a row to see its detail.
+        </p>
+      </Card>
+    );
+  }
+
+  const sev = SEVERITY_STYLES[anomaly.severity];
+  const stat = STATUS_STYLES[anomaly.status];
+  const StatIcon = stat.icon;
+
+  // Real, derived-from-the-row contributing factors -- only ever states
+  // something that's actually true of this specific row's own real
+  // fields, never a fixed/templated list (the reference layout's own
+  // "Z-score > 3.5"/"Outside expected range"/"Change rate > 50%" read as
+  // fixed always-on bullets; here each only appears when the real data
+  // backs it).
+  const factors: string[] = [];
+  if (anomaly.z_score != null && Math.abs(anomaly.z_score) > Z_SCORE_THRESHOLD) {
+    factors.push(`Z-score ${anomaly.z_score >= 0 ? ">" : "<"} ${anomaly.z_score >= 0 ? Z_SCORE_THRESHOLD.toFixed(1) : `-${Z_SCORE_THRESHOLD.toFixed(1)}`} (actual: ${anomaly.z_score.toFixed(2)})`);
+  }
+  if (
+    anomaly.observed_value != null &&
+    (anomaly.expected_low != null || anomaly.expected_high != null) &&
+    ((anomaly.expected_low != null && anomaly.observed_value < anomaly.expected_low) ||
+      (anomaly.expected_high != null && anomaly.observed_value > anomaly.expected_high))
+  ) {
+    factors.push(
+      `Outside expected range [${anomaly.expected_low?.toFixed(1) ?? "—"}, ${anomaly.expected_high?.toFixed(1) ?? "—"}]`,
+    );
+  }
+  if ((anomaly.method === "ml" || anomaly.method === "hybrid") && anomaly.score >= ML_ANOMALY_SCORE_THRESHOLD) {
+    factors.push(`ML (IsolationForest) anomaly score ≥ ${ML_ANOMALY_SCORE_THRESHOLD.toFixed(1)} (actual: ${anomaly.score.toFixed(2)})`);
+  }
+
   return (
-    <>
-      <tr
-        className="cursor-pointer transition-colors hover:bg-white/[0.03]"
-        onClick={onToggle}
-        data-testid={`anomaly-row-${a.id}`}
-      >
-        <td className="whitespace-nowrap px-3 py-2 text-white/80">
-          <div className="flex items-center gap-1.5">
-            {expanded ? (
-              <ChevronDown className="h-3 w-3 text-white/40" />
-            ) : (
-              <ChevronRight className="h-3 w-3 text-white/40" />
-            )}
-            {formatTs(a.detected_at)}
-          </div>
-        </td>
-        <td className="px-3 py-2 font-mono text-xs text-white/80">{a.region ?? "—"}</td>
-        <td className="px-3 py-2 text-xs text-white/60">{a.source}</td>
-        <td className="px-3 py-2">
-          <span className={cn("inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[11px] font-medium", sev.chip, sev.text)}>
-            <span className={cn("h-1.5 w-1.5 rounded-full", sev.dot)} />
-            {a.severity}
-          </span>
-        </td>
-        <td className="px-3 py-2">
-          <span className="inline-flex items-center gap-1.5 text-[11px] text-white/70">
-            <MethodIcon className="h-3.5 w-3.5" />
-            {a.method}
-          </span>
-        </td>
-        <td className="px-3 py-2 text-right font-mono text-xs text-white/80">
-          {a.score.toFixed(3)}
-        </td>
-        <td className="px-3 py-2">
-          <span className={cn("inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] font-medium", stat.className)}>
-            <StatIcon className="h-3 w-3" />
-            {stat.label}
-          </span>
-        </td>
-        <td className="px-3 py-2 text-right">
-          {mutating ? (
-            <Loader2 className="ml-auto h-3.5 w-3.5 animate-spin text-white/50" />
-          ) : a.status === "new" ? (
-            <div className="flex justify-end gap-1">
-              <button
-                onClick={(e) => { e.stopPropagation(); onAcknowledge(); }}
-                className="rounded-md border border-amber-300/30 bg-amber-300/10 px-2 py-1 text-[11px] font-medium text-amber-200 hover:bg-amber-300/20"
-                data-testid={`ack-${a.id}`}
-              >
-                Ack
-              </button>
-              <button
-                onClick={(e) => { e.stopPropagation(); onFalsePositive(); }}
-                className="rounded-md border border-white/10 bg-white/5 px-2 py-1 text-[11px] text-white/70 hover:bg-white/10"
-                data-testid={`fp-${a.id}`}
-              >
-                FP
-              </button>
-            </div>
-          ) : a.status === "acknowledged" ? (
-            <button
-              onClick={(e) => { e.stopPropagation(); onResolve(); }}
-              className="rounded-md border border-emerald-200/30 bg-emerald-200/10 px-2 py-1 text-[11px] font-medium text-emerald-100 hover:bg-emerald-200/20"
-              data-testid={`resolve-${a.id}`}
-            >
-              Resolve
-            </button>
-          ) : (
-            <span className="text-[11px] text-white/40">—</span>
-          )}
-        </td>
-      </tr>
-      {expanded && (
-        <tr className="bg-white/[0.02]">
-          <td colSpan={8} className="px-6 py-4">
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-              <div>
-                <h4 className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-white/50">
-                  Interval
-                </h4>
-                <p className="font-mono text-xs text-white/80">
-                  {a.ts ?? "—"}
-                </p>
-              </div>
-              <div>
-                <h4 className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-white/50">
-                  Observed vs expected
-                </h4>
-                <p className="font-mono text-xs text-white/80">
-                  {a.metric ?? "value"} ={" "}
-                  <span className="text-amber-200">
-                    {a.observed_value != null ? a.observed_value : "—"}
-                  </span>
-                  <br />
-                  {(a.expected_low != null || a.expected_high != null) && (
-                    <>
-                      expected ={" "}
-                      <span className="text-emerald-100">
-                        [{a.expected_low ?? "—"}, {a.expected_high ?? "—"}]
-                      </span>
-                      {a.z_score != null && (
-                        <span className="text-white/40"> (z={a.z_score.toFixed(2)})</span>
-                      )}
-                    </>
-                  )}
-                </p>
-              </div>
-              <div>
-                <h4 className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-white/50">
-                  Status updated
-                </h4>
-                <p className="text-xs text-white/80">
-                  {a.status_updated_at ? formatTs(a.status_updated_at) : <span className="text-white/40">never</span>}
-                </p>
-              </div>
-              <div className="md:col-span-3">
-                <h4 className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-white/50">
-                  Reason
-                </h4>
-                <p className="text-sm text-white/80">{a.reason}</p>
-              </div>
-            </div>
-          </td>
-        </tr>
+    <Card className="flex h-full flex-col">
+      <div className="mb-3 flex items-center justify-between">
+        <h2 className="flex items-center gap-2 text-sm font-semibold text-white">
+          <Lightbulb className="h-4 w-4 text-amber-200" />
+          Anomaly Details
+        </h2>
+        <span className="font-mono text-[10px] text-white/40">{anomaly.id.slice(0, 8)}</span>
+      </div>
+
+      <div className="mb-3 flex items-center gap-2">
+        <span className={cn("inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-semibold", sev.chip, sev.text)}>
+          <span className={cn("h-2 w-2 rounded-full", sev.dot)} />
+          {anomaly.severity === "high" ? "High" : anomaly.severity === "medium" ? "Moderate" : "Low"} Anomaly
+        </span>
+        <span className={cn("inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-medium", stat.className)}>
+          <StatIcon className="h-3 w-3" />
+          {stat.label}
+        </span>
+      </div>
+
+      <dl className="space-y-2 text-xs">
+        <DetailRow label="Time Detected" value={formatTs(anomaly.detected_at)} />
+        <DetailRow label="Interval" value={anomaly.ts ?? "—"} mono />
+        <DetailRow label="Metric" value={anomaly.metric ?? "—"} />
+        <DetailRow label="Source" value={anomaly.source} />
+        <DetailRow label="Region" value={anomaly.region ?? "—"} />
+        <DetailRow
+          label="Observed Value"
+          value={anomaly.observed_value != null ? anomaly.observed_value.toLocaleString() : "—"}
+          valueClassName="text-amber-200"
+        />
+        <DetailRow
+          label="Expected Range"
+          value={
+            anomaly.expected_low != null || anomaly.expected_high != null
+              ? `${anomaly.expected_low?.toFixed(1) ?? "—"} – ${anomaly.expected_high?.toFixed(1) ?? "—"}`
+              : "—"
+          }
+        />
+        <DetailRow label="Anomaly Score" value={anomaly.score.toFixed(3)} valueClassName="text-rose-200" />
+        <DetailRow label="Detection Method" value={anomaly.method} />
+        <DetailRow
+          label="Status Updated"
+          value={anomaly.status_updated_at ? formatTs(anomaly.status_updated_at) : "never"}
+        />
+      </dl>
+
+      <div className="mt-3">
+        <h4 className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-white/50">Reason</h4>
+        <p className="text-xs leading-relaxed text-white/80">{anomaly.reason}</p>
+      </div>
+
+      {/* Point Context -- real narrow window around this row's own ts */}
+      <div className="mt-3">
+        <h4 className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-white/50">
+          Point Context (±2h, real)
+        </h4>
+        {!anomaly.ts || !anomaly.region || !TIMESERIES_METRICS.has(anomaly.metric ?? "") ? (
+          <p className="py-4 text-center text-[11px] text-white/35">
+            Not available for this metric/source.
+          </p>
+        ) : contextError ? (
+          <p className="py-4 text-center text-[11px] text-white/35">Unavailable — {contextError}</p>
+        ) : context === null ? (
+          <p className="py-4 text-center text-[11px] text-white/35">Loading…</p>
+        ) : (
+          <PointContextSparkline points={context} highlightTs={anomaly.ts} />
+        )}
+      </div>
+
+      {/* Contributing Factors -- only real, derived-from-this-row facts */}
+      {factors.length > 0 && (
+        <div className="mt-3">
+          <h4 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-white/50">
+            Contributing Factors
+          </h4>
+          <ul className="space-y-1">
+            {factors.map((f) => (
+              <li key={f} className="flex items-start gap-1.5 text-[11px] text-white/75">
+                <CheckCircle2 className="mt-0.5 h-3 w-3 shrink-0 text-emerald-300" />
+                {f}
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
-    </>
+
+      <div className="mt-auto pt-3">
+        {mutating ? (
+          <div className="flex justify-center py-1">
+            <Loader2 className="h-4 w-4 animate-spin text-white/50" />
+          </div>
+        ) : anomaly.status === "new" ? (
+          <div className="flex gap-2">
+            <button
+              onClick={onAcknowledge}
+              className="flex-1 rounded-md border border-amber-300/30 bg-amber-300/10 px-3 py-1.5 text-xs font-medium text-amber-200 hover:bg-amber-300/20"
+              data-testid={`ack-${anomaly.id}`}
+            >
+              Acknowledge
+            </button>
+            <button
+              onClick={onFalsePositive}
+              className="flex-1 rounded-md border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-white/70 hover:bg-white/10"
+              data-testid={`fp-${anomaly.id}`}
+            >
+              False Positive
+            </button>
+          </div>
+        ) : anomaly.status === "acknowledged" ? (
+          <button
+            onClick={onResolve}
+            className="w-full rounded-md border border-emerald-200/30 bg-emerald-200/10 px-3 py-1.5 text-xs font-medium text-emerald-100 hover:bg-emerald-200/20"
+            data-testid={`resolve-${anomaly.id}`}
+          >
+            Mark Resolved
+          </button>
+        ) : null}
+      </div>
+    </Card>
   );
+}
+
+function DetailRow({
+  label,
+  value,
+  mono,
+  valueClassName,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+  valueClassName?: string;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 border-b border-white/5 pb-1.5">
+      <dt className="text-white/50">{label}</dt>
+      <dd className={cn("truncate text-right text-white/85", mono && "font-mono", valueClassName)}>
+        {value}
+      </dd>
+    </div>
+  );
+}
+
+function PointContextSparkline({
+  points,
+  highlightTs,
+}: {
+  points: AnomalyTimeseriesPoint[];
+  highlightTs: string;
+}) {
+  const w = 400, h = 110, pad = 6;
+  const withValues = points.filter((p) => p.value !== null);
+  if (withValues.length < 2) {
+    return <p className="py-4 text-center text-[11px] text-white/35">Not enough real data nearby.</p>;
+  }
+  const tMin = new Date(withValues[0].ts).getTime();
+  const tMax = new Date(withValues[withValues.length - 1].ts).getTime();
+  const tSpan = Math.max(1, tMax - tMin);
+  const vMin = Math.min(...withValues.map((p) => p.value!));
+  const vMax = Math.max(...withValues.map((p) => p.value!));
+  const vSpan = Math.max(1e-6, vMax - vMin);
+  const x = (ts: string) => pad + ((new Date(ts).getTime() - tMin) / tSpan) * (w - pad * 2);
+  const y = (v: number) => pad + (1 - (v - vMin) / vSpan) * (h - pad * 2);
+
+  const linePath = smoothPath(withValues.map((p) => [x(p.ts), y(p.value!)]));
+  const highlight = withValues.reduce((best, p) =>
+    Math.abs(new Date(p.ts).getTime() - new Date(highlightTs).getTime()) <
+    Math.abs(new Date(best.ts).getTime() - new Date(highlightTs).getTime())
+      ? p
+      : best,
+  );
+
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" className="h-24 w-full">
+      <path d={linePath} fill="none" stroke="#7dd3fc" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />
+      {highlight.value !== null && (
+        <circle
+          cx={x(highlight.ts)}
+          cy={y(highlight.value)}
+          r={4}
+          fill={highlight.severity === "high" ? "#fb7185" : highlight.severity === "medium" ? "#fbbf24" : "#34d399"}
+          stroke="#0a1410"
+          strokeWidth={1.5}
+        />
+      )}
+    </svg>
+  );
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Anomaly Overview chart
+// ────────────────────────────────────────────────────────────────────
+
+const OVERVIEW_SEVERITY_COLOR: Record<string, string> = {
+  high: "#fb7185",
+  medium: "#fbbf24",
+  low: "#34d399",
+};
+
+function AnomalyOverviewChart({
+  points,
+  metric,
+}: {
+  points: AnomalyTimeseriesPoint[];
+  metric: string;
+}) {
+  const w = 1200, h = 320;
+  const padL = 60, padR = 24, padT = 20, padB = 32;
+  const innerW = w - padL - padR;
+  const innerH = h - padT - padB;
+
+  const withValues = points.filter((p) => p.value !== null);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const [hover, setHover] = useState<{ x: number; y: number; idx: number } | null>(null);
+
+  const yMaxRaw = Math.max(1, ...withValues.map((p) => Math.max(p.value ?? 0, p.expected_high ?? 0)));
+  const yMinRaw = Math.min(0, ...withValues.map((p) => Math.min(p.value ?? 0, p.expected_low ?? 0)));
+  const yMax = niceY(yMaxRaw);
+  const yMin = yMinRaw < 0 ? -niceY(-yMinRaw) : 0;
+
+  const tMin = withValues.length ? new Date(withValues[0].ts).getTime() : Date.now();
+  const tMax = withValues.length ? new Date(withValues[withValues.length - 1].ts).getTime() : Date.now();
+  const tSpan = Math.max(1, tMax - tMin);
+  const x = (tMs: number) => padL + ((tMs - tMin) / tSpan) * innerW;
+  const y = (v: number) => padT + innerH * (1 - (v - yMin) / (yMax - yMin));
+
+  const linePath = smoothPath(withValues.map((p) => [x(new Date(p.ts).getTime()), y(p.value!)]));
+
+  // Real expected-range band -- only where both edges are non-null
+  // (rolling window edges / too-few-real-points stretches have none,
+  // see `get_demand_timeseries`'s own docstring), split into segments
+  // so a gap in the band doesn't draw a straight line across it.
+  const bandSegments: Array<Array<[number, number, number]>> = [];
+  let current: Array<[number, number, number]> = [];
+  for (const p of withValues) {
+    if (p.expected_low !== null && p.expected_high !== null) {
+      current.push([new Date(p.ts).getTime(), p.expected_low, p.expected_high]);
+    } else if (current.length > 1) {
+      bandSegments.push(current);
+      current = [];
+    } else {
+      current = [];
+    }
+  }
+  if (current.length > 1) bandSegments.push(current);
+
+  const anomalousPoints = withValues.filter((p) => p.is_anomalous);
+
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el || withValues.length === 0) return;
+    function onMove(e: MouseEvent) {
+      const rect = el!.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const svgX = (mx / rect.width) * w;
+      let nearest = 0;
+      let best = Infinity;
+      for (let i = 0; i < withValues.length; i++) {
+        const d = Math.abs(x(new Date(withValues[i].ts).getTime()) - svgX);
+        if (d < best) { best = d; nearest = i; }
+      }
+      setHover({ x: mx, y: (e.clientY - rect.top), idx: nearest });
+    }
+    function onLeave() { setHover(null); }
+    el.addEventListener("mousemove", onMove);
+    el.addEventListener("mouseleave", onLeave);
+    return () => {
+      el.removeEventListener("mousemove", onMove);
+      el.removeEventListener("mouseleave", onLeave);
+    };
+  }, [withValues, tMin, tSpan]);
+
+  if (withValues.length === 0) {
+    return <p className="py-16 text-center text-xs text-white/40">No real data for this region/metric yet.</p>;
+  }
+
+  const hoverPoint = hover ? withValues[hover.idx] : null;
+
+  return (
+    <div ref={wrapRef} className="relative">
+      <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" className="h-72 w-full">
+        {[0, 0.25, 0.5, 0.75, 1].map((p, i) => {
+          const yy = padT + p * innerH;
+          const labelVal = yMax - p * (yMax - yMin);
+          return (
+            <g key={`y-${i}`}>
+              <line x1={padL} x2={w - padR} y1={yy} y2={yy} stroke="rgba(255,255,255,0.05)" strokeDasharray={i === 0 ? "" : "4 4"} />
+              <text x={padL - 8} y={yy + 3} textAnchor="end" fontSize="11" fill="rgba(255,255,255,0.4)">
+                {Math.round(labelVal).toLocaleString()}
+              </text>
+            </g>
+          );
+        })}
+        <text x={padL - 44} y={padT - 6} fontSize="11" fill="rgba(255,255,255,0.55)">
+          {metric === "price_mwh" ? "$/MWh" : "MW"}
+        </text>
+
+        {bandSegments.map((seg, i) => (
+          <path
+            key={`band-${i}`}
+            d={smoothBandPath(
+              seg.map(([t, , eh]) => [x(t), y(eh)]),
+              seg.map(([t, el]) => [x(t), y(el)]),
+            )}
+            fill="rgba(255,255,255,0.08)"
+            stroke="none"
+          />
+        ))}
+
+        <path d={linePath} fill="none" stroke="#94a3b8" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />
+
+        {anomalousPoints.map((p) => (
+          <circle
+            key={p.ts}
+            cx={x(new Date(p.ts).getTime())}
+            cy={y(p.value!)}
+            r={3.5}
+            fill={OVERVIEW_SEVERITY_COLOR[p.severity ?? "low"]}
+            stroke="#0a1410"
+            strokeWidth={1}
+          />
+        ))}
+
+        {hover && hoverPoint && hoverPoint.value !== null && (
+          <g>
+            <line
+              x1={x(new Date(hoverPoint.ts).getTime())}
+              x2={x(new Date(hoverPoint.ts).getTime())}
+              y1={padT}
+              y2={padT + innerH}
+              stroke="rgba(125,211,252,0.35)"
+              strokeWidth={0.5}
+              strokeDasharray="2 2"
+            />
+            <circle
+              cx={x(new Date(hoverPoint.ts).getTime())}
+              cy={y(hoverPoint.value)}
+              r={4}
+              fill="#0a1410"
+              stroke="#7dd3fc"
+              strokeWidth={2}
+            />
+          </g>
+        )}
+      </svg>
+
+      {hover && hoverPoint && (
+        <div
+          className="pointer-events-none absolute z-20 min-w-[180px] -translate-x-1/2 -translate-y-[calc(100%+10px)] rounded-md border border-white/10 bg-[#0a1410]/95 px-3 py-2 text-xs shadow-2xl backdrop-blur"
+          style={{ left: Math.min(Math.max(hover.x, 90), w - 90), top: hover.y }}
+        >
+          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-white/50">
+            {new Date(hoverPoint.ts).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-white/65">Value</span>
+            <span className="font-mono font-semibold text-white">{hoverPoint.value?.toLocaleString()}</span>
+          </div>
+          {hoverPoint.expected_low !== null && hoverPoint.expected_high !== null && (
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-white/65">Expected</span>
+              <span className="font-mono text-white/80">
+                {hoverPoint.expected_low.toFixed(0)} – {hoverPoint.expected_high.toFixed(0)}
+              </span>
+            </div>
+          )}
+          {hoverPoint.is_anomalous && (
+            <div className="mt-1 flex items-center gap-1.5 text-rose-200">
+              <AlertTriangle className="h-3 w-3" />
+              {hoverPoint.severity} anomaly (score {hoverPoint.anomaly_score?.toFixed(2)})
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function smoothPath(pts: Array<[number, number]>, tension: number = 0.3): string {
+  if (pts.length === 0) return "";
+  if (pts.length === 1) return `M ${pts[0][0].toFixed(2)} ${pts[0][1].toFixed(2)}`;
+  if (pts.length === 2) {
+    return `M ${pts[0][0].toFixed(2)} ${pts[0][1].toFixed(2)} L ${pts[1][0].toFixed(2)} ${pts[1][1].toFixed(2)}`;
+  }
+  const k = tension;
+  let d = `M ${pts[0][0].toFixed(2)} ${pts[0][1].toFixed(2)}`;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[i - 1] ?? pts[i];
+    const p1 = pts[i];
+    const p2 = pts[i + 1];
+    const p3 = pts[i + 2] ?? pts[i + 1];
+    const cp1x = p1[0] + ((p2[0] - p0[0]) * k) / 3;
+    const cp1y = p1[1] + ((p2[1] - p0[1]) * k) / 3;
+    const cp2x = p2[0] - ((p3[0] - p1[0]) * k) / 3;
+    const cp2y = p2[1] - ((p3[1] - p1[1]) * k) / 3;
+    d += ` C ${cp1x.toFixed(2)} ${cp1y.toFixed(2)}, ${cp2x.toFixed(2)} ${cp2y.toFixed(2)}, ${p2[0].toFixed(2)} ${p2[1].toFixed(2)}`;
+  }
+  return d;
+}
+
+function smoothBandPath(topPts: Array<[number, number]>, botPts: Array<[number, number]>): string {
+  if (topPts.length === 0 || botPts.length === 0) return "";
+  const top = smoothPath(topPts);
+  const bottomReversed = smoothPath([...botPts].reverse()).replace(/^M/, "L");
+  return `${top} ${bottomReversed} Z`;
+}
+
+function niceY(v: number): number {
+  if (v <= 0) return 100;
+  const mag = Math.pow(10, Math.floor(Math.log10(v)));
+  const norm = (v / mag) * 1.1;
+  for (const step of [1, 2, 2.5, 5, 10]) {
+    if (norm <= step) return step * mag;
+  }
+  return 10 * mag;
 }

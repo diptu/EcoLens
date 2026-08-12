@@ -28,6 +28,7 @@ from app.service.cache_warmer import (
     run_dashboard_essentials_warmer,
     run_emissions_forecast_warmer,
     run_model_drift_warmer,
+    run_recent_backtest_warmer,
 )
 from app.service.ml.energy_registry import EnergyModelRegistry
 from app.service.ml.forecast_reconciliation import watch_and_reconcile
@@ -129,6 +130,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             get_redis(), settings, settings.model_drift_warmer_interval_seconds
         )
     )
+    # `region=NEM, days=30` -- "Emission History"'s full 30-day real
+    # forecast confidence band, confirmed live at ~158s to compute (see
+    # `run_recent_backtest_warmer`'s own docstring). Same "never let a
+    # real request pay this cold" reasoning as the two warmers above,
+    # just added later (2026-08-11) once the band was widened from a
+    # fixed 7 real days to the full selected period.
+    recent_backtest_warmer_task = asyncio.create_task(
+        run_recent_backtest_warmer(
+            get_redis(),
+            get_session,
+            registry,
+            settings,
+            settings.recent_backtest_warmer_interval_seconds,
+        )
+    )
     # Was written (`cache_warmer.py`'s own "make every real endpoint
     # reliably fast" pass) but never actually started here -- a real,
     # confirmed-live bug (2026-08-11): `GET /v1/forecast?region=NEM`
@@ -161,6 +177,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         reconcile_task.cancel()
         emissions_warmer_task.cancel()
         drift_warmer_task.cancel()
+        recent_backtest_warmer_task.cancel()
         dashboard_essentials_warmer_task.cancel()
         await dispose()
         logger.info("forecast_api_shutdown")

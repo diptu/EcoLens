@@ -64,16 +64,29 @@ class Settings(BaseSettings):
     # enough that `lib/emissions.ts`'s `fetchRecentBacktest` uses a 45s
     # timeout instead of every other call's 15s default). The real origin
     # this anchors to only advances as new actual demand lands (hourly at
-    # best), so 5 minutes is honest, not stale in any way the Forecast
-    # Explorer's "Actual vs Predicted" chart cares about -- same
-    # reasoning as `model_drift_cache_ttl_seconds` above.
-    recent_backtest_cache_ttl_seconds: int = 300
+    # best). Bumped 300 -> 1800 (2026-08-11): `region=NEM, days=30` (the
+    # dashboard's "Emission History" 30-day forecast band) is now
+    # confirmed live at ~158s to compute (grew from ~50s as real history
+    # has accumulated) -- kept warm by `run_recent_backtest_warmer`
+    # well under this TTL, so 30 minutes is just a safety margin against
+    # a missed/delayed warm pass, not the real staleness tolerance
+    # (which, per the note above, is honestly ~1h either way).
+    recent_backtest_cache_ttl_seconds: int = 1800
 
     # `app.service.cache_warmer` -- all comfortably shorter than the
     # respective TTL above, so a background refresh always lands before
     # a real request could ever hit an expired (cold) entry.
     emissions_forecast_warmer_interval_seconds: float = 45.0
     model_drift_warmer_interval_seconds: float = 240.0
+    # `region=NEM, days=30` -- confirmed live at ~158s to compute
+    # (`recent_backtest_cache_ttl_seconds`'s own comment), so this needs
+    # its own dedicated loop (same reasoning as the two intervals above,
+    # not folded into `dashboard_essentials_warmer_interval_seconds`
+    # which is for endpoints an order of magnitude cheaper). 20 minutes
+    # keeps a wide margin under the 30-minute TTL (~2 warm-cycle buffer
+    # if one pass is delayed) while keeping this warmer's own duty cycle
+    # reasonable (~158s of real compute every 1200s, not a tight loop).
+    recent_backtest_warmer_interval_seconds: float = 1200.0
     # `run_dashboard_essentials_warmer` -- covers `GET /v1/forecast`
     # (region=NEM) among several other cheaper endpoints, all on
     # `forecast_cache_ttl_seconds`/`emissions_cache_ttl_seconds` (60s) or
@@ -195,6 +208,46 @@ class Settings(BaseSettings):
     model_batch_size: int = 64
     model_quantile_weight: float = 1.0
     model_early_stopping_patience: int = 5
+    # Real bug, confirmed live 2026-08-11: `training_worker._run_live_
+    # evaluation_gate` calls `evaluate.run_live_evaluation_gate` without
+    # ever passing `max_acceptable_mape`, so that function's own
+    # `passed = bool(scored)` was the *entire* real check in production
+    # -- a version tags `eval_gate_passed="True"` as long as evaluation
+    # ran against *any* real data, regardless of how bad its real
+    # out-of-sample MAPE is. `promote_version`'s "never force-skippable"
+    # live-eval gate -- specifically built to catch "a version that
+    # overfit... can still show a fine training-time test_mape" -- was a
+    # paper tiger for exactly that scenario. Confirmed live: the current
+    # Production LSTM (v7)'s real walk-forward MAPE is *worse* than the
+    # trivial seasonal-naive baseline in 5 of 6 regions (WEM: 18.85% vs
+    # naive's 8.38%) yet still carries `eval_gate_passed="True"`.
+    #
+    # `training_worker._resolve_max_acceptable_mape` now computes a real
+    # ceiling from the current Production version's own real
+    # `eval_gate_mape` times `1 + this/100` -- relative to a real
+    # current baseline, same "relative regression, not an arbitrary
+    # absolute number" shape `prune.py`'s `max_relative_mape_regression_
+    # pct` already established for the (much smaller) prune-recovery
+    # case. 20%, not `prune`'s tight 1%: a full/incremental retrain is a
+    # materially bigger real change (fresh random init or a real new
+    # data window, not the same weights minus some units) with real
+    # measured run-to-run noise on this little data (single-split
+    # val_mape swung 8.02%-14.26% across ~10 nominally-identical
+    # historical runs) -- 1% here would reject good real retrains on
+    # noise alone. `None` (no baseline yet -- the very first version
+    # ever registered for a `model_name`, or a Production version that
+    # predates the live-eval-gate tagging and so has no real
+    # `eval_gate_mape` of its own) leaves the gate ungated, same "absent
+    # signal doesn't block" convention `promote_version`'s own two gates
+    # already follow. Deliberately does NOT fall back to Production's
+    # `test_mape` when `eval_gate_mape` is missing (real bug, confirmed
+    # live 2026-08-12: that compared a candidate's real walk-forward
+    # MAPE against an easier single-split metric with only this 20%
+    # tolerance, rejecting v16 -- 11.01 real walk-forward, roughly a
+    # wash against v7's *own* ~11.24 computed the same way -- against
+    # v7's `test_mape` of 8.19, an apples-to-oranges threshold).
+    # `_resolve_max_acceptable_mape`'s own docstring has the full story.
+    live_eval_gate_max_regression_pct: float = 20.0
     # `ml/conformal.py`'s target miscoverage -- 0.2 -> an 80% (P10-P90)
     # interval.
     conformal_alpha: float = 0.2
@@ -217,7 +270,47 @@ class Settings(BaseSettings):
     # without overwriting what the full retrain already learned.
     incremental_train_epochs: int = 3
     incremental_train_lr: float = 1e-4
-    incremental_train_window_hours: int = 24
+    # `ml/prune.py`'s `prune_and_recover` -- real bug, confirmed live
+    # 2026-08-11: this used to fall back to `incremental_train_epochs`
+    # (3) when no explicit `recovery_epochs` was given, which is right
+    # for incremental's own "small nudge to an unchanged architecture"
+    # use case but nowhere near enough to recover from an actual
+    # structural cut (default `--keep-fraction 0.5` removes *half* the
+    # LSTM's hidden units). Measured live at `keep_fraction=0.5` against
+    # a real registered version: 3 epochs left `train_model`'s own loss
+    # curve still steeply descending (val_mape 85%->61%->37%, nowhere
+    # near converged) and produced a +131.2% relative walk-forward MAPE
+    # regression -- past the pipeline's own accuracy-tolerance gate
+    # (`max_relative_mape_regression_pct`, tightened 2%->1% 2026-08-11)
+    # by ~131x, i.e. every default prune was guaranteed to fail it. 15
+    # epochs already recovered past *better* than the unpruned version
+    # (-21.1% relative, comfortably inside even the tightened 1% bar);
+    # 20 keeps a real margin above that without meaningfully more
+    # compute (~0.6s/epoch on this dataset). Still overridable per-call
+    # (`--recovery-epochs`, `ecolens-forecast prune`) for a more
+    # aggressive `keep_fraction` that might genuinely need more.
+    prune_recovery_epochs: int = 20
+    # Real bug, confirmed live 2026-08-11: 24h guaranteed `train_model`'s
+    # own "not enough history" `ValueError` (`ml/train.py`) for every
+    # single incremental trigger, automatic (`services/waerehouse`'s
+    # post-dbt-build publish, which uses this exact same default) or
+    # manual (the dashboard Fine-tune form, whose own default window
+    # mirrored this value) alike -- not an edge case, the *only* case,
+    # every time. The real math: at `model_demand_lookback`/
+    # `model_demand_horizon` (24/48 above), `train_model`'s per-region
+    # window count needs roughly `train_frac * W > lookback + horizon`
+    # for a train window and `(1 - train_frac) * cal_frac * W > horizon`
+    # for a calibration window (val/cal windows borrow lookback context
+    # backward across the split boundary into train, so only train's
+    # own slice needs the full lookback+horizon span) -- with this
+    # service's real `train_frac=0.49`/`cal_frac=0.5`, that's `W > ~196`
+    # real hourly rows, and 24h of *calendar* time, even at perfect
+    # density, is only 24 rows. 336h (14 days) matches the "~14 days"
+    # this file's own `model_demand_lookback`/`model_demand_horizon`
+    # comment already measured as enough real history for NEM (the
+    # thinnest of the 6 regions) to produce multiple non-thin windows,
+    # not just clear the bare minimum.
+    incremental_train_window_hours: int = 336
 
     # RabbitMQ training-trigger topology (consume + publish) -- this
     # service now owns `app.service.training_worker` (the `train-worker`

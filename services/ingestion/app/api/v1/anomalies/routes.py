@@ -1,9 +1,9 @@
 """`GET /v1/anomalies` / `GET /v1/anomalies/summary` /
-`PATCH /v1/anomalies/{id}` -- real `meta.anomalies` listing + status
-workflow, backing the dashboard's anomaly-detection page (root
-TODO.md's "make every page fully functional with real data"). See
-`app.service.anomalies`'s own module docstring for the real severity/
-method derivation.
+`GET /v1/anomalies/timeseries` / `PATCH /v1/anomalies/{id}` -- real
+`meta.anomalies` listing + status workflow, plus a real per-timestamp
+demand series (`raw_marts.fct_energy_demand`) with anomaly flags for the
+anomaly-detection page's overview chart. See `app.service.anomalies`'s
+own module docstring for the real severity/method derivation.
 
 Open, no auth -- same reasoning `GET /v1/data-quality/summary/public`
 already documents: read access to anomaly detail isn't the privileged
@@ -12,6 +12,8 @@ workflow annotation) doesn't touch or re-score any underlying data.
 """
 
 from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,9 +24,16 @@ from app.schemas.anomalies import (
     AnomalyListResponse,
     AnomalyOut,
     AnomalySummaryResponse,
+    AnomalyTimeseriesResponse,
     UpdateAnomalyStatusRequest,
 )
-from app.service.anomalies import get_anomaly_summary, list_anomalies, update_anomaly_status
+from app.service.anomalies import (
+    get_anomaly_summary,
+    get_demand_timeseries,
+    list_anomalies,
+    update_anomaly_status,
+)
+from app.service.pipeline.tasks.ingest_holidays import REGIONS as ALL_REGIONS
 
 router = APIRouter(prefix="/v1/anomalies", tags=["anomalies"])
 
@@ -63,6 +72,32 @@ async def get_anomaly_summary_endpoint(
     db: AsyncSession = Depends(get_db),
 ) -> AnomalySummaryResponse:
     return AnomalySummaryResponse(**(await get_anomaly_summary(db)))
+
+
+@router.get("/timeseries", response_model=AnomalyTimeseriesResponse)
+async def get_demand_timeseries_endpoint(
+    region: str = Query(...),
+    metric: str = Query(default="demand_mw"),
+    start: datetime | None = Query(default=None),
+    end: datetime | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> AnomalyTimeseriesResponse:
+    """`start`/`end` default to a real trailing 7-day window ending now --
+    matches `real-emissions-trend.tsx`'s own `ACTUAL_DAYS` convention for
+    a real, native-cadence chart window."""
+    if region not in ALL_REGIONS:
+        raise ApiError(
+            400, "invalid_region", f"region must be one of {ALL_REGIONS}, got {region!r}."
+        )
+    end = end or datetime.now(timezone.utc)
+    start = start or end - timedelta(days=7)
+    try:
+        result = await get_demand_timeseries(
+            db, region=region, metric=metric, start=start, end=end
+        )
+    except ValueError as exc:
+        raise ApiError(400, "invalid_metric", str(exc)) from exc
+    return AnomalyTimeseriesResponse(**result)
 
 
 @router.patch("/{anomaly_id}", response_model=AnomalyOut)

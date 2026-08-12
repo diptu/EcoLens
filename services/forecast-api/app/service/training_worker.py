@@ -31,7 +31,7 @@ from typing import Any
 
 import pandas as pd
 
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging, get_logger
 from app.db.rabbitmq import close_rabbitmq, consume_training_trigger_events
 from app.service.ml.evaluate import (
@@ -47,10 +47,62 @@ from app.service.ml.timesfm_correction import (
     load_registered_correction_model,
     train_and_register_correction,
 )
-from app.service.ml.train_tft import TFT_MODEL_NAME
+from app.service.ml.train import train_and_register
+from app.service.ml.train_tft import TFT_MODEL_NAME, train_and_register_tft
+from app.service.mlops.registry import get_version_in_stage
 from app.service.model.actions import log_training_finish, log_training_start
 
 log = get_logger(__name__)
+
+
+def _resolve_max_acceptable_mape(model_name: str, settings: Settings) -> float | None:
+    """Real relative-to-Production ceiling for `run_live_evaluation_
+    gate`'s `max_acceptable_mape` -- see `Settings.live_eval_gate_max_
+    regression_pct`'s own docstring for the real bug this closes (that
+    parameter being silently left `None` made the "never force-
+    skippable" live-eval gate unable to fail on accuracy at all).
+
+    Real bug, confirmed live 2026-08-12 against an actual promotion
+    attempt: this used to fall back to Production's logged `test_mape`
+    (a single, training-time split) when its `eval_gate_mape` tag
+    (real walk-forward, out-of-sample) was absent -- v7 (Production)
+    predates the live-eval-gate tagging, so every candidate's real
+    `eval_gate_mape` was compared against v7's `test_mape` of 8.19,
+    with only this setting's 20% tolerance. `test_mape` and walk-
+    forward MAPE are not the same metric and don't share a scale --
+    this whole module's own history is full of walk-forward running
+    higher than the single-split number it's checked against (see
+    `Settings.live_eval_gate_max_regression_pct`'s own docstring: v7's
+    real walk-forward MAPE is *worse* than naive in 5/6 regions despite
+    a fine `test_mape`). Concretely: v16's real `eval_gate_mape`
+    (11.01) is roughly in line with v7's *own* real walk-forward MAPE
+    computed the same way (~11.24 on the same data) -- a genuine wash,
+    not a regression -- yet got rejected against `8.19 * 1.2 = 9.83`,
+    an apples-to-oranges threshold built from the easier metric.
+
+    Only a real walk-forward baseline is comparable to the candidate's
+    own real walk-forward `eval_gate_mape`, so the `test_mape` fallback
+    is gone -- `None` (no ceiling) whenever Production has no real
+    `eval_gate_mape` tag yet, same "absent signal doesn't block"
+    convention `ml.registry.promote_version`'s own two gates already
+    follow, not a new invention. (The `test_mape`-vs-`test_mape`
+    comparison `promote_version` does separately is still a fair,
+    like-for-like check on its own -- this function just stops
+    manufacturing a second, mismatched one.)
+    """
+    production = get_version_in_stage(model_name, "Production")
+    if production is None or production.run_id is None:
+        return None
+
+    tag_value = production.tags.get("eval_gate_mape") if production.tags else None
+    if not tag_value:
+        return None
+    try:
+        baseline_mape = float(tag_value)
+    except ValueError:
+        return None
+
+    return baseline_mape * (1 + settings.live_eval_gate_max_regression_pct / 100)
 
 
 async def _run_live_evaluation_gate(
@@ -68,6 +120,14 @@ async def _run_live_evaluation_gate(
     have an `eval_gate_passed` tag for `promote_version` to consult yet,
     which is a real but non-fatal degradation, not silently pretending
     the gate ran when it didn't).
+
+    `max_acceptable_mape` (2026-08-11, real fix -- see `Settings.
+    live_eval_gate_max_regression_pct`'s own docstring) is now resolved
+    from the current Production version's own real accuracy via
+    `_resolve_max_acceptable_mape`, not left `None` -- previously this
+    call site never set it at all, which made `passed` reduce to "did
+    evaluation run against any real data", not "is the real accuracy
+    acceptable".
     """
     try:
         forecaster: Forecaster
@@ -81,8 +141,14 @@ async def _run_live_evaluation_gate(
         else:
             lstm_forecaster = load_registered_model(model_name, version)
             forecaster, horizon = lstm_forecaster, lstm_forecaster.model.horizon
+        max_acceptable_mape = _resolve_max_acceptable_mape(model_name, get_settings())
         gate_result = await run_live_evaluation_gate(
-            forecaster, model_name, version, regions, horizon
+            forecaster,
+            model_name,
+            version,
+            regions,
+            horizon,
+            max_acceptable_mape=max_acceptable_mape,
         )
         log.info(
             "training_worker.live_eval_gate",
@@ -90,6 +156,7 @@ async def _run_live_evaluation_gate(
             version=version,
             passed=gate_result.passed,
             overall_mape=gate_result.overall_mape,
+            max_acceptable_mape=max_acceptable_mape,
         )
     except Exception as exc:
         log.error(
@@ -124,6 +191,25 @@ async def handle_training_trigger(payload: dict[str, Any]) -> None:
     layer's, which is what makes "continuously adapts" honestly true for
     TimesFM's contribution the same way it already is for LSTM/TFT.
 
+    `payload["full_retrain"]` (`False` if absent -- every event
+    published before this field existed, including every automatic
+    post-dbt-build event `services/waerehouse` still publishes today,
+    correctly keeps behaving as an incremental fine-tune): `True`
+    dispatches to the real from-scratch trainer instead --
+    `ml.train.train_and_register`/`ml.train_tft.train_and_register_tft`,
+    the same functions `ecolens-forecast train`/`train-tft` already call
+    from the CLI, now reachable from a manual `POST /v1/model/train`
+    trigger too (2026-08-11 -- previously the dashboard's "Train a new
+    version" tab had no trigger endpoint at all). Neither function sets
+    a `training_type` tag, same as any other full retrain -- what
+    `divergence.find_last_full_retrain_run_id` already keys off of to
+    find a real anchor to compare incremental drift against, so a full
+    retrain triggered this way is indistinguishable from one triggered
+    by the CLI, as it honestly should be. No real distinction for
+    `timesfm_correction` here either (see this field's own note on
+    `TrainRequest.full_retrain`) -- it always dispatches to
+    `train_and_register_correction` regardless of this flag.
+
     Logs a `meta._training_log` row for the full attempt regardless of
     outcome (`running` at start, `success`/`failed` at the end) -- the
     real "is a training run in flight right now" signal
@@ -144,6 +230,7 @@ async def handle_training_trigger(payload: dict[str, Any]) -> None:
     )
     until = pd.Timestamp(window_until) if window_until else pd.Timestamp.now(tz="UTC")
     architecture = payload.get("architecture") or "lstm"
+    full_retrain = bool(payload.get("full_retrain", False))
     if architecture == "tft":
         model_name = TFT_MODEL_NAME
     elif architecture == "timesfm_correction":
@@ -160,7 +247,11 @@ async def handle_training_trigger(payload: dict[str, Any]) -> None:
         until.to_pydatetime(),
     )
     try:
-        if architecture == "tft":
+        if full_retrain and architecture == "tft":
+            result = await train_and_register_tft(model_name, regions, since=since)
+        elif full_retrain and architecture != "timesfm_correction":
+            result = await train_and_register(model_name, regions, since=since)
+        elif architecture == "tft":
             result = await train_and_register_tft_incremental(
                 model_name, regions, since
             )
@@ -181,12 +272,13 @@ async def handle_training_trigger(payload: dict[str, Any]) -> None:
         model_version=result.model_version,
     )
     log.info(
-        "training_worker.incremental_trained",
+        "training_worker.trained",
         model_name=model_name,
         run_id=result.run_id,
         model_version=result.model_version,
         regions=regions,
         architecture=architecture,
+        full_retrain=full_retrain,
     )
 
     if result.model_version:

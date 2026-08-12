@@ -52,3 +52,18 @@ class TrainRequest(AppBaseModel):
     regions: list[str] | None = None
     window_hours: int | None = None
     architecture: Literal["lstm", "tft", "timesfm_correction"] | None = None
+    # 2026-08-11, real feature -- previously the dashboard's "Train a new
+    # version" tab had no trigger endpoint at all, just a disabled
+    # preview button. `False` (default) keeps the existing warm-started
+    # incremental fine-tune path (`training_worker.handle_training_
+    # trigger` -> `ml.incremental`/`ml.incremental_tft`); `True`
+    # dispatches to the real from-scratch trainer instead
+    # (`ml.train.train_and_register`/`ml.train_tft.train_and_register_
+    # tft` -- the same functions `ecolens-forecast train`/`train-tft`
+    # already call, now reachable over HTTP too). No real distinction
+    # for `architecture="timesfm_correction"`: its own "incremental"
+    # path already re-fits the Ridge correction layer fresh on the
+    # selected window every time (frozen zero-shot TimesFM has no
+    # weights to warm-start from) -- accepted but doesn't change its
+    # dispatch, see `handle_training_trigger`'s own comment.
+    full_retrain: bool = False

@@ -203,19 +203,26 @@ async def test_consume_training_trigger_events_processes_messages_and_sets_qos(
     assert fake_connection.channel_obj.qos == 1
 
 
-async def test_a_failing_handler_propagates_after_processing_earlier_messages(
+async def test_a_failing_handler_does_not_stop_later_messages_from_being_processed(
     monkeypatch,
 ):
-    """Unlike `consume_landed_events` (which wraps each message in its
-    own try/except, application-level DLQ), `consume_training_trigger_
-    events` has no per-message try/except at all: `message.process(
-    requeue=False)`'s `__aexit__` nacks then re-raises, which escapes the
-    `async for` and ends the consume loop -- the queue's native
-    `x-dead-letter-exchange` argument (`_declare_training_trigger_
-    topology`) is what actually dead-letters the failed message at the
-    broker level, so no application-level catch is needed here. This
-    pins that real behavior: earlier messages in the same batch were
-    already handed to the handler before the exception propagates."""
+    """Real bug, confirmed live 2026-08-11: this test used to pin the
+    *opposite* of what's below -- `message.process(requeue=False)`'s
+    `__aexit__` nacks then re-raises (real `aio_pika` behavior,
+    contradicting this module's own former docstring), which escaped
+    the `async for` and ended the whole long-running consume loop on
+    the very first real training failure (e.g. a real trigger window
+    too short to build even one train/val/cal window -- exactly what
+    happened live). That silently turned every *future* real trigger
+    into a permanently stuck "waiting for the worker" dashboard state,
+    not just failing the one bad job. `consume_training_trigger_events`
+    now wraps `message.process()` in its own try/except (logs and
+    continues) -- the queue's native `x-dead-letter-exchange` argument
+    (`_declare_training_trigger_topology`) still dead-letters the
+    failed message at the broker level either way, so no behavior is
+    lost, just the crash. This pins the fixed contract: a failing
+    message doesn't stop the third (good) message after it from being
+    handled too."""
 
     class _FakeMessage:
         def __init__(self, body):
@@ -278,10 +285,9 @@ async def test_a_failing_handler_propagates_after_processing_earlier_messages(
         if payload["architecture"] == "bad":
             raise RuntimeError("no warm-startable version -- simulated failure")
 
-    with pytest.raises(RuntimeError):
-        await rabbitmq_client.consume_training_trigger_events(handler)
+    await rabbitmq_client.consume_training_trigger_events(handler)
 
-    # The first (good) message was handled before the failing one raised
-    # -- confirms the loop processes messages one at a time, in order,
-    # rather than batching in a way that would hide this.
-    assert seen == ["lstm", "bad"]
+    # All three messages were handled, in order -- the failing "bad"
+    # message didn't stop "tft" (the message after it) from being
+    # processed too, unlike the old crash-the-consumer behavior.
+    assert seen == ["lstm", "bad", "tft"]

@@ -210,46 +210,6 @@ export function getTrainingJobs(limit = 8): TrainingJob[] {
   ];
 }
 
-export interface DeploymentRecord {
-  id: string;
-  model: string;
-  version: string;
-  environment: "production" | "staging" | "canary";
-  deployed_at: string;
-  replicas: number;
-  cpu_pct: number;
-  latency_p95_ms: number;
-  traffic_pct: number;
-}
-
-export function getDeployments(): DeploymentRecord[] {
-  return [
-    { id: "dep-1", model: "Demand Forecast LSTM",      version: "v8",  environment: "production", deployed_at: "May 12, 2026", replicas: 3, cpu_pct: 42, latency_p95_ms:  82, traffic_pct: 100 },
-    { id: "dep-2", model: "Demand Forecast LSTM",      version: "v8c", environment: "canary",     deployed_at: "May 18, 2026", replicas: 1, cpu_pct: 12, latency_p95_ms:  78, traffic_pct:   5 },
-    { id: "dep-3", model: "Carbon Intensity XGB",      version: "v3",  environment: "production", deployed_at: "Apr 28, 2026", replicas: 2, cpu_pct: 18, latency_p95_ms:  22, traffic_pct: 100 },
-    { id: "dep-4", model: "Renewable Share Transformer", version: "v2", environment: "staging",   deployed_at: "May 14, 2026", replicas: 1, cpu_pct: 24, latency_p95_ms: 142, traffic_pct:   0 },
-  ];
-}
-
-export interface FeatureGroup {
-  id: string;
-  name: string;
-  entity: string;
-  features: number;
-  last_materialized: string;
-  owner: string;
-}
-
-export function getFeatureGroups(): FeatureGroup[] {
-  return [
-    { id: "fg-1", name: "demand_lag_24h",     entity: "region",  features: 18, last_materialized: "5 min ago",  owner: "ML Team" },
-    { id: "fg-2", name: "weather_features",   entity: "station", features: 24, last_materialized: "30 min ago", owner: "ML Team" },
-    { id: "fg-3", name: "calendar_features",  entity: "date",    features: 12, last_materialized: "1 day ago",  owner: "ML Team" },
-    { id: "fg-4", name: "price_features",     entity: "region",  features: 32, last_materialized: "5 min ago",  owner: "Trading" },
-    { id: "fg-5", name: "renewable_features", entity: "region",  features: 16, last_materialized: "30 min ago", owner: "ML Team" },
-  ];
-}
-
 export interface MlflowExperiment {
   id: string;
   name: string;

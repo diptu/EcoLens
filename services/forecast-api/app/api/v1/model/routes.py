@@ -71,7 +71,11 @@ async def trigger_training_endpoint(
     body: TrainRequest = TrainRequest(),
 ) -> TrainTriggerResponse:
     return await trigger_training(
-        body.regions, body.window_hours, triggered_by="public", architecture=body.architecture
+        body.regions,
+        body.window_hours,
+        triggered_by="public",
+        architecture=body.architecture,
+        full_retrain=body.full_retrain,
     )
 
 

@@ -134,6 +134,31 @@ def test_train_endpoint_threads_the_requested_architecture_through(
     assert fake_training_trigger_deps[0]["architecture"] == architecture
 
 
+def test_train_endpoint_defaults_full_retrain_to_false(client, fake_training_trigger_deps):
+    response = client.post("/v1/model/train", json={})
+
+    assert response.status_code == 202
+    assert response.json()["full_retrain"] is False
+    assert fake_training_trigger_deps[0]["full_retrain"] is False
+
+
+def test_train_endpoint_threads_full_retrain_through(client, fake_training_trigger_deps):
+    """2026-08-11, real feature: the dashboard's "Train a new version"
+    tab previously had no trigger endpoint at all (a disabled preview
+    button). Confirms `full_retrain: true` reaches the published
+    training-trigger event, which is what `training_worker.
+    handle_training_trigger` dispatches on to pick the real from-scratch
+    trainer over the incremental one."""
+    response = client.post(
+        "/v1/model/train", json={"regions": ["QLD1"], "full_retrain": True}
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["full_retrain"] is True
+    assert fake_training_trigger_deps[0]["full_retrain"] is True
+
+
 def test_train_endpoint_rejects_an_unknown_architecture(client):
     response = client.post(
         "/v1/model/train", json={"architecture": "some_other_model"}

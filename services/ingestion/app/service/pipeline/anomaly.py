@@ -1,26 +1,38 @@
-"""Hybrid anomaly detection (`overview.md` §1 — "every ingested record is
-analysed using a hybrid anomaly detection approach that combines
-rule-based checks with machine learning models... flags them with an
+"""Anomaly detection (`overview.md` §1 — "every ingested record is
+analysed using a hybrid anomaly detection approach... flags them with an
 anomaly score and explanation... rather than removing suspicious
 records").
 
-Three signals, combined by taking the worst of the three per row:
+Two signals, combined by taking the worse of the two per row:
 
-1. Rule-based: a value outside `_BOUNDS`' physically/operationally
-   plausible range for its column (negative demand, a 150°C reading), or
-   a value that's missing/unparseable where the source is expected to
-   report one.
-2. Statistical: a per-batch z-score against that column's own mean/std
+1. Statistical: a per-batch z-score against that column's own mean/std
    within the current fetch. Deliberately self-contained (no historical
    baseline query, no trained model artifact) — a "lightweight local
-   outlier check", complementary to signal 3's actual trained model.
-3. **ML**: `pipeline.ml_anomaly.score` — a per-source `IsolationForest`
+   outlier check", complementary to signal 2's actual trained model.
+2. **ML**: `pipeline.ml_anomaly.score` — a per-source `IsolationForest`
    trained against this source's accumulated staging history, scored
    per batch. `None` (no contribution) until a model has actually been
    trained for a given source (`ecolens-ingestion train-anomaly-model`)
    — a real, expected state for a source that hasn't been trained yet,
-   not an error; the hybrid detector simply runs on 2 signals until
-   then, same as it always has.
+   not an error; the detector simply runs on 1 signal until then.
+
+**Rule-based checks retired 2026-08-12** (out-of-range physical bounds
+and missing/unparseable-value flagging, `_BOUNDS`/`_MISSING_VALUE_SCORE`/
+`_OUT_OF_RANGE_SCORE`, formerly signal 1). Real, live-observed cost: the
+missing-value check alone accounted for 121K/150K+ real `meta.anomalies`
+rows, the overwhelming majority structurally expected rather than
+anomalous (e.g. `aemo_wem`'s `price_mwh` is genuinely `NaN` on 5/6 of
+every WEM batch — AEMO only publishes price at the :00/:30 marks, see
+`ingest_aemo_wem._fetch_wem_day`'s own docstring — so nearly every WEM
+row was flagged on a column that was never going to have a value, not a
+real data-quality problem). The out-of-range bounds themselves were also
+never derived from real anomaly-labeled data, just generous physically-
+plausible-for-Australia sanity ceilings (module history, `git blame`).
+`meta.anomalies.rule_based_score` and the historical rows it's already
+set on are left alone (real, disclosed schema-migration boundary, same
+shape the `method` derivation already handles for pre-signal-columns
+rows — see `service/anomalies.py`'s own docstring) — `detect_anomalies`
+just never sets it on any new row going forward.
 
 `detect_anomalies` never drops or modifies the original DataFrame — it
 returns a separate frame of just the flagged rows (plus `anomaly_score`/
@@ -33,13 +45,12 @@ specifically for `GET /v1/data-quality/outliers`
 (`API_SPECEFICATIONS.md` §3.3) to query directly instead of parsing
 `anomaly_reason`'s free-text string back apart.
 
-A row can clear more than one signal at once (e.g. an out-of-range value
-that's also flagged by the ML model) — `anomaly_score`/`metric`/`value`/
+A row can clear both signals at once (e.g. a statistical outlier that's
+also flagged by the ML model) — `anomaly_score`/`metric`/`value`/
 `z_score`/... above only ever record the single *worst* signal, same as
-`anomaly_reason`'s design always has. `rule_based_score`/
-`statistical_score`/`ml_score` (migration
-`0025_anomalies_signal_scores.sql`) record each signal's own score
-independently — NULL meaning that signal didn't fire — so "which
+`anomaly_reason`'s design always has. `statistical_score`/`ml_score`
+(migration `0025_anomalies_signal_scores.sql`) record each signal's own
+score independently — NULL meaning that signal didn't fire — so "which
 signal(s) triggered" is a queryable structured field instead of only
 recoverable by parsing `anomaly_reason`'s free-text string.
 """
@@ -56,8 +67,7 @@ from sqlalchemy import text
 from app.db.session import get_session
 
 # Which columns are worth scanning per ingest source (registry.py's
-# `IngestSource.source` values), and the plausible range for each column
-# that appears in more than one source's table.
+# `IngestSource.source` values).
 #
 # `openelectricity` excludes `demand_mw`/`price_mwh` -- `ingest_
 # openelectricity.py`'s `_pivot_long_to_wide` sources them by filtering
@@ -66,15 +76,17 @@ from app.db.session import get_session
 # demand/price live on the OE SDK's separate `MarketMetric` enum, only
 # reachable via `client.get_market()`, which this codebase doesn't call
 # yet. That filter has therefore never matched a single row -- both
-# columns are unconditionally `None` on every OE row, every run --
-# so scanning them here doesn't detect real anomalies, it just flags
-# ~every row of every batch as `missing_value` on every single run
-# (confirmed live 2026-08-05: 63 runs in ~2h each re-inserted the same
-# ~1728-row batch into `meta.anomalies`, 108,864 duplicate rows/~110MB,
-# enough on its own to push a 512MB Neon project over its limit and wedge
-# every subsequent run in `status='running'` forever). Drop these two
-# until `get_market()`/`MarketMetric.PRICE`/`MarketMetric.DEMAND` are
-# actually wired up to populate real values.
+# columns are unconditionally `None` on every OE row, every run -- so
+# scanning them here would still be pointless even now that the (now-
+# retired) rule-based missing-value check isn't around to flood
+# `meta.anomalies` over it (confirmed live 2026-08-05: 63 runs in ~2h
+# each re-inserted the same ~1728-row batch, 108,864 duplicate rows/
+# ~110MB, enough on its own to push a 512MB Neon project over its limit
+# and wedge every subsequent run in `status='running'` forever) -- a
+# column that's always `None` has no mean/std for the z-score signal to
+# work with either. Drop these two until `get_market()`/`MarketMetric.
+# PRICE`/`MarketMetric.DEMAND` are actually wired up to populate real
+# values.
 _NUMERIC_COLUMNS: dict[str, tuple[str, ...]] = {
     "openelectricity": ("total_generation_mw",),
     "aemo_nem": ("demand_mw", "price_mwh"),
@@ -83,20 +95,6 @@ _NUMERIC_COLUMNS: dict[str, tuple[str, ...]] = {
     "aemo_holidays": (),  # no numeric time-series columns worth scanning
 }
 
-# (low, high) — AEMO's market price cap/floor is the actual regulatory
-# bound for price_mwh; the rest are physically-plausible-for-Australia
-# sanity ranges, not exact operational limits.
-_BOUNDS: dict[str, tuple[float, float]] = {
-    "demand_mw": (0, 20000),
-    "price_mwh": (-1000, 17500),
-    "total_generation_mw": (0, 30000),
-    "temp_c": (-10, 55),
-    "humidity_pct": (0, 100),
-    "wind_speed_kmh": (0, 300),
-}
-
-_MISSING_VALUE_SCORE = 0.5
-_OUT_OF_RANGE_SCORE = 1.0
 _MIN_ROWS_FOR_ZSCORE = 5
 _Z_SCORE_THRESHOLD = 3.0
 
@@ -117,8 +115,8 @@ _RESULT_COLUMNS = (
 @dataclass
 class _Winner:
     """The single worst-offending (metric, value) pair for one row —
-    "worst" meaning whichever check produced the highest score, rule-based
-    or statistical. Only one winner is kept per row (matching
+    "worst" meaning whichever check produced the highest score,
+    statistical or ML. Only one winner is kept per row (matching
     `anomaly_score`/`anomaly_reason`'s existing "take the max" design),
     even if multiple columns/checks triggered."""
 
@@ -168,44 +166,28 @@ def detect_anomalies(df: pd.DataFrame, source: str) -> pd.DataFrame:
     # module at its own top level, so importing it back at this module's
     # top level would be circular. `None` (no model trained yet for
     # `source`) is the common/expected case, not an error -- see this
-    # module's own docstring for signal 3.
+    # module's own docstring for signal 2.
     from app.service.pipeline import ml_anomaly
 
     ml_scores = ml_anomaly.score(df, source)
 
     flagged: list[
-        tuple[object, list[str], _Winner, float | None, float | None, float | None]
+        tuple[object, list[str], _Winner, float | None, float | None]
     ] = []
     for pos, idx in enumerate(df.index):
         winner = _Winner()
         reasons: list[str] = []
-        # Independent of `winner` -- a row can clear more than one signal
-        # category at once (e.g. out_of_range *and* ml_outlier); each
-        # category's own best score is tracked here regardless of which
-        # one ends up "winning" `winner`/`anomaly_score`.
-        rule_based_score: float | None = None
+        # Independent of `winner` -- a row can clear both signal
+        # categories at once (e.g. statistical_outlier *and* ml_outlier);
+        # each category's own best score is tracked here regardless of
+        # which one ends up "winning" `winner`/`anomaly_score`.
         statistical_score: float | None = None
         ml_score_value: float | None = None
 
         for col in columns:
             value = numeric[col].iloc[pos]
             if pd.isna(value):
-                reasons.append(f"missing_value:{col}")
-                winner.consider(_MISSING_VALUE_SCORE, metric=col, value=None)
-                rule_based_score = max(rule_based_score or 0.0, _MISSING_VALUE_SCORE)
                 continue
-
-            bounds = _BOUNDS.get(col)
-            if bounds is not None and not (bounds[0] <= value <= bounds[1]):
-                reasons.append(f"out_of_range:{col}={value:g}")
-                winner.consider(
-                    _OUT_OF_RANGE_SCORE,
-                    metric=col,
-                    value=float(value),
-                    expected_low=float(bounds[0]),
-                    expected_high=float(bounds[1]),
-                )
-                rule_based_score = max(rule_based_score or 0.0, _OUT_OF_RANGE_SCORE)
 
             if col in stats:
                 mean, std = stats[col]
@@ -236,16 +218,7 @@ def detect_anomalies(df: pd.DataFrame, source: str) -> pd.DataFrame:
                 ml_score_value = float(ml_score)
 
         if reasons:
-            flagged.append(
-                (
-                    idx,
-                    reasons,
-                    winner,
-                    rule_based_score,
-                    statistical_score,
-                    ml_score_value,
-                )
-            )
+            flagged.append((idx, reasons, winner, statistical_score, ml_score_value))
 
     if not flagged:
         return _empty_result(df)
@@ -259,26 +232,33 @@ def detect_anomalies(df: pd.DataFrame, source: str) -> pd.DataFrame:
     result["anomaly_z_score"] = [f[2].z_score for f in flagged]
     result["anomaly_expected_low"] = [f[2].expected_low for f in flagged]
     result["anomaly_expected_high"] = [f[2].expected_high for f in flagged]
-    result["anomaly_rule_based_score"] = [f[3] for f in flagged]
-    result["anomaly_statistical_score"] = [f[4] for f in flagged]
-    result["anomaly_ml_score"] = [f[5] for f in flagged]
+    # Rule-based checks are retired (this module's own docstring) --
+    # never set on a newly-detected row. `meta.anomalies.rule_based_score`
+    # itself isn't dropped (historical rows still have it); this just
+    # never populates it going forward.
+    result["anomaly_rule_based_score"] = [None for _ in flagged]
+    result["anomaly_statistical_score"] = [f[3] for f in flagged]
+    result["anomaly_ml_score"] = [f[4] for f in flagged]
     return result
 
 
 def _json_safe_snapshot(row: pd.Series) -> dict:
     """`row`'s non-`_RESULT_COLUMNS` fields as a dict, with NaN/NaT
     (a real, honest missing value -- e.g. `aemo_wem`'s `price_mwh` on
-    5-min-only rows, which is exactly the kind of value `detect_
-    anomalies`'s `missing_value:` check flags in the first place) mapped
-    to `None`. Plain `json.dumps` happily serializes a float NaN as the
-    bare `NaN` token -- valid Python, not valid JSON -- which Postgres's
-    `jsonb` input parser then rejects outright (`invalid input syntax for
-    type json`). Since this insert runs inside `standard_run`'s try
-    block, that failure previously took the *entire* ingest attempt down
-    with it, not just this one anomaly row -- confirmed the hard way:
-    every `aemo_wem` backfill day failed on exactly this, because WEM's
-    demand-only rows (5/6 of them) always have a NaN `price_mwh` and
-    therefore always get flagged."""
+    5-min-only rows) mapped to `None`. Plain `json.dumps` happily
+    serializes a float NaN as the bare `NaN` token -- valid Python, not
+    valid JSON -- which Postgres's `jsonb` input parser then rejects
+    outright (`invalid input syntax for type json`). Since this insert
+    runs inside `standard_run`'s try block, that failure previously took
+    the *entire* ingest attempt down with it, not just this one anomaly
+    row -- confirmed the hard way: every `aemo_wem` backfill day failed
+    on exactly this, because WEM's demand-only rows (5/6 of them) always
+    have a NaN `price_mwh` and (back when the now-retired rule-based
+    `missing_value:` check existed) therefore always got flagged. Still
+    needed even with that check gone: `row_snapshot` includes every
+    column of a flagged row, not just the one that tripped the winning
+    signal, so a NaN in some *other* column of a statistical/ML-flagged
+    row hits this same serialization path."""
     snapshot = row.drop(labels=list(_RESULT_COLUMNS)).to_dict()
     return {key: (None if pd.isna(value) else value) for key, value in snapshot.items()}
 

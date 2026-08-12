@@ -96,8 +96,11 @@ _THRESHOLD_PERCENTILE = 1.0
 # inherent, keep the bar high enough to still mean something" tradeoff
 # the z-score signal's own `_Z_SCORE_THRESHOLD` already accepts. A
 # heuristic starting point, not a calibrated false-positive-rate
-# guarantee.
-ANOMALY_SCORE_THRESHOLD = 0.3
+# guarantee. Raised 0.3 -> 0.5 (2026-08-12) to cut ML-signal false
+# positives now that it's one of only two signals left (the rule-based
+# one was retired the same date, see `pipeline/anomaly.py`'s own
+# docstring) -- still heuristic, not backtested against labeled data.
+ANOMALY_SCORE_THRESHOLD = 0.5
 
 
 @dataclass(frozen=True)

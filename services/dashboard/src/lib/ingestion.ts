@@ -787,6 +787,14 @@ export type TrainTrigger = {
   anomalies_flagged: number;
   triggered_by: string;
   architecture: string;
+  /** `false` unless explicitly requested -- `POST /v1/model/train`'s
+   * `full_retrain` (2026-08-11, real feature: the dashboard's "Train a
+   * new version" tab previously had no trigger endpoint at all).
+   * `true` makes `training_worker.handle_training_trigger` dispatch to
+   * the real from-scratch trainer (`ml.train.train_and_register`/
+   * `ml.train_tft.train_and_register_tft`) instead of the incremental
+   * warm-start path the Fine-tune tab's own trigger always uses. */
+  full_retrain: boolean;
 };
 
 /** Live call to `POST /v1/model/train` (forecast-api) -- publishes the
@@ -804,6 +812,10 @@ export async function triggerTraining(opts?: {
    * `"lstm"` server-side, same as the automatic dbt-build-triggered
    * path's own default. */
   architecture?: string;
+  /** `TrainRequest.full_retrain` -- see `TrainTrigger.full_retrain`'s
+   * own docstring. `undefined`/omitted defaults to `false` server-side
+   * (an incremental fine-tune, this function's original-only behavior). */
+  fullRetrain?: boolean;
 }): Promise<TrainTrigger> {
   const res = await fetch(`${FORECAST_API_URL}/model/train`, {
     method: "POST",
@@ -812,6 +824,7 @@ export async function triggerTraining(opts?: {
       regions: opts?.regions ?? null,
       window_hours: opts?.windowHours ?? null,
       architecture: opts?.architecture ?? null,
+      full_retrain: opts?.fullRetrain ?? false,
     }),
   });
   if (!res.ok) {
@@ -854,6 +867,86 @@ export async function fetchTrainingRuns(limit = 20): Promise<TrainingRunsList> {
     throw new Error(`GET /v1/model/training-runs failed: ${res.status}`);
   }
   return res.json();
+}
+
+export type TrainingRunMatch =
+  | { state: "waiting" }
+  | { state: "running"; run: TrainingRunLog }
+  | { state: "success"; run: TrainingRunLog }
+  | { state: "failed"; run: TrainingRunLog };
+
+/** Polls `GET /v1/model/training-runs` for the real `meta._training_log`
+ * row a `triggerTraining()` call produced, until it reaches success/
+ * failed or `timeoutMs` elapses -- real progress for the dashboard's
+ * Fine-tune form, which previously had no visibility into a run at all
+ * until a new registry version appeared or the whole thing timed out
+ * (`pollForNewModelVersion` in `lib/emissions.ts`, still used for the
+ * final registry refresh once this resolves to `"success"`).
+ *
+ * Matches by `model_name` + `triggered_by` + `started_at` at/after the
+ * trigger's own `queued_at` (5s slack for clock skew between this
+ * client and forecast-api) -- there's no run id to match on directly
+ * (`TrainTrigger`'s own docstring: the trigger call and the worker that
+ * does the work are different processes with no completion channel
+ * between them). Good enough in practice: a second identically-
+ * architected manual trigger fired within the same few seconds is the
+ * only way this could pick the wrong row, and the worker's single
+ * consume loop (`prefetch_count=1`) processes them one at a time either
+ * way. `triggered_by` must be the *same* value on both sides to match
+ * at all -- confirmed live 2026-08-11 this was silently broken
+ * (`app.service.model.actions.trigger_training` hardcoded `"manual"`
+ * for the published event regardless of what `triggered_by` it was
+ * actually given, while the trigger response it returned said
+ * `"public"` -- fixed server-side alongside this). */
+export function pollForTrainingRun(
+  modelName: string,
+  triggeredBy: string,
+  queuedAtIso: string,
+  onUpdate: (match: TrainingRunMatch) => void,
+  intervalMs = 3000,
+  timeoutMs = 120_000,
+  onTimeout?: () => void,
+): () => void {
+  let cancelled = false;
+  const deadline = Date.now() + timeoutMs;
+  const queuedAtMs = new Date(queuedAtIso).getTime() - 5000;
+  const tick = async () => {
+    try {
+      const res = await fetchTrainingRuns(20);
+      if (cancelled) return;
+      const candidates = res.data
+        .filter(
+          (r) =>
+            r.model_name === modelName &&
+            r.triggered_by === triggeredBy &&
+            new Date(r.started_at).getTime() >= queuedAtMs,
+        )
+        .sort((a, b) => new Date(b.started_at).getTime() - new Date(a.started_at).getTime());
+      const match = candidates[0];
+      if (match) {
+        onUpdate({
+          state: match.status === "running" ? "running" : match.status === "success" ? "success" : "failed",
+          run: match,
+        });
+        if (match.status !== "running") return; // terminal -- stop polling
+      } else {
+        onUpdate({ state: "waiting" });
+      }
+    } catch {
+      // Transient poll failure -- same tolerance `pollLatestRun` gives a
+      // dropped request, keep going rather than erroring the whole form.
+    }
+    if (cancelled) return;
+    if (Date.now() < deadline) {
+      setTimeout(tick, intervalMs);
+    } else {
+      onTimeout?.();
+    }
+  };
+  void tick();
+  return () => {
+    cancelled = true;
+  };
 }
 
 const TERMINAL_RUN_STATUSES: RunStatus[] = ["success", "failed", "sync_failed", "partial"];

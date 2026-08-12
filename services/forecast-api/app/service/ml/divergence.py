@@ -68,7 +68,23 @@ def weight_norm_drift(
     diff_sq_sum = 0.0
     anchor_sq_sum = 0.0
     for key, anchor_tensor in anchor.items():
-        candidate_tensor = candidate[key]
+        # Real bug, confirmed live 2026-08-11 (Apple Silicon dev
+        # machine, MPS available): `candidate` is `check_drift`'s
+        # caller's live training-device model (`ml/incremental.py`
+        # never moves it back to CPU before this runs -- that only
+        # happens later, in `log_and_register_run`), while `anchor` is
+        # always `torch.load(..., map_location=torch.device("cpu"))`
+        # (`docs/training-strategy.md`'s "Model Portability Strategy").
+        # `candidate - anchor` across an `mps:0` and a `cpu` tensor
+        # raises, not computes -- every incremental (warm-started)
+        # fine-tune ever run with GPU/MPS acceleration available hit
+        # this, one call after clearing `ml/train.py`'s own window
+        # check. `.cpu()` here (not on the caller) makes this
+        # architecture-agnostic comparison utility correct regardless
+        # of which device either state_dict happens to already be on --
+        # a no-op for `anchor`, which is always CPU already.
+        candidate_tensor = candidate[key].detach().cpu()
+        anchor_tensor = anchor_tensor.detach().cpu()
         if candidate_tensor.shape != anchor_tensor.shape:
             raise ValueError(
                 f"shape mismatch on {key!r}: candidate={tuple(candidate_tensor.shape)} "

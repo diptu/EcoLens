@@ -197,6 +197,15 @@ class TrainConfig:
             "train_frac": self.train_frac,
             "val_frac": self.val_frac,
             "shuffle": self.shuffle,
+            # Fixed, not a real tunable (no field on this dataclass) --
+            # logged purely so an MLflow run is unambiguous about which
+            # side of `losses.py`'s 2026-08-12 P50 loss change
+            # (`demand_loss`, Huber -> pinball(0.5), `TODO.md` Phase 1)
+            # produced it. A run from before that date simply won't have
+            # this param at all, not `"huber"` -- absence is the real
+            # signal for "predates the change", not a value to compare
+            # against.
+            "p50_loss": "pinball",
         }
         if self.train_start is not None:
             params.update(
@@ -701,6 +710,28 @@ def train_model(
                 np.mean(hi_calibrated - lo_calibrated)
             ),
         }
+
+    # Real bug, confirmed live 2026-08-11 (Apple Silicon dev machine,
+    # MPS available): every caller of `TrainResult.model` downstream of
+    # this function -- `LSTMForecaster.predict` (`ml/evaluate.py`,
+    # always builds a plain CPU tensor via `torch.from_numpy`),
+    # `divergence.check_drift` (already fixed, defensively, at its own
+    # call site), `ml/prune.py`'s `prune_and_recover` (evaluates the
+    # freshly recovery-trained model via `LSTMForecaster` immediately,
+    # *before* `log_and_register_run` ever runs) -- all assume a
+    # trained/loaded model is CPU-resident, matching this codebase's own
+    # documented "Model Portability Strategy" (`ml/device.py`'s
+    # docstring: every serving/eval load site uses `map_location=
+    # torch.device("cpu")` by design). `model` has been on `device`
+    # (possibly MPS/CUDA) since `.to(device)` above, for the real reason
+    # training itself needs to run there -- but nothing downstream of
+    # this return does, and leaving it there broke `ml/prune.py`'s
+    # accuracy-tolerance gate outright (a `RuntimeError` before it could
+    # even measure the real regression, not a real "too much accuracy
+    # lost" result). Moving back to CPU here, once, is the single-point
+    # fix -- cheaper and more robust than every current and future
+    # caller separately remembering to do it themselves.
+    model.to("cpu")
 
     return TrainResult(
         model=model,

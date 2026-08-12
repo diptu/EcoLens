@@ -127,7 +127,13 @@ class Settings(BaseSettings):
     # needs these two to fill in the payload when a caller doesn't
     # override them.
     model_default_regions: list[str] = ["NSW1"]
-    incremental_train_window_hours: int = 24
+    # Real bug, confirmed live 2026-08-11 (see forecast-api's identical
+    # field for the full math): 24h guaranteed forecast-api's
+    # `train_model` "not enough history" error for every real automatic
+    # post-dbt-build trigger this service ever published -- kept in sync
+    # with forecast-api's own fix (336h/14 days) per this field's own
+    # "same defaults" docstring above.
+    incremental_train_window_hours: int = 336
 
     # DuckDB staging directory -- the SAME shared `landed.duckdb` file
     # `services/ingestion` writes into (its own `Settings.

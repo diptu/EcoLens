@@ -94,13 +94,25 @@ def _synthetic_training_rows(n: int, region: str = "NSW1") -> list[dict]:
 
 
 class TestCompactLSTM:
-    def test_keep_fraction_1_is_an_exact_noop(self):
-        model = _model(hidden_size=8, num_layers=1, n_features=5, horizon=3)
+    # `num_layers=2` (2026-08-11, real bug found while adding `DemandLSTM.
+    # head_dropout`) alongside the original `num_layers=1` case -- `1` is
+    # exactly the case that hid `compact_lstm` never propagating
+    # `model.training` to `compacted` (`nn.LSTM`'s own inter-layer
+    # dropout is a hard no-op at `num_layers=1` regardless of mode, so
+    # the bug had no observable effect there). `2` is what actually
+    # exercises a real dropout site under a real train/eval-mode
+    # mismatch, proving `compacted.train(model.training)` is what makes
+    # this no-op guarantee hold in general, not just in the one case
+    # that happened not to need it.
+    @pytest.mark.parametrize("num_layers", [1, 2])
+    def test_keep_fraction_1_is_an_exact_noop(self, num_layers):
+        model = _model(hidden_size=8, num_layers=num_layers, n_features=5, horizon=3)
 
         compacted, keep_idx = compact_lstm(model, 1.0)
 
         assert compacted.lstm.hidden_size == model.lstm.hidden_size
         assert torch.equal(keep_idx, torch.arange(model.lstm.hidden_size))
+        assert compacted.training == model.training
 
         x = torch.randn(2, 6, model.n_features)
         with torch.no_grad():

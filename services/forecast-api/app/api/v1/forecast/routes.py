@@ -446,6 +446,13 @@ async def _run_recent_backtest_nem(
     return merged
 
 
+def recent_backtest_cache_key(region: str, days: int, model_version: str) -> str:
+    """Shared with `app.service.cache_warmer` so the warmer writes to the
+    exact key this route reads from -- same convention `model_drift_
+    cache_key` (`app/api/v1/model/routes.py`) already establishes."""
+    return f"forecast:recent_backtest:v1:{region}:{days}:{model_version}"
+
+
 @router.get(
     "/forecast/recent-actual-vs-predicted", response_model=RecentBacktestResponse
 )
@@ -471,6 +478,16 @@ async def get_recent_actual_vs_predicted(
     of it). Keyed on the currently-served model's own version, same as
     `GET /v1/forecast`'s cache -- a promotion/rollback invalidates this
     the same real way, not by waiting out a stale TTL.
+
+    `region="NEM", days=30` specifically is also kept warm in the
+    background (`cache_warmer.run_recent_backtest_warmer`) -- confirmed
+    live 2026-08-11, this got *more* expensive as real history has
+    grown (~158s now, not the ~50s measured when this cache was first
+    added), so a live request landing on a cold cache is no longer an
+    acceptable "occasionally slow" tail, it's a guaranteed timeout.
+    "Emission History"'s forecast confidence band (`services/dashboard`)
+    depends on this staying warm to honestly cover its full real 30-day
+    period, not just a narrower recent slice.
     """
     bundle = registry.bundle
     if bundle is None:
@@ -478,7 +495,7 @@ async def get_recent_actual_vs_predicted(
             503, "model_not_loaded", "No Production model version is loaded yet"
         )
 
-    cache_key = f"forecast:recent_backtest:v1:{region}:{days}:{bundle.version}"
+    cache_key = recent_backtest_cache_key(region, days, bundle.version)
     cached = await redis.get(cache_key)
     if cached is not None:
         return RecentBacktestResponse.model_validate_json(cached)

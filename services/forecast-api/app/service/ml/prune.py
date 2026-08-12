@@ -169,6 +169,23 @@ def compact_lstm(
         new_state[f"{head}.bias"] = state_dict[f"{head}.bias"]
 
     compacted.load_state_dict(new_state)
+    # Real bug, confirmed live 2026-08-11 while adding `DemandLSTM.
+    # head_dropout`: this function never propagated `model`'s train/eval
+    # mode to the freshly-constructed `compacted` (which defaults to
+    # `training=True`, `nn.Module`'s own default). Invisible until now
+    # because the LSTM's only *previous* dropout site (its own inter-
+    # layer `dropout=`) is a hard no-op whenever `num_layers=1` --
+    # exactly the case `tests/test_prune.py`'s `keep_fraction=1.0` no-op
+    # test happened to use. The moment a second, always-active dropout
+    # site exists (`head_dropout`), a `compacted` left in training mode
+    # would fire it stochastically even when `original_model` was
+    # already `.eval()`'d (`prune_and_recover`'s caller always loads via
+    # `load_registered_model`, which calls `.eval()`) -- silently
+    # breaking the exact-output-match guarantee this function's own
+    # docstring promises. Matching modes here is what keeps that
+    # guarantee real regardless of how many dropout sites `DemandLSTM`
+    # ever grows.
+    compacted.train(model.training)
     return compacted, keep_idx
 
 
@@ -291,7 +308,7 @@ async def prune_and_recover(
     *,
     settings: Settings | None = None,
     recovery_epochs: int | None = None,
-    max_relative_mape_regression_pct: float = 2.0,
+    max_relative_mape_regression_pct: float = 1.0,
     n_origins: int = 5,
     register: bool = True,
 ) -> PruneAndRecoverResult:
@@ -368,10 +385,15 @@ async def prune_and_recover(
     config.num_layers = compacted_model.lstm.num_layers
     config.horizon = original_model.horizon
     config.lookback = lookback
+    # Real bug, confirmed live 2026-08-11: this used to fall back to
+    # `settings.incremental_train_epochs` (3) -- see `Settings.
+    # prune_recovery_epochs`'s own docstring for the measured numbers
+    # (3 epochs: +131.2% relative MAPE regression, ~131x past the 1%
+    # gate below; 20: comfortably better than the unpruned version).
     if recovery_epochs is not None:
         config.epochs = recovery_epochs
     else:
-        config.epochs = settings.incremental_train_epochs
+        config.epochs = settings.prune_recovery_epochs
     config.lr = settings.incremental_train_lr
 
     recovered_result = train_model(

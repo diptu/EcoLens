@@ -98,6 +98,55 @@ async def run_model_drift_warmer(
         await asyncio.sleep(interval_seconds)
 
 
+async def run_recent_backtest_warmer(
+    redis: Redis,
+    db_session_factory: Callable[[], AsyncSession],
+    registry: ModelRegistry,
+    settings: Settings,
+    interval_seconds: float,
+) -> None:
+    """Keeps `region="NEM", days=30` -- "Emission History"'s full
+    30-day real forecast confidence band (`services/dashboard`'s
+    executive page) -- warm. Its own dedicated loop, not folded into
+    `run_dashboard_essentials_warmer` below: confirmed live 2026-08-11
+    at ~158s to compute, an order of magnitude past that warmer's
+    "cheap" (1-4s) scope -- same reasoning `run_emissions_forecast_
+    warmer`/`run_model_drift_warmer` above already establish for their
+    own large/slow endpoints.
+
+    No separate `_compute_*` extraction needed unlike those two,
+    though: `get_recent_actual_vs_predicted` has no real request-only
+    side effects (no breaker check, no served-forecast reconciliation
+    logging) this warmer would need to skip, so it calls the route
+    function directly -- same "delete the real cache key, then call the
+    real route function" technique `run_dashboard_essentials_warmer`
+    already uses for its own (cheaper) endpoints below.
+    """
+    from app.api.v1.forecast.routes import (
+        get_recent_actual_vs_predicted,
+        recent_backtest_cache_key,
+    )
+
+    while True:
+        try:
+            bundle = registry.bundle
+            if bundle is not None:
+                async with db_session_factory() as db:
+                    await redis.delete(recent_backtest_cache_key("NEM", 30, bundle.version))
+                    await get_recent_actual_vs_predicted(
+                        region="NEM",
+                        days=30,
+                        db=db,
+                        redis=redis,
+                        registry=registry,
+                        settings=settings,
+                    )
+        except Exception as exc:  # noqa: BLE001 - one bad pass must not stop future ones
+            log.error("cache_warmer.recent_backtest_failed", error=str(exc))
+
+        await asyncio.sleep(interval_seconds)
+
+
 # The remaining cached endpoints below are all single, cheap queries
 # (1-4s cold, not the 8-14s of the two loops above) whose real fix is
 # already "cached at all" -- the occasional request that lands right

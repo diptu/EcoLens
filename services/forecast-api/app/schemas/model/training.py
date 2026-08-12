@@ -32,6 +32,7 @@ class TrainTriggerResponse(AppBaseModel):
     anomalies_flagged: int
     triggered_by: str
     architecture: str
+    full_retrain: bool = False
 
 
 class TrainingRunOut(AppBaseModel):

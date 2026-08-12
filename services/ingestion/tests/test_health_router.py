@@ -2,7 +2,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.api.v1.deps import get_db, get_redis_client
+from app.api.v1.deps import get_db, get_log_db, get_redis_client
 from app.core.config import get_settings
 from app.main import app, create_app
 
@@ -79,6 +79,7 @@ async def _failing_rabbitmq_connection():
 
 def test_readyz_returns_200_when_all_components_healthy(client, monkeypatch):
     app.dependency_overrides[get_db] = lambda: OkSession()
+    app.dependency_overrides[get_log_db] = lambda: OkSession()
     app.dependency_overrides[get_redis_client] = lambda: OkRedis()
     monkeypatch.setattr(
         "app.api.v1.health.routes.get_rabbitmq_connection",
@@ -95,6 +96,7 @@ def test_readyz_returns_200_when_all_components_healthy(client, monkeypatch):
 
 def test_readyz_returns_503_when_postgres_is_unhealthy(client, monkeypatch):
     app.dependency_overrides[get_db] = lambda: FailingSession()
+    app.dependency_overrides[get_log_db] = lambda: OkSession()
     app.dependency_overrides[get_redis_client] = lambda: OkRedis()
     monkeypatch.setattr(
         "app.api.v1.health.routes.get_rabbitmq_connection",
@@ -111,8 +113,34 @@ def test_readyz_returns_503_when_postgres_is_unhealthy(client, monkeypatch):
     assert "db down" in postgres["detail"]
 
 
+def test_readyz_returns_503_when_log_postgres_is_unhealthy(client, monkeypatch):
+    """The separate logging database (`LOG_DB_URL`, 2026-08-12) is its
+    own real dependency now -- it going down must be visibly distinct
+    from the primary database's own health, not silently masked by it
+    (or vice versa)."""
+    app.dependency_overrides[get_db] = lambda: OkSession()
+    app.dependency_overrides[get_log_db] = lambda: FailingSession()
+    app.dependency_overrides[get_redis_client] = lambda: OkRedis()
+    monkeypatch.setattr(
+        "app.api.v1.health.routes.get_rabbitmq_connection",
+        _ok_rabbitmq_connection,
+    )
+
+    response = client.get("/v1/readyz")
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["status"] == "not_ready"
+    postgres = next(c for c in body["components"] if c["name"] == "postgres")
+    assert postgres["healthy"] is True
+    postgres_log = next(c for c in body["components"] if c["name"] == "postgres_log")
+    assert postgres_log["healthy"] is False
+    assert "db down" in postgres_log["detail"]
+
+
 def test_readyz_returns_503_when_redis_is_unhealthy(client, monkeypatch):
     app.dependency_overrides[get_db] = lambda: OkSession()
+    app.dependency_overrides[get_log_db] = lambda: OkSession()
     app.dependency_overrides[get_redis_client] = lambda: FailingRedis()
     monkeypatch.setattr(
         "app.api.v1.health.routes.get_rabbitmq_connection",
@@ -129,6 +157,7 @@ def test_readyz_returns_503_when_redis_is_unhealthy(client, monkeypatch):
 
 def test_readyz_marks_rabbitmq_unhealthy_when_connection_is_closed(client, monkeypatch):
     app.dependency_overrides[get_db] = lambda: OkSession()
+    app.dependency_overrides[get_log_db] = lambda: OkSession()
     app.dependency_overrides[get_redis_client] = lambda: OkRedis()
     monkeypatch.setattr(
         "app.api.v1.health.routes.get_rabbitmq_connection",
@@ -145,6 +174,7 @@ def test_readyz_marks_rabbitmq_unhealthy_when_connection_is_closed(client, monke
 
 def test_readyz_marks_rabbitmq_unhealthy_on_connection_error(client, monkeypatch):
     app.dependency_overrides[get_db] = lambda: OkSession()
+    app.dependency_overrides[get_log_db] = lambda: OkSession()
     app.dependency_overrides[get_redis_client] = lambda: OkRedis()
     monkeypatch.setattr(
         "app.api.v1.health.routes.get_rabbitmq_connection",

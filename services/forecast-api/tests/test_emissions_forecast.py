@@ -9,6 +9,7 @@ from sklearn.preprocessing import StandardScaler
 
 from app.main import app
 from app.api.v1.deps import get_db, get_model_registry, get_redis_client
+from app.service.ml.bias_correction import DemandBiasCorrection
 from app.service.ml.conformal import ConformalCalibration
 from app.service.ml.data import _TRAINING_COLUMNS
 from app.models.ml import DemandLSTM
@@ -129,6 +130,7 @@ def _build_bundle(lookback: int = 8, horizon: int = 4) -> object:
     }
     bundle.target_scaler = target_scaler
     bundle.calibration = calibration
+    bundle.bias_correction = DemandBiasCorrection()
     bundle.version = "1"
     bundle.stage = "Production"
     bundle.run_id = "run-1"

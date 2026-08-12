@@ -15,6 +15,21 @@ def anyio_backend():
     return "asyncio"
 
 
+# 100-point mildly-varied background (values 7985-8015) -- large enough
+# that the self-included z-score's asymptotic bound (sqrt(n-1) = 10.0,
+# `test_statistical_outlier_is_flagged`'s own comment has the general
+# reasoning) comfortably clears the real `z > 7.84` an outlier now needs
+# (`_MIN_ANOMALY_SCORE_TO_FLAG = 0.98`, `z_signal_score = min(1.0,
+# z/8.0)`) -- the smaller 20-point backgrounds elsewhere in this file can
+# never exceed ~0.56 (asymptotic bound sqrt(19)/8 = 0.545), well under
+# the new gate no matter how extreme the outlier is. Raised from 50
+# points, 2026-08-13, when `_Z_SCORE_THRESHOLD`/`_MIN_ANOMALY_SCORE_TO_
+# FLAG` were tightened 3.0/0.95 -> 4.0/0.98 -- 50 points' own asymptotic
+# bound (sqrt(49)/8 = 0.875) stopped being enough to ever clear the new
+# gate at all, regardless of outlier size.
+_LARGE_BACKGROUND = [8000 + (i % 7 - 3) * 5 for i in range(100)]
+
+
 @pytest.fixture(autouse=True)
 def _isolate_ml_anomaly_state(tmp_path, monkeypatch):
     """`detect_anomalies` calls the real `ml_anomaly.score` (unless a
@@ -50,25 +65,19 @@ def test_missing_value_is_not_flagged():
 def test_an_extreme_out_of_range_value_is_still_caught_via_statistical_outlier():
     """Rule-based `out_of_range` is gone, but a wildly implausible value
     (negative demand) still gets caught here as long as it's also a
-    statistical outlier against the rest of the batch -- this one isn't
-    a guarantee (a small/uniform batch might not clear the z-score
-    threshold), just confirms the statistical signal alone is enough for
-    the obviously-broken case. 20-point background (not fewer), same
-    reason `test_statistical_outlier_within_bounds_captures_z_score`
-    below needs it: a self-included z-score is mathematically bounded by
-    sqrt(n-1), so n=10 could never clear `z > 3.0` no matter how extreme
-    the outlier's value."""
-    background = [
-        7980, 8010, 7995, 8005, 8000, 7990, 8015, 7985, 8000, 8008,
-        7992, 8003, 7998, 8012, 7988, 8001, 7999, 8006, 7994, 8000,
-    ]
-    df = pd.DataFrame({"demand_mw": background + [-50]})
+    strong-enough statistical outlier against the rest of the batch --
+    this one isn't a guarantee (a small/uniform batch, or one too small
+    for its self-included z-score to reach the real `>0.98` gate, might
+    not clear it), just confirms the statistical signal alone is enough
+    for the obviously-broken case when the batch is large enough."""
+    df = pd.DataFrame({"demand_mw": _LARGE_BACKGROUND + [-50]})
 
     result = anomaly.detect_anomalies(df, "aemo_nem")
 
     assert len(result) == 1
     assert result.iloc[0]["demand_mw"] == -50
     assert "statistical_outlier:demand_mw" in result.iloc[0]["anomaly_reason"]
+    assert result.iloc[0]["anomaly_score"] > 0.98
     assert result.iloc[0]["anomaly_rule_based_score"] is None
 
 
@@ -78,45 +87,46 @@ def test_statistical_outlier_is_flagged():
     # small -- with n points + 1 outlier, the outlier's own self-included
     # z-score is mathematically bounded by sqrt(n-1) as the outlier's
     # value grows without limit, e.g. it can never exceed 3.0 for n=10)
-    # to actually clear the z>3 threshold.
-    background = [
-        7980,
-        8010,
-        7995,
-        8005,
-        8000,
-        7990,
-        8015,
-        7985,
-        8000,
-        8008,
-        7992,
-        8003,
-        7998,
-        8012,
-        7988,
-        8001,
-        7999,
-        8006,
-        7994,
-        8000,
-    ]
-    values = background + [15000]
-    df = pd.DataFrame({"demand_mw": values})
+    # to actually clear the z>4 threshold this signal fires at -- and,
+    # since 2026-08-12 (tightened again 2026-08-13), `_LARGE_BACKGROUND`'s
+    # real 100 points specifically so the resulting z can clear the much
+    # higher real `>0.98` bar (`_MIN_ANOMALY_SCORE_TO_FLAG`) that now
+    # gates whether a fired signal actually gets recorded at all.
+    df = pd.DataFrame({"demand_mw": _LARGE_BACKGROUND + [50000]})
 
     result = anomaly.detect_anomalies(df, "aemo_nem")
 
     assert len(result) == 1
     row = result.iloc[0]
-    assert row["demand_mw"] == 15000
+    assert row["demand_mw"] == 50000
     assert "statistical_outlier:demand_mw" in row["anomaly_reason"]
     assert row["anomaly_metric"] == "demand_mw"
-    assert row["anomaly_value"] == 15000.0
-    assert row["anomaly_z_score"] > 3.0
+    assert row["anomaly_value"] == 50000.0
+    assert row["anomaly_z_score"] > 4.0
     assert row["anomaly_expected_low"] is not None
     assert row["anomaly_expected_high"] is not None
-    assert row["anomaly_statistical_score"] > 0
+    assert row["anomaly_score"] > 0.98
+    assert row["anomaly_statistical_score"] > 0.98
     assert row["anomaly_rule_based_score"] is None
+
+
+def test_a_borderline_statistical_outlier_below_the_new_gate_is_not_flagged():
+    """Real behavior change, 2026-08-12 (thresholds tightened further
+    2026-08-13): this exact background+outlier has a real z=4.36 --
+    clears the signal's own `z > _Z_SCORE_THRESHOLD` (4.0) trigger, so it
+    still fires (`reasons` non-empty), but its own `statistical_score`
+    (z/8.0 = 0.545) doesn't clear the real `_MIN_ANOMALY_SCORE_TO_FLAG`
+    (0.98) bar, so the row is silently dropped, same as if the signal had
+    never fired at all."""
+    background = [
+        7980, 8010, 7995, 8005, 8000, 7990, 8015, 7985, 8000, 8008,
+        7992, 8003, 7998, 8012, 7988, 8001, 7999, 8006, 7994, 8000,
+    ]
+    df = pd.DataFrame({"demand_mw": background + [15000]})
+
+    result = anomaly.detect_anomalies(df, "aemo_nem")
+
+    assert result.empty
 
 
 def test_plausible_values_are_not_flagged():
@@ -159,17 +169,20 @@ def test_unknown_source_is_never_flagged():
 
 def test_only_columns_present_in_the_dataframe_are_scanned():
     # bom's configured columns include wind_speed_kmh, but this fetch
-    # doesn't have that column -- shouldn't KeyError. A 20-point mildly-
+    # doesn't have that column -- shouldn't KeyError. A 120-point mildly-
     # varied background + one wild outlier (same shape/reasoning as
-    # `test_statistical_outlier_is_flagged`) so the flag comes from a
-    # real signal, not a since-retired rule-based bound.
-    background = list(range(19, 22)) * 7  # 21 values clustered 19-21
+    # `test_statistical_outlier_is_flagged` -- large enough that the
+    # resulting z clears the real `>0.98` gate, not just the signal's
+    # own `z > 4.0` trigger) so the flag comes from a real signal, not a
+    # since-retired rule-based bound.
+    background = list(range(19, 22)) * 40  # 120 values clustered 19-21
     df = pd.DataFrame({"temp_c": background + [1000]})
 
     result = anomaly.detect_anomalies(df, "bom")
 
     assert len(result) == 1
     assert result.iloc[0]["temp_c"] == 1000
+    assert result.iloc[0]["anomaly_score"] > 0.98
 
 
 class TestMLSignal:
@@ -191,6 +204,39 @@ class TestMLSignal:
         assert result.empty
 
     def test_a_high_ml_score_flags_a_row_the_other_signals_missed(self, monkeypatch):
+        # 0.99, not just anything above `ANOMALY_SCORE_THRESHOLD` (0.7)
+        # -- since 2026-08-12 (tightened further 2026-08-13) the winning
+        # score also has to clear the real `_MIN_ANOMALY_SCORE_TO_FLAG`
+        # (0.98) gate to actually be recorded, not just the ML signal's
+        # own lower trigger.
+        df = pd.DataFrame({"demand_mw": [8000, 8100, 8050]})
+        monkeypatch.setattr(
+            ml_anomaly,
+            "score",
+            lambda df, source: pd.Series([0.1, 0.99, 0.2], index=df.index),
+        )
+
+        result = anomaly.detect_anomalies(df, "aemo_nem")
+
+        assert len(result) == 1
+        assert result.iloc[0]["demand_mw"] == 8100
+        assert "ml_outlier:isolation_forest" in result.iloc[0]["anomaly_reason"]
+        assert result.iloc[0]["anomaly_metric"] == "ml_isolation_forest"
+        assert result.iloc[0]["anomaly_score"] == pytest.approx(0.99)
+        assert result.iloc[0]["anomaly_value"] is None
+        assert result.iloc[0]["anomaly_ml_score"] == pytest.approx(0.99)
+        assert result.iloc[0]["anomaly_rule_based_score"] is None
+        assert result.iloc[0]["anomaly_statistical_score"] is None
+
+    def test_an_ml_score_that_clears_its_own_trigger_but_not_the_new_gate_is_not_flagged(
+        self, monkeypatch
+    ):
+        """Real behavior change, 2026-08-12 (tightened further
+        2026-08-13): an ML score of 0.9 clears `ANOMALY_SCORE_THRESHOLD`
+        (0.7, so `ml_outlier` would have fired) but no longer clears
+        `_MIN_ANOMALY_SCORE_TO_FLAG` (0.98) -- the row is silently
+        dropped instead of flagged, same as this exact case would have
+        been recorded before this gate existed."""
         df = pd.DataFrame({"demand_mw": [8000, 8100, 8050]})
         monkeypatch.setattr(
             ml_anomaly,
@@ -200,15 +246,7 @@ class TestMLSignal:
 
         result = anomaly.detect_anomalies(df, "aemo_nem")
 
-        assert len(result) == 1
-        assert result.iloc[0]["demand_mw"] == 8100
-        assert "ml_outlier:isolation_forest" in result.iloc[0]["anomaly_reason"]
-        assert result.iloc[0]["anomaly_metric"] == "ml_isolation_forest"
-        assert result.iloc[0]["anomaly_score"] == pytest.approx(0.9)
-        assert result.iloc[0]["anomaly_value"] is None
-        assert result.iloc[0]["anomaly_ml_score"] == pytest.approx(0.9)
-        assert result.iloc[0]["anomaly_rule_based_score"] is None
-        assert result.iloc[0]["anomaly_statistical_score"] is None
+        assert result.empty
 
     def test_ml_score_below_threshold_does_not_flag(self, monkeypatch):
         df = pd.DataFrame({"demand_mw": [8000, 8100]})
@@ -225,11 +263,46 @@ class TestMLSignal:
         assert result.empty
 
     def test_the_worse_of_ml_and_statistical_wins(self, monkeypatch):
-        # A strong statistical outlier (z=4.36, statistical_score=0.727,
-        # exact values confirmed against this fixed background) should
-        # win the `_Winner` combine over a real but smaller ML score.
-        # Background rows get an ML score below `ANOMALY_SCORE_THRESHOLD`
-        # (0.5) so only the target row's ML signal fires at all.
+        # A very strong statistical outlier (`_LARGE_BACKGROUND` + a huge
+        # outlier, z~10, statistical_score=1.0 -- clears the real `>0.98`
+        # gate on its own) should win the `_Winner` combine over a real
+        # but smaller ML score that still clears its own lower trigger
+        # (`ANOMALY_SCORE_THRESHOLD`, 0.7) without threatening to win.
+        # Background rows get an ML score below that threshold so only
+        # the target row's ML signal fires at all.
+        df = pd.DataFrame({"demand_mw": _LARGE_BACKGROUND + [50000]})
+        monkeypatch.setattr(
+            ml_anomaly,
+            "score",
+            lambda df, source: pd.Series([0.1] * (len(df) - 1) + [0.75], index=df.index),
+        )
+
+        result = anomaly.detect_anomalies(df, "aemo_nem")
+
+        assert len(result) == 1
+        row = result.iloc[0]
+        assert row["demand_mw"] == 50000
+        assert row["anomaly_metric"] == "demand_mw"
+        # Both signals fired (ML's 0.75 clears the 0.7 threshold) -- the
+        # much stronger statistical score wins the combine.
+        assert "statistical_outlier:demand_mw" in row["anomaly_reason"]
+        assert "ml_outlier" in row["anomaly_reason"]
+        assert row["anomaly_score"] > 0.98
+        assert row["anomaly_statistical_score"] > 0.98
+        assert row["anomaly_ml_score"] == pytest.approx(0.75)
+        assert row["anomaly_rule_based_score"] is None
+
+    def test_ml_wins_over_a_smaller_statistical_score(self, monkeypatch):
+        # A borderline statistical outlier (z=4.36, statistical_score=
+        # 0.545 -- clears the signal's own `z > 4.0` trigger but nowhere
+        # near the real `>0.98` gate) should lose the combine to a much
+        # higher real ML score (0.99, clearing both its own trigger and
+        # the gate) on the same row. Background rows again get a
+        # below-threshold ML score so they don't get swept in as false
+        # flags. Outlier raised 8050 -> 15000, 2026-08-13 (thresholds
+        # tightened 3.0/0.95 -> 4.0/0.98) -- this 20-point background's
+        # z for +8050 (3.41) no longer clears the new 4.0 trigger at all,
+        # so the statistical signal wouldn't fire; +15000 (z=4.36) does.
         background = [
             7980, 8010, 7995, 8005, 8000, 7990, 8015, 7985, 8000, 8008,
             7992, 8003, 7998, 8012, 7988, 8001, 7999, 8006, 7994, 8000,
@@ -238,38 +311,7 @@ class TestMLSignal:
         monkeypatch.setattr(
             ml_anomaly,
             "score",
-            lambda df, source: pd.Series([0.1] * (len(df) - 1) + [0.6], index=df.index),
-        )
-
-        result = anomaly.detect_anomalies(df, "aemo_nem")
-
-        assert len(result) == 1
-        row = result.iloc[0]
-        assert row["demand_mw"] == 15000
-        assert row["anomaly_metric"] == "demand_mw"
-        # Both signals fired (ML's 0.6 clears the 0.5 threshold) -- the
-        # stronger statistical score (0.727) wins the combine.
-        assert "statistical_outlier:demand_mw" in row["anomaly_reason"]
-        assert "ml_outlier" in row["anomaly_reason"]
-        assert row["anomaly_score"] == pytest.approx(0.7274, abs=1e-3)
-        assert row["anomaly_statistical_score"] == pytest.approx(0.7274, abs=1e-3)
-        assert row["anomaly_ml_score"] == pytest.approx(0.6)
-        assert row["anomaly_rule_based_score"] is None
-
-    def test_ml_wins_over_a_smaller_statistical_score(self, monkeypatch):
-        # A borderline statistical outlier (z=3.41, statistical_score=
-        # 0.568) should lose the combine to a much higher real ML score
-        # on the same row. Background rows again get a below-threshold
-        # ML score so they don't get swept in as false flags.
-        background = [
-            7980, 8010, 7995, 8005, 8000, 7990, 8015, 7985, 8000, 8008,
-            7992, 8003, 7998, 8012, 7988, 8001, 7999, 8006, 7994, 8000,
-        ]
-        df = pd.DataFrame({"demand_mw": background + [8050]})
-        monkeypatch.setattr(
-            ml_anomaly,
-            "score",
-            lambda df, source: pd.Series([0.1] * (len(df) - 1) + [0.95], index=df.index),
+            lambda df, source: pd.Series([0.1] * (len(df) - 1) + [0.99], index=df.index),
         )
 
         result = anomaly.detect_anomalies(df, "aemo_nem")
@@ -279,11 +321,11 @@ class TestMLSignal:
         assert row["anomaly_metric"] == "ml_isolation_forest"
         assert "statistical_outlier:demand_mw" in row["anomaly_reason"]
         assert "ml_outlier" in row["anomaly_reason"]
-        assert row["anomaly_score"] == pytest.approx(0.95)
-        # Both signals fired -- the weaker statistical score (0.568) lost
-        # the winner slot to ML's higher 0.95, but both are still recorded.
-        assert row["anomaly_statistical_score"] == pytest.approx(0.5678, abs=1e-3)
-        assert row["anomaly_ml_score"] == pytest.approx(0.95)
+        assert row["anomaly_score"] == pytest.approx(0.99)
+        # Both signals fired -- the weaker statistical score (0.545) lost
+        # the winner slot to ML's higher 0.99, but both are still recorded.
+        assert row["anomaly_statistical_score"] == pytest.approx(0.5455, abs=1e-3)
+        assert row["anomaly_ml_score"] == pytest.approx(0.99)
         assert row["anomaly_rule_based_score"] is None
 
 
@@ -333,14 +375,11 @@ async def test_record_anomalies_inserts_one_row_per_flagged_record(monkeypatch):
     # Real detect_anomalies() output, not a hand-built stand-in -- keeps
     # this test honest about the actual shape record_anomalies receives
     # (all of _RESULT_COLUMNS, not just anomaly_score/anomaly_reason).
-    # 20-point background + one statistical outlier -- same fixed values
-    # as `test_the_worse_of_ml_and_statistical_wins`, exact z/expected_
-    # low/expected_high confirmed against this specific background.
-    background = [
-        7980, 8010, 7995, 8005, 8000, 7990, 8015, 7985, 8000, 8008,
-        7992, 8003, 7998, 8012, 7988, 8001, 7999, 8006, 7994, 8000,
-    ]
-    df = pd.DataFrame({"demand_mw": background + [15000]})
+    # `_LARGE_BACKGROUND` + one huge statistical outlier -- needs to
+    # clear the real `>0.98` gate (`_MIN_ANOMALY_SCORE_TO_FLAG`), not
+    # just the signal's own `z > 4.0` trigger, exact z/expected_low/
+    # expected_high confirmed against this specific background.
+    df = pd.DataFrame({"demand_mw": _LARGE_BACKGROUND + [50000]})
     flagged = anomaly.detect_anomalies(df, "aemo_nem")
 
     await anomaly.record_anomalies("run-1", "aemo_nem", "aemo_nem_dispatch", flagged)
@@ -352,12 +391,12 @@ async def test_record_anomalies_inserts_one_row_per_flagged_record(monkeypatch):
     assert params[0]["source"] == "aemo_nem"
     assert params[0]["table_name"] == "aemo_nem_dispatch"
     assert params[0]["metric"] == "demand_mw"
-    assert params[0]["value"] == 15000.0
-    assert params[0]["expected_low"] == pytest.approx(3749.15)
-    assert params[0]["expected_high"] == pytest.approx(12915.70)
-    assert params[0]["z_score"] == pytest.approx(4.36)
+    assert params[0]["value"] == 50000.0
+    assert params[0]["expected_low"] == pytest.approx(-8301.18)
+    assert params[0]["expected_high"] == pytest.approx(25132.37)
+    assert params[0]["z_score"] == pytest.approx(9.95, abs=1e-2)
     assert params[0]["rule_based_score"] is None
-    assert params[0]["statistical_score"] == pytest.approx(0.7274, abs=1e-3)
+    assert params[0]["statistical_score"] > 0.98
     assert params[0]["ml_score"] is None
     assert "demand_mw" in params[0]["row_snapshot"]
     assert "rule_based_score" not in params[0]["row_snapshot"]
@@ -387,21 +426,21 @@ async def test_record_anomalies_produces_valid_json_for_a_nan_snapshot_value(
 
     monkeypatch.setattr(anomaly, "get_session", fake_get_session)
 
-    background_demand = [
-        2480, 2510, 2495, 2505, 2500, 2490, 2515, 2485, 2500, 2508,
-        2492, 2503, 2498, 2512, 2488, 2501, 2499, 2506, 2494, 2500,
-    ]
+    # 100-point background (not fewer) -- needs to clear the real
+    # `>0.98` gate (`_MIN_ANOMALY_SCORE_TO_FLAG`), not just the
+    # statistical signal's own `z > 4.0` trigger.
+    background_demand = [2500 + (i % 7 - 3) * 5 for i in range(100)]
     df = pd.DataFrame(
         {
-            "demand_mw": background_demand + [9000],
+            "demand_mw": background_demand + [90000],
             # Real WEM shape: price only on :00/:30 marks -- NaN
             # elsewhere, including on the flagged (outlier) row itself.
-            "price_mwh": [95.83] * 20 + [float("nan")],
+            "price_mwh": [95.83] * 100 + [float("nan")],
         }
     )
     flagged = anomaly.detect_anomalies(df, "aemo_wem")
     assert len(flagged) == 1  # only the demand_mw outlier row is flagged
-    assert flagged.iloc[0]["demand_mw"] == 9000
+    assert flagged.iloc[0]["demand_mw"] == 90000
 
     await anomaly.record_anomalies("run-1", "aemo_wem", "aemo_wem_dispatch", flagged)
 
@@ -415,7 +454,7 @@ async def test_record_anomalies_produces_valid_json_for_a_nan_snapshot_value(
     assert "NaN" not in snapshot_json
     parsed = json.loads(snapshot_json)
     assert parsed["price_mwh"] is None
-    assert parsed["demand_mw"] == 9000.0
+    assert parsed["demand_mw"] == 90000.0
 
 
 async def test_count_anomalies_returns_the_query_result(monkeypatch):

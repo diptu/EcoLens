@@ -107,3 +107,48 @@ class AnomalyTimeseriesResponse(AppBaseModel):
     total_points: int
     anomalous_points: int
     points: list[AnomalyTimeseriesPoint]
+
+
+class AnomalyContextPoint(AppBaseModel):
+    ts: datetime
+    values: dict[str, float | None]
+    is_anomalous: bool
+    anomaly_score: float | None
+
+
+class AnomalyContextColumnBaseline(AppBaseModel):
+    mean: float
+    std: float
+    low: float
+    high: float
+
+
+class AnomalyContextResponse(AppBaseModel):
+    """Backs the Anomaly Details panel's "Point Context" plot -- real
+    nearby readings for *every* numeric column the detector actually
+    scanned for this anomaly's source (`pipeline.anomaly._NUMERIC_
+    COLUMNS`), not just `demand_mw`/`price_mwh` (`AnomalyTimeseriesResponse`
+    above only ever covers those two, via the `raw_marts.fct_energy_demand`
+    mart -- most real anomalies, e.g. every `bom` one, score `temp_c`/
+    `humidity_pct`/`wind_speed_kmh` instead, which that mart has no
+    concept of at all). Reads straight from the source's own `raw.*`
+    table, region-scoped, so this works for any source the detector
+    covers.
+
+    `baseline` is a real per-column expected range from a much wider
+    `±_BASELINE_WINDOW_DAYS`-day window than `points`' own `±2h`
+    (`service.anomalies.get_anomaly_context`'s own docstring has the
+    "why" -- a narrow local window can itself be almost entirely
+    anomalous during a sustained real excursion, which would otherwise
+    make the derived range trivially contain the very reading it's
+    meant to judge). `None` for a column with too little real
+    non-anomalous history even at that width."""
+
+    anomaly_id: str
+    source: str
+    table_name: str
+    region: str | None
+    columns: list[str]
+    center_ts: datetime | None
+    points: list[AnomalyContextPoint]
+    baseline: dict[str, AnomalyContextColumnBaseline | None] = {}

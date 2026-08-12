@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
 import jwt
 import pytest
 
+from app.api.v1.datasources import routes as datasources_routes
 from app.api.v1.deps import get_db, get_redis_client
 from app.core.config import get_settings
 from app.main import app
 from app.service.datasources import actions as datasources_actions
 from app.service.datasources import monitoring as datasources_monitoring
+from app.service.datasources import service as datasources_service
 from app.service.pipeline.circuit_breaker import CircuitState
 
 NOW = datetime.now(UTC)
@@ -108,17 +111,50 @@ def wired(monkeypatch):
     monkeypatch.setattr(datasources_actions, "get_breaker", lambda name: breaker)
     monkeypatch.setattr(datasources_monitoring, "get_breaker", lambda name: breaker)
 
+    # `get_source_health` calls `fetch_run_rows()`, which opens its own
+    # dedicated `get_session()` internally (see that function's own
+    # docstring) rather than using the `db` FastAPI already injected
+    # above -- `dependency_overrides` only intercepts `Depends(...)`
+    # resolution, not this kind of direct module-level call, so it needs
+    # patching separately or `/health`'s run-derived fields would silently
+    # read from a real database instead of `session`.
+    @asynccontextmanager
+    async def _fake_get_session():
+        yield session
+
+    monkeypatch.setattr(datasources_service, "get_session", _fake_get_session)
+
     async def noop_run_in_background(*args, **kwargs):
         pass
 
     async def noop_backfill_in_background(*args, **kwargs):
         pass
 
+    # Real, pre-existing gap found live (2026-08-12, while chasing an
+    # unrelated LOG_DB_URL test hang): `app/api/v1/datasources/routes.py`
+    # does `from app.service.datasources.actions import run_in_background,
+    # run_backfill_in_background` (direct name imports) and passes those
+    # bound names straight to `BackgroundTasks.add_task` -- patching
+    # `datasources_actions.run_in_background` (the module attribute) never
+    # touched what the route actually calls, a real, silent `from x import
+    # y` monkeypatch miss. The real functions were firing for true in the
+    # background on every `/run`/`/backfill` test all along; harmless
+    # (fast, silently erroring against real Postgres/circuit-breaker
+    # state) until the log-DB split made one of those real calls slow
+    # enough to visibly hang a *later*, unrelated test. Patching the
+    # route module's own bound names, not just the source module's, is
+    # what actually intercepts the call.
     monkeypatch.setattr(
         datasources_actions, "run_in_background", noop_run_in_background
     )
     monkeypatch.setattr(
         datasources_actions, "run_backfill_in_background", noop_backfill_in_background
+    )
+    monkeypatch.setattr(
+        datasources_routes, "run_in_background", noop_run_in_background
+    )
+    monkeypatch.setattr(
+        datasources_routes, "run_backfill_in_background", noop_backfill_in_background
     )
     yield session, redis, breaker
     app.dependency_overrides.clear()

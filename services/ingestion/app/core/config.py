@@ -54,6 +54,21 @@ class Settings(BaseSettings):
     postgres_user: str = "postgres"
     postgres_password: str = "postgres"
 
+    # Second, separate Postgres instance (2026-08-12) for the real
+    # "logger" tables (`meta._ingest_log`, `meta.anomalies`,
+    # `meta._feature_selection_log`) -- an explicit split from `DATABASE_URL`
+    # so high-write-volume audit/history tables don't share connections/
+    # load with the primary warehouse database. Falls back to
+    # `database_url` when unset, so nothing breaks for a deployment that
+    # hasn't configured this yet -- same "optional override, sane default"
+    # shape `RAW_MARTS_DATABASE_URL` already established in `services/
+    # waerehouse`. `services/waerehouse`/`services/forecast-api` must be
+    # pointed at the SAME real `LOG_DB_URL` value -- `meta.anomalies.
+    # run_id` has a real foreign key into `meta._ingest_log(id)`, so
+    # those two tables in particular can never live in different
+    # databases from each other.
+    log_db_url_env: str | None = Field(default=None, validation_alias="LOG_DB_URL")
+
     # Redis — circuit-breaker state (Phase 1) + the backfill lock. Same
     # shared instance data-pipeline uses today.
     redis_url_env: str | None = Field(default=None, validation_alias="REDIS_URL")
@@ -211,6 +226,22 @@ class Settings(BaseSettings):
             f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
+
+    @property
+    def log_db_url(self) -> str:
+        """`postgresql+asyncpg://` DSN for the separate logging database
+        (`db.session.get_log_engine`) -- uses `LOG_DB_URL` verbatim
+        (same `postgresql://` -> `+asyncpg`/`sslmode=` -> `ssl=`
+        normalization `database_url` applies) if set, else falls back to
+        `database_url` itself so an unconfigured deployment keeps writing
+        logs to the primary database exactly as it always did."""
+        if self.log_db_url_env:
+            url = self.log_db_url_env
+            if url.startswith("postgresql://"):
+                url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+            url = url.replace("sslmode=", "ssl=")
+            return url
+        return self.database_url
 
     @property
     def redis_url(self) -> str:

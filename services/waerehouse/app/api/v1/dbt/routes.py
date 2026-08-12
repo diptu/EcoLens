@@ -25,7 +25,7 @@ from redis.asyncio import Redis
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_app_settings, get_db, get_redis_client
+from app.api.v1.deps import get_app_settings, get_log_db, get_redis_client
 from app.core.config import Settings
 from app.core.errors import ApiError
 from app.core.response_cache import cached_response
@@ -44,7 +44,7 @@ _NO_BUILD_SENTINEL = "__none__"
 
 
 @router.post("/build", response_model=DbtRunResponse)
-async def trigger_dbt_build(db: AsyncSession = Depends(get_db)) -> DbtRunResponse:
+async def trigger_dbt_build(db: AsyncSession = Depends(get_log_db)) -> DbtRunResponse:
     target = "dev"
     outcome = await run_build(
         db, trigger="dashboard_manual", triggered_by="dashboard", target=target
@@ -61,7 +61,7 @@ async def trigger_dbt_build(db: AsyncSession = Depends(get_db)) -> DbtRunRespons
 
 @router.get("/build/last", response_model=DbtBuildRunOut | None)
 async def last_dbt_build(
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_log_db),
     redis: Redis = Depends(get_redis_client),
     settings: Settings = Depends(get_app_settings),
 ) -> DbtBuildRunOut | None:
@@ -104,7 +104,7 @@ async def last_dbt_build(
 @router.get("/build/runs", response_model=DbtBuildRunsListResponse)
 async def list_dbt_build_runs_endpoint(
     limit: int = Query(default=20, ge=1, le=200),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_log_db),
     redis: Redis = Depends(get_redis_client),
     settings: Settings = Depends(get_app_settings),
 ) -> DbtBuildRunsListResponse:

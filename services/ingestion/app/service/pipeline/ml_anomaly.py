@@ -58,7 +58,18 @@ log = get_logger(__name__)
 # real per-source history volumes are known.
 MIN_TRAINING_ROWS = 50
 
-_CONTAMINATION = "auto"
+# Changed "auto" -> 0.01, 2026-08-13 (operator-requested tightening,
+# same round as `ANOMALY_SCORE_THRESHOLD`/`pipeline.anomaly.
+# _Z_SCORE_THRESHOLD`/`_MIN_ANOMALY_SCORE_TO_FLAG`). `"auto"` uses
+# sklearn's own internal IsolationForest heuristic for how much of the
+# training set to treat as outliers when fitting each tree's threshold;
+# a fixed 0.01 instead tells every forest "assume ~1% of this source's
+# own real training history is anomalous", tightening what counts as
+# out-of-distribution during *training* itself (upstream of, and
+# additive with, the post-hoc `decision_threshold`/`decision_floor`
+# calibration below, which still runs unchanged on top of whichever
+# contamination value was used to fit the forest).
+_CONTAMINATION = 0.01
 _RANDOM_STATE = 0  # fixed -- deterministic training output, not tuned
 
 _MODEL_KEY_PREFIX = "models/anomaly"
@@ -82,11 +93,49 @@ _MODEL_KEY_PREFIX = "models/anomaly"
 #     training `decision_function` values -- "a new point this far into
 #     the tail, or further, is rarer than `_THRESHOLD_PERCENTILE`% of
 #     this source's own real history".
-#   - `decision_floor`: the single most-anomalous `decision_function`
-#     value seen in training -- just used to scale `score`'s output onto
-#     a 0..1 range relative to *this model's own* observed spread, not
-#     an arbitrary global unit.
+#   - `decision_floor`: how far below `decision_threshold` counts as
+#     "fully" (score 1.0) anomalous -- used to scale `score`'s output
+#     onto a 0..1 range relative to *this model's own* observed spread,
+#     not an arbitrary global unit.
+#
+# **Real bug, found live 2026-08-12** (during the BOM/AEMO-NEM historical
+# backfills): `decision_floor` originally used `training_decision.min()`
+# -- the single most extreme value seen in training, one noisy sample.
+# `score`'s scaling clips to 1.0 the instant a new row's decision value
+# is *at all* past that one point, with no graceful falloff beyond it.
+# A model trained on a narrow, roughly-single-season window of live data
+# (confirmed live: the `bom` model in production had `rows_trained=5238`,
+# effectively a few recent weeks) then saturates at a perfect 1.0 for
+# huge swaths of a historical backfill spanning *other, equally normal*
+# seasons -- confirmed against real flagged rows during the backfill:
+# ordinary autumn VIC1/QLD1 readings (25-31°C, 22-48% humidity, normal
+# wind/pressure) scored a flat `1.00`, indistinguishable from a genuine
+# outlier. Raising `anomaly.py`'s own score-gate threshold (2026-08-12,
+# `_MIN_ANOMALY_SCORE_TO_FLAG`) can't fix this on its own -- the upstream
+# signal itself saturates at 1.0, clearing *any* threshold below it.
+#
+# Fixed: `decision_floor` is now `decision_threshold` minus
+# `_FLOOR_SIGMA_MULTIPLE` real standard deviations of the *whole*
+# training set's own `decision_function` spread -- a stable, dataset-
+# wide statistic, not one single most-extreme sample. A new row now has
+# to be a full real standard deviation past the already-rare
+# 1st-percentile threshold to hit a full 1.0, not merely past whatever
+# one point happened to be most extreme in a possibly-narrow training
+# window -- graceful degradation instead of a hair-trigger clip.
+#
+# `_FLOOR_SIGMA_MULTIPLE = 1.0` chosen empirically (2026-08-12), not a
+# guess: on the tight synthetic training cluster this module's own tests
+# use, the *old* min-based floor sat only ~0.013 std below threshold --
+# meaning literally any out-of-cluster point maxed to 1.0 by construction
+# (the exact same hair-trigger bug found live, not just theoretical).
+# Checked 0.5 through 3.0 against a genuinely wild outlier (demand_mw
+# 8000 -> 19000, price_mwh 60 -> -900): 0.5 still instantly saturates to
+# 1.0 (too tight, reproduces the bug); 1.0 scores it 0.875 (clearly
+# flagged, comfortably clears `ANOMALY_SCORE_THRESHOLD`); 1.5+ starts
+# under-scoring genuine outliers. 1.0 is the smallest multiple that
+# actually stops the hair-trigger clip while still flagging a real one.
 _THRESHOLD_PERCENTILE = 1.0
+_FLOOR_SIGMA_MULTIPLE = 1.0
 
 # A row must clear this fraction of the "threshold -> floor" gap (not
 # just barely cross `decision_threshold`) to actually get flagged --
@@ -100,7 +149,13 @@ _THRESHOLD_PERCENTILE = 1.0
 # positives now that it's one of only two signals left (the rule-based
 # one was retired the same date, see `pipeline/anomaly.py`'s own
 # docstring) -- still heuristic, not backtested against labeled data.
-ANOMALY_SCORE_THRESHOLD = 0.5
+# Raised again 0.5 -> 0.7, 2026-08-13 (operator-requested tightening,
+# same round as `pipeline.anomaly._Z_SCORE_THRESHOLD`/
+# `_MIN_ANOMALY_SCORE_TO_FLAG`) -- a candidate row now needs a real
+# decision-function value comfortably past `decision_floor`
+# (`score >= 0.7` of the threshold->floor gap, not just barely over it)
+# before it's even a candidate for the combined gate above.
+ANOMALY_SCORE_THRESHOLD = 0.7
 
 
 @dataclass(frozen=True)
@@ -158,7 +213,7 @@ def train(source: str, table: str) -> AnomalyModel | None:
 
     training_decision = forest.decision_function(array)
     decision_threshold = float(np.percentile(training_decision, _THRESHOLD_PERCENTILE))
-    decision_floor = float(training_decision.min())
+    decision_floor = decision_threshold - _FLOOR_SIGMA_MULTIPLE * float(training_decision.std())
 
     return AnomalyModel(
         source=source,

@@ -67,7 +67,7 @@ def _override_db(client, fake_db):
     async def fake_get_db():
         yield fake_db
 
-    client.app.dependency_overrides[deps.get_db] = fake_get_db
+    client.app.dependency_overrides[deps.get_log_db] = fake_get_db
 
 
 class _FakeRedis:

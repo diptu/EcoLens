@@ -38,6 +38,7 @@ from mlflow.tracking import MlflowClient
 from sklearn.preprocessing import StandardScaler
 
 from app.core.config import get_settings
+from app.service.ml.bias_correction import DemandBiasCorrection
 from app.service.ml.conformal import ConformalCalibration
 from app.service.ml.features import ALL_MODEL_REGIONS
 from app.models.ml import DemandLSTM
@@ -52,6 +53,7 @@ class ModelBundle:
     feature_scalers: dict[str, StandardScaler]
     target_scaler: StandardScaler
     calibration: ConformalCalibration
+    bias_correction: DemandBiasCorrection
     run_id: str
     version: str
     stage: str
@@ -121,11 +123,30 @@ async def load_bundle(model_name: str, stage: str = "Production") -> ModelBundle
             f"runs:/{version.run_id}/conformal_calibration.json"
         )
 
+        # `demand_bias_correction.json` only exists on runs from
+        # `TODO.md` Phase 3 on (2026-08-12) -- a version registered
+        # before that real, expected state, not an error; falls back to
+        # an empty `DemandBiasCorrection` (every `.apply()` call becomes
+        # a no-op, same as if this field didn't exist at all).
+        try:
+            bias_correction_dict = mlflow.artifacts.load_dict(
+                f"runs:/{version.run_id}/demand_bias_correction.json"
+            )
+            bias_correction = DemandBiasCorrection.from_dict(bias_correction_dict)
+        except Exception:
+            log.info(
+                "registry.no_bias_correction_artifact",
+                run_id=version.run_id,
+                model_name=model_name,
+            )
+            bias_correction = DemandBiasCorrection()
+
         return ModelBundle(
             model=model,
             feature_scalers=feature_scalers,
             target_scaler=target_scaler,
             calibration=ConformalCalibration.from_dict(calibration_dict),
+            bias_correction=bias_correction,
             run_id=version.run_id,
             version=version.version,
             stage=stage,
@@ -560,6 +581,26 @@ async def promote_version(
                     f"version {version} failed its live evaluation gate "
                     f"(fresh walk-forward MAPE: {eval_gate_mape or 'unknown'}) -- "
                     "see evaluate.run_live_evaluation_gate"
+                )
+            # Real coverage/bias, surfaced (`TODO.md` Phase 4) for a
+            # human/dashboard to see on ANY promotion attempt -- not just
+            # a rejected one, and never itself a rejection reason (no
+            # `raise` here). Deliberately visibility-only for now: watch
+            # real tag values across a few real training cycles before
+            # ever turning either into a hard gate, same real lesson
+            # `_resolve_max_acceptable_mape`'s own 2026-08-12 fix already
+            # cost this codebase once (a hastily-added MAPE-only
+            # threshold that silently mis-rejected a good candidate by
+            # comparing two non-comparable metrics).
+            eval_gate_coverage = candidate.tags.get("eval_gate_coverage")
+            eval_gate_bias_mw = candidate.tags.get("eval_gate_bias_mw")
+            if eval_gate_coverage is not None or eval_gate_bias_mw is not None:
+                log.info(
+                    "promote_version.eval_gate_coverage_bias",
+                    model_name=model_name,
+                    version=version,
+                    eval_gate_coverage=eval_gate_coverage,
+                    eval_gate_bias_mw=eval_gate_bias_mw,
                 )
 
             current = client.get_latest_versions(model_name, stages=["Production"])

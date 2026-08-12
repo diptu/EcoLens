@@ -26,6 +26,7 @@ def test_readyz_reports_ready_when_everything_is_healthy(client, monkeypatch):
         return _FakeConnection()
 
     client.app.dependency_overrides[deps.get_db] = fake_get_db
+    client.app.dependency_overrides[deps.get_log_db] = fake_get_db
     monkeypatch.setattr(health_routes, "get_rabbitmq_connection", fake_get_connection)
 
     response = client.get("/v1/readyz")
@@ -34,7 +35,7 @@ def test_readyz_reports_ready_when_everything_is_healthy(client, monkeypatch):
     body = response.json()
     assert body["status"] == "ready"
     names = {c["name"] for c in body["components"]}
-    assert names == {"postgres", "rabbitmq"}
+    assert names == {"postgres", "postgres_log", "rabbitmq"}
     assert all(c["healthy"] for c in body["components"])
 
     client.app.dependency_overrides.clear()
@@ -48,6 +49,7 @@ def test_readyz_reports_not_ready_when_rabbitmq_is_down(client, monkeypatch):
         raise ConnectionError("no route to broker")
 
     client.app.dependency_overrides[deps.get_db] = fake_get_db
+    client.app.dependency_overrides[deps.get_log_db] = fake_get_db
     monkeypatch.setattr(health_routes, "get_rabbitmq_connection", fake_get_connection)
 
     response = client.get("/v1/readyz")

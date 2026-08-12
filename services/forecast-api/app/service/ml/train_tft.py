@@ -38,6 +38,7 @@ from torch.utils.data import DataLoader
 from app.core.config import Settings, get_settings
 from app.db.session import get_session
 from app.models.tft import DemandTFT
+from app.service.ml.bias_correction import DemandBiasCorrection
 from app.service.ml.conformal import empirical_coverage, fit_conformal
 from app.service.ml.data import (
     TFTDataset,
@@ -246,9 +247,10 @@ def train_tft_model(
     val_loader = DataLoader(
         val_ds, batch_size=config.batch_size, shuffle=False, collate_fn=collate_tft
     )
-    cal_loader = DataLoader(
-        cal_ds, batch_size=config.batch_size, shuffle=False, collate_fn=collate_tft
-    )
+    # No pooled `cal_loader` -- calibration prediction now runs per
+    # region (below, grouping `cal_scaled`) for the real per-region bias
+    # correction (`TODO.md` Phase 3); `cal_ds` itself is still used just
+    # above for the empty-split check and `n_cal_windows` logging.
     test_loader = (
         DataLoader(
             test_ds, batch_size=config.batch_size, shuffle=False, collate_fn=collate_tft
@@ -345,10 +347,44 @@ def train_tft_model(
     if best_state is not None:
         model.load_state_dict(best_state)
 
-    y_cal, p10_cal, _, p90_cal = _predict_tft(model, cal_loader, device)
-    y_cal = _inverse_target(target_scaler, y_cal)
-    p10_cal = _inverse_target(target_scaler, p10_cal)
-    p90_cal = _inverse_target(target_scaler, p90_cal)
+    # Real per-region bias correction (`TODO.md` Phase 3, mirroring
+    # `ml/train.py::train_model`'s identical block -- see its own
+    # comment for the full reasoning). Unlike that function, TFT splits
+    # are built pooled across regions to begin with (this function's own
+    # header comment), so the per-region cal slice is recovered here by
+    # grouping the already-built `cal_scaled` frame instead of a
+    # separately-tracked per-region dataset -- same real cal rows either
+    # way, just grouped after the fact rather than before.
+    bias_by_region: dict[str, np.ndarray] = {}
+    y_cal_parts: list[np.ndarray] = []
+    p10_cal_parts: list[np.ndarray] = []
+    p90_cal_parts: list[np.ndarray] = []
+    for region, region_cal_scaled in cal_scaled.groupby("region"):
+        region_cal_ds = _dataset(region_cal_scaled)
+        if len(region_cal_ds) == 0:
+            continue
+        region_cal_loader = DataLoader(
+            region_cal_ds, batch_size=config.batch_size, shuffle=False, collate_fn=collate_tft
+        )
+        y_region, p10_region, p50_region, p90_region = _predict_tft(
+            model, region_cal_loader, device
+        )
+        y_region = _inverse_target(target_scaler, y_region)
+        p10_region = _inverse_target(target_scaler, p10_region)
+        p50_region = _inverse_target(target_scaler, p50_region)
+        p90_region = _inverse_target(target_scaler, p90_region)
+
+        region_bias = np.mean(y_region - p50_region, axis=0)
+        bias_by_region[region] = region_bias
+
+        y_cal_parts.append(y_region)
+        p10_cal_parts.append(p10_region + region_bias)
+        p90_cal_parts.append(p90_region + region_bias)
+
+    bias_correction = DemandBiasCorrection(bias_by_region=bias_by_region)
+    y_cal = np.concatenate(y_cal_parts)
+    p10_cal = np.concatenate(p10_cal_parts)
+    p90_cal = np.concatenate(p90_cal_parts)
     calibration = fit_conformal(y_cal, p10_cal, p90_cal, alpha=config.conformal_alpha)
 
     test_metrics: dict[str, float] = {}
@@ -376,6 +412,7 @@ def train_tft_model(
     return TrainResult(
         model=model,
         calibration=calibration,
+        bias_correction=bias_correction,
         feature_scalers=scalers,
         target_scaler=target_scaler,
         history=history,

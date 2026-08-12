@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_db
+from app.api.v1.deps import get_log_db
 from app.schemas.retention import RetentionRunOut, RetentionRunsListResponse
 
 router = APIRouter(prefix="/v1/retention", tags=["retention"])
@@ -24,7 +24,7 @@ router = APIRouter(prefix="/v1/retention", tags=["retention"])
 @router.get("/runs", response_model=RetentionRunsListResponse)
 async def list_retention_runs_endpoint(
     limit: int = Query(default=20, ge=1, le=200),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_log_db),
 ) -> RetentionRunsListResponse:
     result = await db.execute(
         text(

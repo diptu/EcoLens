@@ -239,6 +239,15 @@ async def _forecast_arrays_single_region(
     p10 = _inverse_target(bundle.target_scaler, out.p10.numpy())
     p50 = _inverse_target(bundle.target_scaler, out.p50.numpy())
     p90 = _inverse_target(bundle.target_scaler, out.p90.numpy())
+    # Real per-region P50 bias correction (`TODO.md` Phase 3), applied
+    # before conformal calibration widens the band -- same bias-then-
+    # conformal ordering `ml/train.py::train_model` fit the calibration
+    # against, so serving matches how it was actually calibrated.
+    # `region == "NEM"` gets no correction (no `"NEM"` key in
+    # `bias_by_region` -- `.apply` is then a no-op), same as the
+    # adaptive-scale exclusion below: an aggregate of 5 regions summed
+    # together isn't what any single region's bias offset was fit for.
+    p10, p50, p90 = bundle.bias_correction.apply(region, p10, p50, p90)
     lo, hi = bundle.calibration.apply(p10, p90)
 
     step = _infer_step(window_ts)
@@ -394,6 +403,7 @@ async def _run_recent_backtest_single_region(
         target_scaler=bundle.target_scaler,
         lookback=bundle.lookback,
         calibration=bundle.calibration,
+        bias_correction=bundle.bias_correction,
     )
     return evaluate_recent_actual_vs_predicted(
         forecaster, region_df, bundle.horizon, days_back=days_back

@@ -227,10 +227,23 @@ export type EmissionsForecast = {
 /** Live call to `GET /v1/emissions/forecast` — demand forecast x
  * current intensity, `region` defaults to the 5-region NEM aggregate
  * server-side. Near-term only (the model's native horizon — a few
- * hours), not a multi-day projection. */
+ * hours), not a multi-day projection.
+ *
+ * Real, generous 45s timeout (2026-08-12, matching `fetchDemandForecast`/
+ * `fetchRecentBacktest`) -- `region=NEM` hits the same expensive
+ * `_forecast_arrays_nem` path those two use server-side (5 real
+ * per-region live inferences summed), confirmed live at ~11-14s on a
+ * cache-cold hit (forecast-api's own `get_emissions_forecast` docstring).
+ * The previous default 15s timeout left only ~1-4s of real margin
+ * against that cold path -- confirmed live to actually trip it (the
+ * Executive Dashboard's "Now" marker/forecast band silently vanishing
+ * whenever a page load raced a cache-cold moment), not just a
+ * theoretical risk. */
 export async function fetchEmissionsForecast(region?: string): Promise<EmissionsForecast> {
   const res = await fetchWithTimeout(
     `${FORECAST_API_URL}/emissions/forecast${region ? `?region=${region}` : ""}`,
+    {},
+    45000,
   );
   if (!res.ok) {
     throw new Error(`GET /v1/emissions/forecast failed: ${res.status}`);

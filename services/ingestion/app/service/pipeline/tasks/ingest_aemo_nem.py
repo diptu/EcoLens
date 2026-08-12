@@ -13,6 +13,20 @@ writing this. This is distinct from `_try_live_api` below, which is a
 pre-existing placeholder that never parses a real response (see its
 own docstring) — the historical path doesn't touch it at all.
 
+**Second, deeper real historical path (2026-08-12)**: the DispatchIS
+Archive's ~13-month window is real and rolling, not a fixed date (
+confirmed live: `PUBLIC_DISPATCHIS_20250715` 404s, `..._20250801` 200s
+as of this writing) — a day older than that genuinely 404s, not
+transiently. `_fetch_historical_range` now falls back to AEMO's MMSDM
+Historical Data archive (`_fetch_mmsdm_day`, near the bottom of this
+file) for exactly those days: real, no-auth, verified back to 2020-01
+(AEMO's own docs claim 2009, unverified here). Reuses
+`_parse_dispatchis_csv`'s own field layout (confirmed identical between
+the two archives' `REGIONSUM`/`PRICE` tables via a real downloaded
+sample), just fed from two separate monthly CSVs instead of one daily
+bundled file — see `_fetch_mmsdm_day`'s own docstring for why
+`DISPATCHREGIONSUM`, not `DISPATCHLOAD`, is the right table here.
+
 Ported verbatim from `data-pipeline`'s identical module (`services/
 ingestion/TODO.md` Phase 1, "Migrate Ingest Tasks") -- no behavior
 change. The Archive fetch was live-verified again from this service's
@@ -244,7 +258,36 @@ async def _fetch_historical_range(start: datetime, end: datetime) -> pd.DataFram
                     frames.append(day_df)
                 log.info("aemo_nem.archive_day_fetched", day=str(day), rows=len(day_df))
             except Exception as exc:  # noqa: BLE001 - one bad day shouldn't abort the range
-                log.warning("aemo_nem.archive_day_failed", day=str(day), error=str(exc))
+                # Real fallback (2026-08-12): the live DispatchIS Archive
+                # only has a real, rolling ~13-month retention window --
+                # confirmed live, `PUBLIC_DISPATCHIS_20250715` 404s,
+                # `PUBLIC_DISPATCHIS_20250801` 200s, so the boundary moves
+                # forward every day. A day outside it genuinely 404s here,
+                # not a transient failure -- before giving up on this day
+                # entirely, try MMSDM's deeper real historical archive
+                # (see `_fetch_mmsdm_day`'s own docstring).
+                log.info(
+                    "aemo_nem.archive_day_unavailable_trying_mmsdm",
+                    day=str(day),
+                    error=str(exc),
+                )
+                try:
+                    async def _fetch_mmsdm(d: date = day) -> pd.DataFrame:
+                        return await _fetch_mmsdm_day(client, d)
+
+                    day_df = await fetch_with_retry(
+                        _fetch_mmsdm,
+                        source="aemo_nem",
+                        log_event="aemo_nem.mmsdm_day_retry",
+                        day=str(day),
+                    )
+                    if not day_df.empty:
+                        frames.append(day_df)
+                    log.info("aemo_nem.mmsdm_day_fetched", day=str(day), rows=len(day_df))
+                except Exception as mmsdm_exc:  # noqa: BLE001 - one bad day shouldn't abort the range
+                    log.warning(
+                        "aemo_nem.mmsdm_day_failed", day=str(day), error=str(mmsdm_exc)
+                    )
             day += timedelta(days=1)
             # A politeness delay between days -- this is a public archive
             # server, not a rate-limited API with documented headroom.
@@ -345,6 +388,138 @@ def _parse_dispatchis_csv(text: str) -> list[dict]:
             demand[key] = value
         else:
             price[key] = value
+
+    out: list[dict] = []
+    for key in set(demand) | set(price):
+        settlement_date, region = key
+        try:
+            ts = pd.Timestamp(settlement_date, tz=_NEM_TZ).tz_convert("UTC")
+        except ValueError:
+            continue
+        out.append(
+            {
+                "ts": ts,
+                "region": region,
+                "demand_mw": demand.get(key),
+                "price_mwh": price.get(key),
+            }
+        )
+    return out
+
+
+# ────────────────────────────────────────────────────────────────────
+# Real fallback historical fetch — AEMO's MMSDM Historical Data archive
+# (verified live, no auth; used only once the DispatchIS Archive above
+# genuinely 404s for a given day, i.e. outside its own real, rolling
+# ~13-month retention window)
+# ────────────────────────────────────────────────────────────────────
+
+_MMSDM_BASE = "https://www.nemweb.com.au/Data_Archive/Wholesale_Electricity/MMSDM"
+
+# AEMO changed this archive's own filename convention starting 2025 --
+# confirmed live (2026-08-12): both the old `PUBLIC_DVD_*` pattern
+# (against a real 2020-01 sample) and the new `PUBLIC_ARCHIVE#*` pattern
+# (against a real 2025-07 sample) return real HTTP 200 with real zip
+# content. AEMO's own published retention for this archive goes back to
+# 2009, but only 2020-01 has actually been checked here -- treat
+# anything earlier as unverified by this code, not guaranteed to work.
+_MMSDM_NEW_PATTERN_FIRST_YEAR = 2025
+
+
+def _mmsdm_table_url(table: str, year: int, month: int) -> str:
+    folder = f"{_MMSDM_BASE}/{year}/MMSDM_{year}_{month:02d}/MMSDM_Historical_Data_SQLLoader/DATA"
+    yyyymm = f"{year}{month:02d}"
+    if year >= _MMSDM_NEW_PATTERN_FIRST_YEAR:
+        # The literal "#" separators must be percent-encoded in the URL.
+        filename = f"PUBLIC_ARCHIVE%23{table}%23FILE01%23{yyyymm}010000.zip"
+    else:
+        filename = f"PUBLIC_DVD_{table}_{yyyymm}010000.zip"
+    return f"{folder}/{filename}"
+
+
+# Real, known tradeoff, not solved here: `pipeline.backfill` calls this
+# module's `run(start=day, end=day)` one calendar day at a time (the same
+# accepted inefficiency `ingest_bom.py`'s own historical path already
+# documents for its own archive) -- a month-long backfill through this
+# fallback still re-requests the same ~6.5MB MMSDM zip pair once per day
+# within a single `backfill` process. This cache only helps a single call
+# that already spans multiple days in the same month (e.g. a direct
+# multi-day `ingest aemo-nem --start/--end` CLI invocation), not across
+# separate `backfill_day` calls. Fixing `pipeline.backfill`'s per-day
+# granularity is a bigger, shared-across-4-sources change -- out of scope
+# here.
+_mmsdm_month_cache: dict[tuple[str, int, int], str] = {}
+
+
+async def _fetch_mmsdm_table_csv(client: Any, table: str, year: int, month: int) -> str:
+    cache_key = (table, year, month)
+    if cache_key in _mmsdm_month_cache:
+        return _mmsdm_month_cache[cache_key]
+    url = _mmsdm_table_url(table, year, month)
+    resp = await client.get(url)
+    resp.raise_for_status()
+    zf = zipfile.ZipFile(io.BytesIO(resp.content))
+    csv_names = [n for n in zf.namelist() if n.upper().endswith(".CSV")]
+    if not csv_names:
+        raise ValueError(f"No CSV found in MMSDM zip: {url}")
+    text = zf.read(csv_names[0]).decode("utf-8", errors="replace")
+    _mmsdm_month_cache[cache_key] = text
+    return text
+
+
+async def _fetch_mmsdm_day(client: Any, day: date) -> pd.DataFrame:
+    """One day's rows sliced out of MMSDM's real monthly
+    `DISPATCHREGIONSUM`/`DISPATCHPRICE` archive tables -- **not**
+    `DISPATCHLOAD` (a common mix-up: that table is per-generating-unit
+    dispatch instructions, not regional demand). Real, verified fact:
+    `DISPATCHREGIONSUM`/`DISPATCHPRICE`'s own per-row column layout is
+    identical to the live DispatchIS report's `REGIONSUM`/`PRICE` record
+    types `_parse_dispatchis_csv` already parses (confirmed by
+    downloading and diffing a real 2020-01 sample against that function's
+    own field indexing before writing this) -- so this only needs its own
+    thin merge wrapper (`_parse_mmsdm_regionsum_and_price` below), not a
+    second parser."""
+    regionsum_text = await _fetch_mmsdm_table_csv(
+        client, "DISPATCHREGIONSUM", day.year, day.month
+    )
+    price_text = await _fetch_mmsdm_table_csv(client, "DISPATCHPRICE", day.year, day.month)
+    rows = _parse_mmsdm_regionsum_and_price(regionsum_text, price_text, day)
+    if not rows:
+        return pd.DataFrame(columns=["ts", "region", "demand_mw", "price_mwh"])
+    return pd.DataFrame(rows)
+
+
+def _parse_mmsdm_regionsum_and_price(
+    regionsum_csv: str, price_csv: str, day: date
+) -> list[dict]:
+    """Same real `(settlement_date, region)` merge `_parse_dispatchis_csv`
+    already does, fed from two separate real monthly MMSDM CSVs instead
+    of one file bundling both tables -- that's the only real structural
+    difference; the per-row field layout is identical (see
+    `_fetch_mmsdm_day`'s own docstring). Filtered to just `day`:
+    `regionsum_csv`/`price_csv` each cover a whole real month."""
+    demand: dict[tuple[str, str], float | None] = {}
+    price: dict[tuple[str, str], float | None] = {}
+    day_prefix = day.strftime("%Y/%m/%d")
+
+    for text, record_type, target in (
+        (regionsum_csv, "REGIONSUM", demand),
+        (price_csv, "PRICE", price),
+    ):
+        reader = csv.reader(io.StringIO(text))
+        for row in reader:
+            if len(row) < 10 or row[0] != "D" or row[1] != "DISPATCH" or row[2] != record_type:
+                continue
+            settlement_date = row[4]
+            if not settlement_date.startswith(day_prefix):
+                continue
+            region = row[6]
+            raw_value = row[9]
+            try:
+                value = float(raw_value) if raw_value else None
+            except ValueError:
+                value = None
+            target[(settlement_date, region)] = value
 
     out: list[dict] = []
     for key in set(demand) | set(price):

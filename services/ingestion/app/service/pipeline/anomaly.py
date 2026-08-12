@@ -53,6 +53,17 @@ also flagged by the ML model) — `anomaly_score`/`metric`/`value`/
 score independently — NULL meaning that signal didn't fire — so "which
 signal(s) triggered" is a queryable structured field instead of only
 recoverable by parsing `anomaly_reason`'s free-text string.
+
+**High-confidence-only gate, 2026-08-12, tightened further 2026-08-13**
+(`_MIN_ANOMALY_SCORE_TO_FLAG`): clearing a signal's own trigger
+(z > `_Z_SCORE_THRESHOLD`, or a trained ML model's own
+`ANOMALY_SCORE_THRESHOLD`) is necessary but no longer sufficient to
+actually get flagged/persisted — the *winning* signal's own combined
+score must also exceed `0.98`. A row that only barely clears a signal's
+own lower bar (e.g. z just over 4.0) is now silently not flagged at all,
+same as if neither signal had fired; this trades real detection recall
+for a much lower false-positive rate on borderline cases. See that constant's
+own comment for the exact real thresholds this implies per signal.
 """
 
 from __future__ import annotations
@@ -96,7 +107,32 @@ _NUMERIC_COLUMNS: dict[str, tuple[str, ...]] = {
 }
 
 _MIN_ROWS_FOR_ZSCORE = 5
-_Z_SCORE_THRESHOLD = 3.0
+# Raised 3.0 -> 4.0, 2026-08-13 (operator-requested tightening) -- a
+# stricter individual-trigger bar on top of `_MIN_ANOMALY_SCORE_TO_FLAG`
+# below, not a replacement for it; the two now compound (fewer rows even
+# become "candidates", and candidates need a higher combined score too).
+_Z_SCORE_THRESHOLD = 4.0
+
+# Real gate, 2026-08-12: a row clearing *either* signal's own trigger
+# (z > _Z_SCORE_THRESHOLD, or ml_score >= ml_anomaly.ANOMALY_SCORE_
+# THRESHOLD) used to be enough to get flagged/persisted to `meta.
+# anomalies`, even right at that signal's own threshold -- e.g. a z just
+# above `_Z_SCORE_THRESHOLD` scores z_signal_score=min(1.0, z/(2·
+# _Z_SCORE_THRESHOLD))≈0.5, barely above the statistical signal's own
+# bar. This raises the bar for what actually counts as "an anomaly"
+# (gets recorded) to a real high-confidence score: the WINNING signal's
+# own combined score (`_Winner.score`, 0-1) must exceed this, not just
+# clear its own signal's individual trigger.
+# Raised 0.95 -> 0.98, 2026-08-13 (operator-requested tightening, same
+# change as `_Z_SCORE_THRESHOLD` above). In practice: the statistical
+# signal alone now needs z > 7.84 (0.98 * 2 * 4.0) to flag on its own,
+# and the ML signal needs ml_score >= 0.98 -- both signals' own lower
+# triggers above still gate whether a row is even a *candidate* worth
+# scoring at all (a real, deliberately cheap pre-filter), but a row that
+# only clears a signal's own lower trigger without reaching this bar is
+# now dropped entirely, same as if neither signal had fired -- not
+# persisted to `meta.anomalies` in any form.
+_MIN_ANOMALY_SCORE_TO_FLAG = 0.98
 
 _RESULT_COLUMNS = (
     "anomaly_score",
@@ -217,7 +253,7 @@ def detect_anomalies(df: pd.DataFrame, source: str) -> pd.DataFrame:
                 )
                 ml_score_value = float(ml_score)
 
-        if reasons:
+        if reasons and winner.score > _MIN_ANOMALY_SCORE_TO_FLAG:
             flagged.append((idx, reasons, winner, statistical_score, ml_score_value))
 
     if not flagged:

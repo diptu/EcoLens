@@ -65,6 +65,44 @@ async def dispose() -> None:
     await get_engine().dispose()
     if get_settings().raw_marts_archive_configured:
         await get_marts_archive_engine().dispose()
+    await get_log_engine().dispose()
+
+
+@lru_cache
+def get_log_engine() -> AsyncEngine:
+    """Third engine, bound to `Settings.log_db_url` -- the real "logger"
+    tables (`meta._ingest_log`, `meta._dbt_build_log`, `meta._retention_
+    log`, `meta._marts_archive_log`) live here, separate from both `get_
+    engine()`'s primary database and `get_marts_archive_engine()`'s
+    `raw_marts.*` archive (2026-08-12). Falls back to the same database
+    as `get_engine()` when `LOG_DB_URL` is unset, so this is always safe
+    to call."""
+    return create_async_engine(
+        get_settings().log_db_url,
+        pool_pre_ping=True,
+        future=True,
+        connect_args={"statement_cache_size": 0},
+    )
+
+
+@lru_cache
+def get_log_sessionmaker() -> async_sessionmaker[AsyncSession]:
+    return async_sessionmaker(get_log_engine(), expire_on_commit=False)
+
+
+@asynccontextmanager
+async def get_log_session() -> AsyncIterator[AsyncSession]:
+    """Same commit/rollback contract as `get_session()`, bound to the
+    separate logging database instead."""
+    session = get_log_sessionmaker()()
+    try:
+        yield session
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        raise
+    finally:
+        await session.close()
 
 
 @lru_cache

@@ -25,14 +25,14 @@ from sqlalchemy import text
 
 from app.celery_app import celery_app, run_async
 from app.core.logging import configure_logging, get_logger
-from app.db.session import get_session
+from app.db.session import get_log_session
 
 log = get_logger(__name__)
 
 
 async def _log_retention_start(*, trigger: str, triggered_by: str) -> uuid.UUID:
     run_id = uuid.uuid4()
-    async with get_session() as db:
+    async with get_log_session() as db:
         await db.execute(
             text(
                 "INSERT INTO meta._retention_log "
@@ -60,7 +60,7 @@ async def _log_retention_finish(
 ) -> None:
     import json
 
-    async with get_session() as db:
+    async with get_log_session() as db:
         await db.execute(
             text(
                 "UPDATE meta._retention_log "

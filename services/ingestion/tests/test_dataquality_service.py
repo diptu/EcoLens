@@ -5,11 +5,13 @@ module's own docstring for what's deliberately excluded)."""
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from app.service import dataquality as dq_service
+from app.service.datasources import service as datasources_service
 
 pytestmark = pytest.mark.anyio
 
@@ -38,6 +40,16 @@ class FakeResult:
 
 
 class FakeSession:
+    #: The most recently constructed instance -- `fetch_run_rows` opens
+    #: its own dedicated `get_session()` internally rather than accepting
+    #: a caller-supplied `db` (see that function's own docstring), so
+    #: every test's locally-constructed `session` passed directly to
+    #: `_generate_issues`/`get_summary` no longer reaches it.
+    #: `_patch_log_session` below (an autouse fixture) reads this to keep
+    #: faking `meta._ingest_log` reads without touching
+    #: every individual test's call site.
+    latest: "FakeSession | None" = None
+
     def __init__(
         self,
         *,
@@ -49,6 +61,7 @@ class FakeSession:
         self.anomaly_cluster_rows = list(anomaly_cluster_rows)
         self.drift_rows = list(drift_rows)
         self.queries: list[tuple[str, dict]] = []
+        FakeSession.latest = self
 
     async def execute(self, query, params=None):
         sql = str(query)
@@ -76,6 +89,22 @@ class FakeRedis:
             return None
         self.store[key] = value
         return True
+
+
+@pytest.fixture(autouse=True)
+def _patch_log_session(monkeypatch):
+    """See `FakeSession.latest`'s own docstring -- `fetch_run_rows`
+    (called indirectly by every test in this file, via `_generate_issues`/
+    `get_summary`) needs `datasources_service.get_session` patched to
+    yield whichever `FakeSession` this test most recently constructed."""
+
+    @asynccontextmanager
+    async def _fake_get_session():
+        yield FakeSession.latest
+
+    monkeypatch.setattr(datasources_service, "get_session", _fake_get_session)
+    yield
+    FakeSession.latest = None
 
 
 def _run_row(**overrides):

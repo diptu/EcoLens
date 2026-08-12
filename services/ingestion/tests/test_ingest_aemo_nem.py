@@ -190,6 +190,7 @@ async def test_fetch_archive_day_keeps_every_5_min_interval(monkeypatch):
 
 async def test_fetch_historical_range_skips_a_failing_day_and_keeps_going(monkeypatch):
     calls = []
+    mmsdm_calls = []
 
     async def fake_fetch_archive_day(client, day):
         calls.append(day)
@@ -206,7 +207,16 @@ async def test_fetch_historical_range_skips_a_failing_day_and_keeps_going(monkey
             ]
         )
 
+    async def fake_fetch_mmsdm_day(client, day):
+        # The MMSDM fallback is real network I/O -- mocked here (not just
+        # left unmocked) so this stays a real, fast, network-free unit
+        # test rather than silently hitting the live archive for a day
+        # that's genuinely outside it (a *future* date, in this test).
+        mmsdm_calls.append(day)
+        raise RuntimeError("simulated MMSDM failure too — this day is unrecoverable")
+
     monkeypatch.setattr(ingest_aemo_nem, "_fetch_archive_day", fake_fetch_archive_day)
+    monkeypatch.setattr(ingest_aemo_nem, "_fetch_mmsdm_day", fake_fetch_mmsdm_day)
     monkeypatch.setattr(ingest_aemo_nem.asyncio, "sleep", lambda *_: _noop())
 
     start = datetime(2026, 8, 1, tzinfo=timezone.utc)
@@ -214,8 +224,11 @@ async def test_fetch_historical_range_skips_a_failing_day_and_keeps_going(monkey
     df = await ingest_aemo_nem._fetch_historical_range(start, end)
 
     # Both days were attempted (the failing one didn't stop the loop),
-    # and the one good day's rows made it into the result.
+    # the MMSDM fallback was tried for the failing day specifically (and
+    # also failed, so that day is genuinely dropped), and the one good
+    # day's rows made it into the result.
     assert calls == [date(2026, 8, 1), date(2026, 8, 2)]
+    assert mmsdm_calls == [date(2026, 8, 1)]
     assert len(df) == 1
     assert set(df.columns) >= {
         "ts",
@@ -228,8 +241,159 @@ async def test_fetch_historical_range_skips_a_failing_day_and_keeps_going(monkey
     }
 
 
+async def test_fetch_historical_range_uses_mmsdm_when_archive_day_fails(monkeypatch):
+    """The real end-to-end shape this fallback exists for: the cheap
+    per-day Archive fetch 404s (outside its real retention window), and
+    the MMSDM fallback's own rows for that day still make it into the
+    final result."""
+
+    async def failing_archive_day(client, day):
+        raise RuntimeError("simulated 404 — outside retention")
+
+    async def fake_mmsdm_day(client, day):
+        return pd.DataFrame(
+            [
+                {
+                    "ts": pd.Timestamp("2020-01-15 14:00:00", tz="UTC"),
+                    "region": "NSW1",
+                    "demand_mw": 7500.0,
+                    "price_mwh": 45.0,
+                }
+            ]
+        )
+
+    monkeypatch.setattr(ingest_aemo_nem, "_fetch_archive_day", failing_archive_day)
+    monkeypatch.setattr(ingest_aemo_nem, "_fetch_mmsdm_day", fake_mmsdm_day)
+    monkeypatch.setattr(ingest_aemo_nem.asyncio, "sleep", lambda *_: _noop())
+
+    start = datetime(2020, 1, 15, tzinfo=timezone.utc)
+    end = datetime(2020, 1, 15, tzinfo=timezone.utc)
+    df = await ingest_aemo_nem._fetch_historical_range(start, end)
+
+    assert len(df) == 1
+    assert df.iloc[0]["region"] == "NSW1"
+    assert df.iloc[0]["demand_mw"] == 7500.0
+
+
 async def _noop():
     return None
+
+
+# ────────────────────────────────────────────────────────────────────
+# MMSDM fallback — deeper real historical path (2026-08-12)
+# ────────────────────────────────────────────────────────────────────
+
+
+def test_mmsdm_table_url_uses_the_old_pattern_before_2025():
+    url = ingest_aemo_nem._mmsdm_table_url("DISPATCHREGIONSUM", 2020, 1)
+    assert url == (
+        "https://www.nemweb.com.au/Data_Archive/Wholesale_Electricity/MMSDM/"
+        "2020/MMSDM_2020_01/MMSDM_Historical_Data_SQLLoader/DATA/"
+        "PUBLIC_DVD_DISPATCHREGIONSUM_202001010000.zip"
+    )
+
+
+def test_mmsdm_table_url_uses_the_new_pattern_from_2025_onward():
+    url = ingest_aemo_nem._mmsdm_table_url("DISPATCHPRICE", 2025, 7)
+    assert url == (
+        "https://www.nemweb.com.au/Data_Archive/Wholesale_Electricity/MMSDM/"
+        "2025/MMSDM_2025_07/MMSDM_Historical_Data_SQLLoader/DATA/"
+        "PUBLIC_ARCHIVE%23DISPATCHPRICE%23FILE01%23202507010000.zip"
+    )
+
+
+def _mmsdm_regionsum_csv(rows: list[tuple[str, str, float]]) -> str:
+    """A minimal but structurally real MMSDM `DISPATCHREGIONSUM` monthly
+    CSV — same real column layout as a downloaded 2020-01 sample
+    (`SETTLEMENTDATE` at index 4, `REGIONID` at index 6, `TOTALDEMAND` at
+    index 9), trimmed to just those columns."""
+    lines = [
+        "C,SETP.WORLD,DVD_DISPATCHREGIONSUM,AEMO,PUBLIC,2020/02/07,00:35:06,1,,1\n",
+        "I,DISPATCH,REGIONSUM,4,SETTLEMENTDATE,RUNNO,REGIONID,DISPATCHINTERVAL,"
+        "INTERVENTION,TOTALDEMAND\n",
+    ]
+    for settlement_date, region, demand in rows:
+        lines.append(f'D,DISPATCH,REGIONSUM,4,"{settlement_date}",1,{region},1,0,{demand}\n')
+    return "".join(lines)
+
+
+def _mmsdm_price_csv(rows: list[tuple[str, str, float]]) -> str:
+    lines = [
+        "C,SETP.WORLD,DVD_DISPATCHPRICE,AEMO,PUBLIC,2020/02/07,00:35:05,1,,1\n",
+        "I,DISPATCH,PRICE,1,SETTLEMENTDATE,RUNNO,REGIONID,DISPATCHINTERVAL,"
+        "INTERVENTION,RRP\n",
+    ]
+    for settlement_date, region, rrp in rows:
+        lines.append(f'D,DISPATCH,PRICE,1,"{settlement_date}",1,{region},1,0,{rrp}\n')
+    return "".join(lines)
+
+
+def test_parse_mmsdm_regionsum_and_price_merges_by_settlement_and_region():
+    regionsum = _mmsdm_regionsum_csv(
+        [
+            ("2020/01/15 00:05:00", "NSW1", 7245.31),
+            ("2020/01/15 00:05:00", "QLD1", 6095.75),
+        ]
+    )
+    price = _mmsdm_price_csv(
+        [
+            ("2020/01/15 00:05:00", "NSW1", 49.00916),
+            ("2020/01/15 00:05:00", "QLD1", 38.5),
+        ]
+    )
+
+    rows = ingest_aemo_nem._parse_mmsdm_regionsum_and_price(
+        regionsum, price, date(2020, 1, 15)
+    )
+
+    assert len(rows) == 2
+    by_region = {r["region"]: r for r in rows}
+    assert by_region["NSW1"]["demand_mw"] == 7245.31
+    assert by_region["NSW1"]["price_mwh"] == 49.00916
+    assert by_region["QLD1"]["demand_mw"] == 6095.75
+
+
+def test_parse_mmsdm_regionsum_and_price_filters_to_the_requested_day():
+    # A whole real month's CSV covers many days -- only the requested
+    # day's rows should survive, since `_fetch_mmsdm_day` is called once
+    # per day but the underlying CSVs are cached per month.
+    regionsum = _mmsdm_regionsum_csv(
+        [
+            ("2020/01/15 00:05:00", "NSW1", 7245.31),
+            ("2020/01/16 00:05:00", "NSW1", 7300.0),
+        ]
+    )
+    price = _mmsdm_price_csv([("2020/01/15 00:05:00", "NSW1", 49.0)])
+
+    rows = ingest_aemo_nem._parse_mmsdm_regionsum_and_price(
+        regionsum, price, date(2020, 1, 15)
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["demand_mw"] == 7245.31
+
+
+async def test_fetch_mmsdm_table_csv_caches_within_the_same_month(monkeypatch):
+    ingest_aemo_nem._mmsdm_month_cache.clear()
+    get_calls = []
+
+    class _FakeMmsdmClient:
+        async def get(self, url):
+            get_calls.append(url)
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w") as zf:
+                zf.writestr("PUBLIC_DVD_DISPATCHREGIONSUM_202001010000.CSV", "C,x\nI,x\n")
+            return _FakeResponse(buf.getvalue())
+
+    client = _FakeMmsdmClient()
+
+    await ingest_aemo_nem._fetch_mmsdm_table_csv(client, "DISPATCHREGIONSUM", 2020, 1)
+    await ingest_aemo_nem._fetch_mmsdm_table_csv(client, "DISPATCHREGIONSUM", 2020, 1)
+
+    # Second call for the same (table, year, month) hit the cache, not
+    # a second real request.
+    assert len(get_calls) == 1
+    ingest_aemo_nem._mmsdm_month_cache.clear()
 
 
 async def test_run_with_start_and_end_routes_to_the_historical_fetch(monkeypatch):

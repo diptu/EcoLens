@@ -33,6 +33,7 @@ import torch
 
 from app.models.ml import DemandLSTM
 from app.service.ml import prune
+from app.service.ml.bias_correction import DemandBiasCorrection
 from app.service.ml.conformal import ConformalCalibration
 from app.service.ml.data import _TRAINING_COLUMNS
 from app.service.ml.evaluate import EvaluationReport
@@ -336,6 +337,7 @@ class TestPruneAndRecover:
             return TrainResult(
                 model=recovered_model,
                 calibration=ConformalCalibration(q=np.full(config.horizon, 10.0), alpha=0.2),
+                bias_correction=DemandBiasCorrection(),
                 feature_scalers={},
                 target_scaler=object(),
                 test_metrics={"test_mape": 4.2},

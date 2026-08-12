@@ -86,6 +86,7 @@ import {
   type FeatureRebuildRun,
   type TrainingRunLog,
 } from "@/lib/ingestion";
+import { fetchPublicDataQualitySummary } from "@/lib/data-quality";
 
 // `Settings.conformal_alpha = 0.2` (data-pipeline) -- a fixed training-time
 // config value, not something any API currently exposes live. Documented
@@ -240,6 +241,15 @@ export default function PerformancePage() {
   );
   const [drift, setDrift] = useState<DriftReport[] | null>(null);
   const [driftLoaded, setDriftLoaded] = useState(false);
+  // Real "Data Quality" health-score input -- same live `GET /v1/data-
+  // quality/summary/public` (`services/ingestion`) the Executive
+  // Dashboard's own "Data Quality Score" KPI already uses:
+  // `pass_rate_pct_24h`, the real % of rows ingested in the last 24h
+  // that passed the anomaly detector's checks (not flagged). Not
+  // architecture-scoped (data quality is an upstream-of-the-model
+  // concern, same for every architecture), so fetched once on mount,
+  // not re-fetched on the LSTM/TFT/TimesFM toggle.
+  const [dataQualityScorePct, setDataQualityScorePct] = useState<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -784,6 +794,20 @@ export default function PerformancePage() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchPublicDataQualitySummary()
+      .then((summary) => {
+        if (!cancelled) setDataQualityScorePct(summary.data_quality_score_pct);
+      })
+      .catch(() => {
+        if (!cancelled) setDataQualityScorePct(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   // Real naive baseline MAPE for cards outside the benchmark table
   // (`naiveBenchmarkRow` above backs the table itself, with the fuller
   // real RMSE/MAE/Bias/Coverage set) -- kept for those other real
@@ -806,11 +830,20 @@ export default function PerformancePage() {
         )
       : null;
   const driftHealth = top3Psi != null ? Math.max(0, 100 - Math.min(1, top3Psi / 0.5) * 100) : null;
+  // Data Quality -- real `pass_rate_pct_24h` from `services/ingestion`'s
+  // `GET /v1/data-quality/summary/public` (`dataQualityScorePct` state
+  // above), already 0-100, no rescaling needed unlike the other
+  // components above. Added 2026-08-13, replacing the "Not tracked yet"
+  // placeholder this card used to show -- weights rebalanced (was 40/20/
+  // 20/20) to make room for it as a real, meaningfully-weighted 5th
+  // input: upstream data problems are a first-class model-health risk,
+  // not an afterthought.
   const healthComponents = [
-    { label: "Accuracy", value: errorHealth, weight: 0.4 },
-    { label: "Calibration", value: coverageHealth, weight: 0.2 },
-    { label: "Drift", value: driftHealth, weight: 0.2 },
-    { label: "Stability", value: stabilityHealth, weight: 0.2 },
+    { label: "Accuracy", value: errorHealth, weight: 0.35 },
+    { label: "Calibration", value: coverageHealth, weight: 0.15 },
+    { label: "Drift", value: driftHealth, weight: 0.15 },
+    { label: "Stability", value: stabilityHealth, weight: 0.15 },
+    { label: "Data Quality", value: dataQualityScorePct, weight: 0.2 },
   ];
   const healthComponentsAvailable = healthComponents.filter(
     (c): c is { label: string; value: number; weight: number } => c.value != null,
@@ -1270,14 +1303,10 @@ export default function PerformancePage() {
                       )}
                     </div>
                   ))}
-                  <div className="flex items-center justify-between rounded-md border border-dashed border-white/10 bg-white/[0.01] px-2.5 py-1.5">
-                    <span className="text-white/40">Data Quality</span>
-                    <IllustrativeBadge label="Not tracked yet" />
-                  </div>
                 </div>
               </div>
               <p className="mt-3 text-center text-[10px] text-white/40">
-                40% accuracy (vs. naive baseline) + 20% calibration (coverage vs. target) + 20% drift (top-3 PSI) + 20% stability (MAPE variance across real evaluate runs) — reweighted across whichever components have a real value.
+                35% accuracy (vs. naive baseline) + 15% calibration (coverage vs. target) + 15% drift (top-3 PSI) + 15% stability (MAPE variance across real evaluate runs) + 20% data quality (real 24h pass rate, GET /v1/data-quality/summary/public) — reweighted across whichever components have a real value.
               </p>
             </Card>
           </div>

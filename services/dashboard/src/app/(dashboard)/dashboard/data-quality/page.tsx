@@ -75,10 +75,13 @@ import { Card } from "@/components/dashboard/card";
 import { cn } from "@/lib/utils";
 import {
   fetchAnomalies,
+  fetchAnomalyContext,
   fetchAnomalySummary,
   fetchAnomalyTimeseries,
   updateAnomalyStatus,
   type Anomaly,
+  type AnomalyContext,
+  type AnomalyContextPoint,
   type AnomalyMethod,
   type AnomalySeverity,
   type AnomalyStatus,
@@ -824,17 +827,46 @@ function FilterSelect({
 // Anomaly Details panel
 // ────────────────────────────────────────────────────────────────────
 
-// Real threshold `ml_anomaly.ANOMALY_SCORE_THRESHOLD` uses (`services/
-// ingestion/app/service/pipeline/ml_anomaly.py`) -- only used here to
-// honestly label an ML-signal contributing factor, not re-derived.
-const ML_ANOMALY_SCORE_THRESHOLD = 0.5;
-const Z_SCORE_THRESHOLD = 3.0;
+// Real thresholds `ml_anomaly.ANOMALY_SCORE_THRESHOLD` / `pipeline.
+// anomaly._Z_SCORE_THRESHOLD` use (`services/ingestion/app/service/
+// pipeline/{ml_anomaly,anomaly}.py`) -- only mirrored here to honestly
+// label a contributing factor, not re-derived. Raised 0.5->0.7 /
+// 3.0->4.0, 2026-08-13, matching the same operator-requested backend
+// tightening -- keep in sync if those change again.
+const ML_ANOMALY_SCORE_THRESHOLD = 0.7;
+const Z_SCORE_THRESHOLD = 4.0;
 
-/** Metrics `GET /v1/anomalies/timeseries` actually supports -- used to
- * decide whether the Point Context mini chart below can fetch real data
- * for a given anomaly's `metric` at all (e.g. `temp_c`/`wind_speed_kmh`
- * flagged rows have no timeseries endpoint to draw from). */
-const TIMESERIES_METRICS = new Set(["demand_mw", "price_mwh"]);
+// Real per-column "how far off is this row's own real value from its
+// own real ±3-day baseline" (`context.baseline`, `services/ingestion`'s
+// `get_anomaly_context` docstring has the full derivation) -- normalized
+// to 0..1 (5 real std devs -> fully saturated) so every column is
+// comparable on one radar/bar scale regardless of its own unit. Not a
+// trained feature-importance value (the real `IsolationForest` never
+// persists one, `ml_anomaly.py`'s own docstring/module has no
+// per-feature contribution anywhere) -- this is the honest, real
+// substitute: an actual deviation strength per real scanned column,
+// computed against real wider-window history so a narrow local
+// excursion (e.g. a multi-hour heatwave filling the ±2h window itself)
+// can't silently understate it.
+function computeContributingFactors(
+  context: AnomalyContext | null,
+  anomalyTs: string | null,
+): Array<{ column: string; score: number; z: number }> {
+  if (!context || !anomalyTs) return [];
+  const ownPoint = context.points.find(
+    (p) => new Date(p.ts).getTime() === new Date(anomalyTs).getTime(),
+  );
+  if (!ownPoint) return [];
+  const out: Array<{ column: string; score: number; z: number }> = [];
+  for (const col of context.columns) {
+    const value = ownPoint.values[col];
+    const baseline = context.baseline[col];
+    if (value == null || !baseline || baseline.std <= 1e-9) continue;
+    const z = (value - baseline.mean) / baseline.std;
+    out.push({ column: col, score: Math.min(1, Math.abs(z) / 5), z });
+  }
+  return out;
+}
 
 function AnomalyDetailsPanel({
   anomaly,
@@ -849,15 +881,19 @@ function AnomalyDetailsPanel({
   onResolve: () => void;
   onFalsePositive: () => void;
 }) {
-  const [context, setContext] = useState<AnomalyTimeseriesPoint[] | null>(null);
+  const [context, setContext] = useState<AnomalyContext | null>(null);
   const [contextError, setContextError] = useState<string | null>(null);
 
   // Real, narrowly-scoped fetch (±2h around the selected anomaly's own
-  // `ts`) -- not a slice of the overview chart's own data, since that
-  // chart's region/metric selection is independent of whichever row is
-  // selected here (this file's own header comment).
+  // `ts`, `services/ingestion`'s own `_CONTEXT_WINDOW_HOURS`) -- reads
+  // straight from this anomaly's own source's `raw.*` table (region-
+  // scoped), so it works for every source the detector covers (`bom`'s
+  // `temp_c`/`humidity_pct`/`wind_speed_kmh` just as well as
+  // `aemo_nem`/`aemo_wem`'s `demand_mw`/`price_mwh`), not just the 2
+  // metrics `fetchAnomalyTimeseries` (the overview chart's own data
+  // source) covers.
   useEffect(() => {
-    if (!anomaly || !anomaly.ts || !anomaly.region || !TIMESERIES_METRICS.has(anomaly.metric ?? "")) {
+    if (!anomaly) {
       setContext(null);
       setContextError(null);
       return;
@@ -865,19 +901,13 @@ function AnomalyDetailsPanel({
     let cancelled = false;
     setContext(null);
     setContextError(null);
-    const center = new Date(anomaly.ts).getTime();
-    fetchAnomalyTimeseries({
-      region: anomaly.region,
-      metric: anomaly.metric as "demand_mw" | "price_mwh",
-      start: new Date(center - 2 * 3_600_000).toISOString(),
-      end: new Date(center + 2 * 3_600_000).toISOString(),
-    })
-      .then((r) => { if (!cancelled) setContext(r.points); })
+    fetchAnomalyContext(anomaly.id)
+      .then((r) => { if (!cancelled) setContext(r); })
       .catch((err) => {
         if (!cancelled) setContextError(err instanceof Error ? err.message : "failed to load");
       });
     return () => { cancelled = true; };
-  }, [anomaly?.id, anomaly?.ts, anomaly?.region, anomaly?.metric]);
+  }, [anomaly?.id]);
 
   if (!anomaly) {
     return (
@@ -917,6 +947,55 @@ function AnomalyDetailsPanel({
     factors.push(`ML (IsolationForest) anomaly score ≥ ${ML_ANOMALY_SCORE_THRESHOLD.toFixed(1)} (actual: ${anomaly.score.toFixed(2)})`);
   }
 
+  // Real fallback for "Observed Value" when this row has no single
+  // `metric`/`observed_value` of its own -- true for every pure-ML
+  // detection (multivariate by construction, `services/ingestion`'s
+  // `ml_anomaly.py` own docstring: isolation forest scores several
+  // columns jointly, there's no one "the value"). Once `context` loads,
+  // its own row at this exact anomaly matches on `ts` -- real per-column
+  // readings from the same `raw.*` row the detector actually scored,
+  // not a fabricated single number.
+  const contextOwnPoint =
+    context?.points.find(
+      (p) => anomaly.ts && new Date(p.ts).getTime() === new Date(anomaly.ts).getTime(),
+    ) ?? null;
+  const observedFromContext =
+    contextOwnPoint &&
+    Object.entries(contextOwnPoint.values)
+      .filter(([, v]) => v != null)
+      .map(([k, v]) => `${k} ${v!.toLocaleString()}`)
+      .join(" · ");
+
+  // Real fallback for "Expected Range" -- same idea as `observedFromContext`
+  // above: a pure ML detection has no single batch-level bound of its
+  // own (`ml_anomaly.py`'s own docstring -- multivariate by
+  // construction), so derive one per real scanned column from
+  // `context.baseline` -- a real ±3-day window, deliberately *not* the
+  // narrow ±2h `points` window (which can itself be almost entirely
+  // anomalous during a sustained real excursion, e.g. a multi-hour
+  // heatwave -- confirmed live: that made an earlier, narrower version
+  // of this fallback trivially contain the very reading it was meant to
+  // judge, `services/ingestion`'s own `get_anomaly_context` docstring
+  // has the full story).
+  const expectedRangeFromContext = context
+    ? context.columns
+        .map((col) => {
+          const baseline = context.baseline[col];
+          if (!baseline) return null;
+          return `${col} ${baseline.low.toFixed(1)}–${baseline.high.toFixed(1)}`;
+        })
+        .filter((s): s is string => s != null)
+        .join(" · ")
+    : "";
+
+  // Not memoized -- `anomaly`/`context` already only change on a real
+  // selection/fetch, and this is a small, cheap pass over an already-
+  // small (±2h) points array, not worth a hook here (this sits after
+  // the early `if (!anomaly) return` above, so a `useMemo` here would
+  // be called conditionally across renders and break the rules of
+  // hooks).
+  const contributingFactors = computeContributingFactors(context, anomaly.ts);
+
   return (
     <Card className="flex h-full flex-col">
       <div className="mb-3 flex items-center justify-between">
@@ -946,15 +1025,29 @@ function AnomalyDetailsPanel({
         <DetailRow label="Region" value={anomaly.region ?? "—"} />
         <DetailRow
           label="Observed Value"
-          value={anomaly.observed_value != null ? anomaly.observed_value.toLocaleString() : "—"}
+          value={
+            anomaly.observed_value != null
+              ? anomaly.observed_value.toLocaleString()
+              : observedFromContext || (context === null && !contextError ? "Loading…" : "—")
+          }
           valueClassName="text-amber-200"
         />
+        {/* Real "Expected Range" -- the statistical (z-score) signal's own
+            single-`metric` bound when this row has one; otherwise (every
+            pure-ML detection, multivariate by construction -- see
+            `observedFromContext` above's own comment) the real per-column
+            fallback from `context.baseline` (`expectedRangeFromContext`,
+            a real ±3-day window -- deliberately wider than the ±2h
+            `points` window below, which can itself be almost entirely
+            anomalous during a sustained real excursion and would
+            otherwise make this trivially contain the very reading it's
+            meant to judge), never a fabricated or blank value. */}
         <DetailRow
           label="Expected Range"
           value={
             anomaly.expected_low != null || anomaly.expected_high != null
               ? `${anomaly.expected_low?.toFixed(1) ?? "—"} – ${anomaly.expected_high?.toFixed(1) ?? "—"}`
-              : "—"
+              : expectedRangeFromContext || (context === null && !contextError ? "Loading…" : "—")
           }
         />
         <DetailRow label="Anomaly Score" value={anomaly.score.toFixed(3)} valueClassName="text-rose-200" />
@@ -970,26 +1063,59 @@ function AnomalyDetailsPanel({
         <p className="text-xs leading-relaxed text-white/80">{anomaly.reason}</p>
       </div>
 
-      {/* Point Context -- real narrow window around this row's own ts */}
+      {/* Metric Behavior -- real narrow window around this row's own ts,
+          every real numeric column the detector actually scanned for
+          this source plotted together on one shared time axis (own
+          y-scale per column), the real vertical guide at this row's own
+          `ts` and its own point on each line ring-highlighted -- other
+          real anomalous neighbors in the same window still shown, just
+          not ring-highlighted (only the one this panel is about is). */}
       <div className="mt-3">
         <h4 className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-white/50">
-          Point Context (±2h, real)
+          Metric Behavior (±2h around event, real)
         </h4>
-        {!anomaly.ts || !anomaly.region || !TIMESERIES_METRICS.has(anomaly.metric ?? "") ? (
-          <p className="py-4 text-center text-[11px] text-white/35">
-            Not available for this metric/source.
-          </p>
-        ) : contextError ? (
+        {contextError ? (
           <p className="py-4 text-center text-[11px] text-white/35">Unavailable — {contextError}</p>
         ) : context === null ? (
           <p className="py-4 text-center text-[11px] text-white/35">Loading…</p>
+        ) : context.points.length === 0 ? (
+          <p className="py-4 text-center text-[11px] text-white/35">
+            Not enough real data nearby.
+          </p>
         ) : (
-          <PointContextSparkline points={context} highlightTs={anomaly.ts} />
+          <AnomalyMetricBehaviorChart
+            columns={context.columns}
+            points={context.points}
+            highlightTs={anomaly.ts ?? context.center_ts}
+          />
         )}
       </div>
 
-      {/* Contributing Factors -- only real, derived-from-this-row facts */}
-      {factors.length > 0 && (
+      {/* Contributing Factors -- real per-column local-deviation strength
+          (`computeContributingFactors`'s own comment has the exact
+          method) plotted as a radar when there are enough real scanned
+          columns to make a polygon meaningful (3+), a bar list
+          otherwise. Falls back to the plain-text signal-threshold facts
+          below when the ±2h context hasn't loaded / has no columns for
+          this row (e.g. `aemo_holidays`, which scans none) rather than
+          showing nothing. */}
+      {contributingFactors.length > 0 ? (
+        <div className="mt-3">
+          <h4 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-white/50">
+            Contributing Factors
+          </h4>
+          <ContributingFactorsRadar factors={contributingFactors} />
+          {/* The ML model's own `anomaly.score` above is trained against
+              this source's full accumulated history (`ml_anomaly.py`);
+              this radar is a real but *different* measure -- each real
+              column's own deviation from a real ±3-day baseline. The two
+              can legitimately disagree in either direction -- said
+              explicitly so that isn't read as a bug. */}
+          <p className="mt-1.5 text-center text-[9px] leading-relaxed text-white/35">
+            Real per-column deviation from this row&apos;s own ±3-day baseline — a different, complementary measure to the ML model&apos;s own full-history score above.
+          </p>
+        </div>
+      ) : factors.length > 0 ? (
         <div className="mt-3">
           <h4 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-white/50">
             Contributing Factors
@@ -1003,7 +1129,7 @@ function AnomalyDetailsPanel({
             ))}
           </ul>
         </div>
-      )}
+      ) : null}
 
       <div className="mt-auto pt-3">
         {mutating ? (
@@ -1062,49 +1188,264 @@ function DetailRow({
   );
 }
 
-function PointContextSparkline({
+/** Real per-column local-deviation strength (`computeContributingFactors`
+ * in `AnomalyDetailsPanel` above has the exact real derivation), plotted
+ * as a spider/radar polygon -- one axis per real scanned column, radius
+ * = that column's own real 0..1 deviation score. Needs 3+ real axes for
+ * a polygon to mean anything; falls back to a plain bar list for
+ * 1-2-column sources (`aemo_nem`/`aemo_wem`/`openelectricity`) instead
+ * of drawing a degenerate 2-point "polygon". */
+function ContributingFactorsRadar({
+  factors,
+}: {
+  factors: Array<{ column: string; score: number; z: number }>;
+}) {
+  if (factors.length < 3) {
+    return (
+      <div className="space-y-1.5">
+        {factors.map((f, i) => (
+          <div key={f.column} className="flex items-center gap-2">
+            <span className="w-28 shrink-0 truncate text-[10px] text-white/60">{f.column}</span>
+            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-white/10">
+              <div
+                className="h-full rounded-full"
+                style={{ width: `${f.score * 100}%`, backgroundColor: METRIC_COLORS[i % METRIC_COLORS.length] }}
+              />
+            </div>
+            <span className="w-9 shrink-0 text-right font-mono text-[10px] text-white/70">
+              {f.score.toFixed(2)}
+            </span>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  const n = factors.length;
+  const size = 200;
+  const center = size / 2;
+  const maxR = size / 2 - 30;
+  const angleFor = (i: number) => (Math.PI * 2 * i) / n - Math.PI / 2;
+  const pointFor = (i: number, r: number): [number, number] => {
+    const a = angleFor(i);
+    return [center + r * Math.cos(a), center + r * Math.sin(a)];
+  };
+  const ringLevels = [0.25, 0.5, 0.75, 1];
+  const polygonPts = factors.map((f, i) => pointFor(i, f.score * maxR));
+  const polygonPath =
+    polygonPts.map(([px, py], i) => `${i === 0 ? "M" : "L"} ${px.toFixed(1)} ${py.toFixed(1)}`).join(" ") + " Z";
+
+  return (
+    <svg viewBox={`0 0 ${size} ${size}`} className="mx-auto h-[200px] w-[200px]">
+      {ringLevels.map((lvl) => {
+        const ringPts = factors.map((_, i) => pointFor(i, lvl * maxR));
+        const ringPath =
+          ringPts.map(([px, py], i) => `${i === 0 ? "M" : "L"} ${px.toFixed(1)} ${py.toFixed(1)}`).join(" ") + " Z";
+        return <path key={lvl} d={ringPath} fill="none" stroke="rgba(255,255,255,0.08)" />;
+      })}
+      {factors.map((_, i) => {
+        const [px, py] = pointFor(i, maxR);
+        return <line key={i} x1={center} y1={center} x2={px} y2={py} stroke="rgba(255,255,255,0.08)" />;
+      })}
+      <path d={polygonPath} fill="rgba(244,63,94,0.18)" stroke="#fb7185" strokeWidth={1.5} strokeLinejoin="round" />
+      {polygonPts.map(([px, py], i) => (
+        <circle key={i} cx={px} cy={py} r={2.5} fill="#fb7185" />
+      ))}
+      {factors.map((f, i) => {
+        const [lx, ly] = pointFor(i, maxR + 20);
+        return (
+          <text key={f.column} x={lx} y={ly} textAnchor="middle" fontSize="10" fill="rgba(255,255,255,0.7)">
+            <tspan x={lx} dy="0">{f.column}</tspan>
+            <tspan x={lx} dy="12" fontSize="9" fill="rgba(255,255,255,0.4)">{f.score.toFixed(2)}</tspan>
+          </text>
+        );
+      })}
+    </svg>
+  );
+}
+
+// Fixed palette, applied by column position -- matches the reference
+// layout's temp_c=red/humidity_pct=blue/wind_speed_kmh=green convention
+// for `bom` while still giving every other real source (nem/wem's 2
+// columns, openelectricity's 1) a stable, distinct color per line.
+const METRIC_COLORS = ["#fb7185", "#38bdf8", "#4ade80", "#c084fc", "#fbbf24"];
+
+// Real units for the columns `pipeline.anomaly._NUMERIC_COLUMNS` actually
+// scans -- label-only, doesn't affect any value.
+const COLUMN_UNITS: Record<string, string> = {
+  temp_c: "°C",
+  humidity_pct: "%",
+  wind_speed_kmh: "km/h",
+  demand_mw: "MW",
+  price_mwh: "$/MWh",
+  total_generation_mw: "MW",
+};
+
+function columnLabel(column: string): string {
+  const unit = COLUMN_UNITS[column];
+  return unit ? `${column} (${unit})` : column;
+}
+
+/** Every real numeric column this anomaly's own source was scanned on,
+ * plotted together on one shared real time axis (own y-scale per
+ * column, own color) -- a real vertical guide at this row's own `ts`,
+ * and that row's own point on each line ring-highlighted so it reads
+ * apart from any *other* real anomalous neighbor in the same window
+ * (those still show, just larger/rose, not ringed). */
+function AnomalyMetricBehaviorChart({
+  columns,
   points,
   highlightTs,
 }: {
-  points: AnomalyTimeseriesPoint[];
-  highlightTs: string;
+  columns: string[];
+  points: AnomalyContextPoint[];
+  highlightTs: string | null;
 }) {
-  const w = 400, h = 110, pad = 6;
-  const withValues = points.filter((p) => p.value !== null);
-  if (withValues.length < 2) {
+  const w = 720, h = 220;
+  const padT = 16, padB = 34;
+  const rightAxesCount = Math.max(0, columns.length - 1);
+  const padL = 48;
+  const padR = 16 + rightAxesCount * 50;
+  const innerW = w - padL - padR;
+  const innerH = h - padT - padB;
+
+  const sorted = [...points].sort((a, b) => new Date(a.ts).getTime() - new Date(b.ts).getTime());
+
+  const series = columns.map((col, i) => {
+    const pts = sorted
+      .map((p) => ({ ts: p.ts, value: p.values[col], is_anomalous: p.is_anomalous }))
+      .filter((p): p is { ts: string; value: number; is_anomalous: boolean } => p.value != null);
+    let vMin = 0, vMax = 1;
+    if (pts.length >= 2) {
+      const vMinRaw = Math.min(...pts.map((p) => p.value));
+      const vMaxRaw = Math.max(...pts.map((p) => p.value));
+      const vSpan = Math.max(1e-6, vMaxRaw - vMinRaw);
+      vMin = vMinRaw - vSpan * 0.15;
+      vMax = vMaxRaw + vSpan * 0.15;
+    }
+    return { column: col, color: METRIC_COLORS[i % METRIC_COLORS.length], pts, vMin, vMax };
+  });
+  const usable = series.filter((s) => s.pts.length >= 2);
+
+  if (usable.length === 0) {
     return <p className="py-4 text-center text-[11px] text-white/35">Not enough real data nearby.</p>;
   }
-  const tMin = new Date(withValues[0].ts).getTime();
-  const tMax = new Date(withValues[withValues.length - 1].ts).getTime();
-  const tSpan = Math.max(1, tMax - tMin);
-  const vMin = Math.min(...withValues.map((p) => p.value!));
-  const vMax = Math.max(...withValues.map((p) => p.value!));
-  const vSpan = Math.max(1e-6, vMax - vMin);
-  const x = (ts: string) => pad + ((new Date(ts).getTime() - tMin) / tSpan) * (w - pad * 2);
-  const y = (v: number) => pad + (1 - (v - vMin) / vSpan) * (h - pad * 2);
 
-  const linePath = smoothPath(withValues.map((p) => [x(p.ts), y(p.value!)]));
-  const highlight = withValues.reduce((best, p) =>
-    Math.abs(new Date(p.ts).getTime() - new Date(highlightTs).getTime()) <
-    Math.abs(new Date(best.ts).getTime() - new Date(highlightTs).getTime())
-      ? p
-      : best,
-  );
+  const tMin = new Date(sorted[0].ts).getTime();
+  const tMax = new Date(sorted[sorted.length - 1].ts).getTime();
+  const tSpan = Math.max(1, tMax - tMin);
+  const x = (ts: string) => padL + ((new Date(ts).getTime() - tMin) / tSpan) * innerW;
+  const yFor = (s: (typeof usable)[number]) => (v: number) =>
+    padT + (1 - (v - s.vMin) / Math.max(1e-6, s.vMax - s.vMin)) * innerH;
+
+  const highlightMs = highlightTs ? new Date(highlightTs).getTime() : null;
+  const highlightInRange = highlightMs !== null && highlightMs >= tMin && highlightMs <= tMax;
+
+  // A handful of real x-axis time labels, evenly spaced across the real window.
+  const tickCount = Math.min(5, sorted.length);
+  const xTicks = Array.from({ length: tickCount }, (_, i) => {
+    const idx = Math.round((i / Math.max(1, tickCount - 1)) * (sorted.length - 1));
+    return sorted[idx];
+  });
+  const dateLabel = new Date(sorted[0].ts).toLocaleDateString("en-GB", {
+    day: "2-digit", month: "short", year: "numeric", timeZone: "UTC",
+  });
 
   return (
-    <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" className="h-24 w-full">
-      <path d={linePath} fill="none" stroke="#7dd3fc" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />
-      {highlight.value !== null && (
-        <circle
-          cx={x(highlight.ts)}
-          cy={y(highlight.value)}
-          r={4}
-          fill={highlight.severity === "high" ? "#fb7185" : highlight.severity === "medium" ? "#fbbf24" : "#34d399"}
-          stroke="#0a1410"
-          strokeWidth={1.5}
-        />
-      )}
-    </svg>
+    <div>
+      <div className="mb-2 flex flex-wrap items-center gap-3 text-[10px] text-white/60">
+        {usable.map((s) => (
+          <span key={s.column} className="inline-flex items-center gap-1.5">
+            <span className="h-2 w-2 rounded-full" style={{ backgroundColor: s.color }} />
+            {columnLabel(s.column)}
+          </span>
+        ))}
+        {highlightInRange && (
+          <span className="inline-flex items-center gap-1.5">
+            <span className="h-2.5 w-2.5 rounded-full border-2 border-amber-200" />
+            Anomaly Point
+          </span>
+        )}
+      </div>
+      <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" className="h-[190px] w-full">
+        {[0, 0.25, 0.5, 0.75, 1].map((p, i) => (
+          <line
+            key={`grid-${i}`}
+            x1={padL} x2={w - padR}
+            y1={padT + p * innerH} y2={padT + p * innerH}
+            stroke="rgba(255,255,255,0.05)"
+            strokeDasharray={i === 0 || i === 4 ? "" : "4 4"}
+          />
+        ))}
+
+        {highlightInRange && (
+          <line
+            x1={x(highlightTs!)} x2={x(highlightTs!)}
+            y1={padT} y2={padT + innerH}
+            stroke="#fbbf24" strokeWidth={1.25} strokeDasharray="4 3" opacity={0.75}
+          />
+        )}
+
+        {/* left axis -- first usable series */}
+        {[0, 0.5, 1].map((p, i) => {
+          const s = usable[0];
+          const v = s.vMax - p * (s.vMax - s.vMin);
+          return (
+            <text key={`ly-${i}`} x={padL - 8} y={padT + p * innerH + 4} textAnchor="end" fontSize="12" fill={usable[0].color} opacity={0.85}>
+              {v.toFixed(Math.abs(v) < 10 ? 1 : 0)}
+            </text>
+          );
+        })}
+
+        {/* right axes -- remaining series, stacked outward */}
+        {usable.slice(1).map((s, i) => {
+          const axisX = w - padR + i * 50 + 6;
+          return (
+            <g key={`raxis-${s.column}`}>
+              {[0, 0.5, 1].map((p, j) => {
+                const v = s.vMax - p * (s.vMax - s.vMin);
+                return (
+                  <text key={j} x={axisX} y={padT + p * innerH + 4} textAnchor="start" fontSize="12" fill={s.color} opacity={0.85}>
+                    {v.toFixed(Math.abs(v) < 10 ? 1 : 0)}
+                  </text>
+                );
+              })}
+            </g>
+          );
+        })}
+
+        {usable.map((s) => {
+          const yy = yFor(s);
+          const linePath = smoothPath(s.pts.map((p) => [x(p.ts), yy(p.value)]));
+          return (
+            <g key={s.column}>
+              <path d={linePath} fill="none" stroke={s.color} strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" opacity={0.9} />
+              {s.pts.map((p) => {
+                const isThisAnomaly = highlightMs !== null && new Date(p.ts).getTime() === highlightMs;
+                return (
+                  <circle
+                    key={p.ts}
+                    cx={x(p.ts)}
+                    cy={yy(p.value)}
+                    r={isThisAnomaly ? 5 : p.is_anomalous ? 3 : 1.75}
+                    fill={p.is_anomalous ? "#fb7185" : s.color}
+                    stroke={isThisAnomaly ? "#fde68a" : "#0a1410"}
+                    strokeWidth={isThisAnomaly ? 2 : 1}
+                  />
+                );
+              })}
+            </g>
+          );
+        })}
+
+        {xTicks.map((p, i) => (
+          <text key={`xt-${i}`} x={x(p.ts)} y={h - padB + 18} textAnchor="middle" fontSize="12" fill="rgba(255,255,255,0.5)">
+            {new Date(p.ts).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "UTC" })}
+          </text>
+        ))}
+      </svg>
+      <p className="mt-0.5 text-center text-[9px] text-white/35">{dateLabel} (UTC)</p>
+    </div>
   );
 }
 

@@ -67,7 +67,7 @@ def fake_training_log_session(monkeypatch):
     rows request this fixture explicitly to inspect `.queries`."""
     session = _FakeSession()
     monkeypatch.setattr(
-        model_actions, "get_session", lambda: _FakeSessionCtx(session)
+        model_actions, "get_log_session", lambda: _FakeSessionCtx(session)
     )
     return session
 

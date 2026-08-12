@@ -34,6 +34,7 @@ doesn't change that, it just keeps the common case fast.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Callable
 
 from redis.asyncio import Redis
@@ -59,6 +60,7 @@ async def run_emissions_forecast_warmer(
     )
 
     while True:
+        started = time.monotonic()
         try:
             bundle = registry.bundle
             if bundle is not None:
@@ -72,7 +74,22 @@ async def run_emissions_forecast_warmer(
         except Exception as exc:  # noqa: BLE001 - one bad pass must not stop future ones
             log.error("cache_warmer.emissions_forecast_failed", error=str(exc))
 
-        await asyncio.sleep(interval_seconds)
+        # Real fix (2026-08-12): sleeping the full `interval_seconds`
+        # *after* this pass's own real compute (confirmed live: ~11-14s)
+        # made the real refresh cadence ~(compute + interval_seconds), not
+        # `interval_seconds` -- ~56-59s against this cache's 60s TTL, an
+        # honest margin of only 1-4s. Any real slowdown (concurrent load,
+        # DB contention) could push a cycle past the TTL, letting the
+        # cache actually go cold between warms -- confirmed live to
+        # actually happen, not just a theoretical race. Subtracting this
+        # pass's own real elapsed time keeps the cadence anchored to wall
+        # clock `interval_seconds` regardless of how long the compute
+        # took, restoring the real margin against the TTL. Floored at 0 so
+        # a compute pass that itself runs longer than `interval_seconds`
+        # still starts the next pass immediately rather than sleeping a
+        # negative duration.
+        elapsed = time.monotonic() - started
+        await asyncio.sleep(max(0.0, interval_seconds - elapsed))
 
 
 async def run_model_drift_warmer(
@@ -191,8 +208,23 @@ async def run_dashboard_essentials_warmer(
     while True:
         now = datetime.now(UTC)
 
-        async def _warm(label: str, fn) -> None:
+        # Real bug, found live 2026-08-13 while restarting a hung
+        # forecast-api process: `redis.delete(...)` below used to be the
+        # first element of a `(redis.delete(...), fn(...))[1]` tuple --
+        # building that tuple *creates* the delete's coroutine but the
+        # `[1]` index discards it without ever awaiting it (confirmed
+        # live: 6 real `RuntimeWarning: coroutine 'Redis.execute_command'
+        # was never awaited` on every single pass). The real cache key
+        # was therefore never force-invalidated -- each endpoint call
+        # below just kept hitting its own still-live cached value, so
+        # this warmer silently stopped actually refreshing anything the
+        # moment it was written, only ever "warming" whatever the first
+        # natural cache miss had already populated. `_warm` now takes
+        # the real cache key and awaits the delete itself, in order,
+        # before calling `fn`.
+        async def _warm(label: str, cache_key: str, fn) -> None:
             try:
+                await redis.delete(cache_key)
                 async with db_session_factory() as db:
                     await fn(db)
             except Exception as exc:  # noqa: BLE001 - one bad pass must not stop future ones
@@ -200,54 +232,40 @@ async def run_dashboard_essentials_warmer(
 
         await _warm(
             "emissions_current",
-            lambda db: (
-                redis.delete("emissions:current:v1"),
-                get_emissions_current(db=db, redis=redis, settings=settings),
-            )[1],
+            "emissions:current:v1",
+            lambda db: get_emissions_current(db=db, redis=redis, settings=settings),
         )
         await _warm(
             "emissions_ytd",
-            lambda db: (
-                redis.delete(f"emissions:ytd:v1:{now.year}"),
-                get_emissions_ytd(db=db, redis=redis, settings=settings),
-            )[1],
+            f"emissions:ytd:v1:{now.year}",
+            lambda db: get_emissions_ytd(db=db, redis=redis, settings=settings),
         )
         # `bucket="hour", days=7, region=None` -- the Emissions Trend
         # chart's own default real call (`RealEmissionsTrend`,
         # services/dashboard).
         await _warm(
             "emissions_timeseries",
-            lambda db: (
-                redis.delete(
-                    f"emissions:timeseries:v1:hour:7:None:{now.strftime('%Y%m%d%H')}"
-                ),
-                get_emissions_timeseries(
-                    bucket="hour", days=7, region=None, db=db, redis=redis, settings=settings
-                ),
-            )[1],
+            f"emissions:timeseries:v1:hour:7:None:{now.strftime('%Y%m%d%H')}",
+            lambda db: get_emissions_timeseries(
+                bucket="hour", days=7, region=None, db=db, redis=redis, settings=settings
+            ),
         )
         await _warm(
             "demand_summary",
-            lambda db: (
-                redis.delete(f"demand:summary:v1:ytd:{now.year}"),
-                get_demand_summary(since=None, until=None, db=db, redis=redis, settings=settings),
-            )[1],
+            f"demand:summary:v1:ytd:{now.year}",
+            lambda db: get_demand_summary(since=None, until=None, db=db, redis=redis, settings=settings),
         )
         await _warm(
             "generation_mix",
-            lambda db: (
-                redis.delete(f"generation-mix:v1:None:ytd:{now.year}"),
-                get_generation_mix(
-                    region=None, since=None, until=None, db=db, redis=redis, settings=settings
-                ),
-            )[1],
+            f"generation-mix:v1:None:ytd:{now.year}",
+            lambda db: get_generation_mix(
+                region=None, since=None, until=None, db=db, redis=redis, settings=settings
+            ),
         )
         await _warm(
             "training_runs",
-            lambda db: (
-                redis.delete("model:training_runs:v1:20"),
-                get_training_runs(limit=20, db=db, redis=redis, settings=settings),
-            )[1],
+            "model:training_runs:v1:20",
+            lambda db: get_training_runs(limit=20, db=db, redis=redis, settings=settings),
         )
 
         # `region="NEM"` -- the Demand Forecast Preview's own default

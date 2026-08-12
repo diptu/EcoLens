@@ -29,6 +29,65 @@ deliberately *not* on a schedule). Needs just one secret:
 | --- | --- | --- |
 | `DATABASE_URL` | `postgresql+asyncpg://user:pass@host/db?sslmode=require` | Same secret as the ingest workflows above — reused, not a second copy. `dbt`'s own `POSTGRES_HOST`/`PORT`/`USER`/`PASSWORD`/`DB` are derived from this automatically (`Settings.dbt_postgres_env`), no separate dbt-specific secrets needed. |
 
+## Deploy workflows (Railway: ingestion, forecast-api, warehouse)
+
+`.github/workflows/deploy-{ingestion,forecast,waerehouse}-service.yml`
+each redeploy their own service's real Railway services (`deploy-
+ingestion-service.yml`: `ingestion-api`/`ingestion-worker`/`ingestion-
+beat`; `deploy-forecast-service.yml`: `forecast-api`/`forecast-train-
+worker`; `deploy-waerehouse-service.yml`: `warehouse-api`/`warehouse-
+consumer` — each set is that service's own real process-role topology,
+see each workflow's own header comment) on every push to `main` that
+touches that service's own source or Dockerfile, plus manual
+`workflow_dispatch`. All 3 workflows share **one** secret:
+
+| Secret | Example | Notes |
+| --- | --- | --- |
+| `RAILWAY_TOKEN` | | A Railway **project** token (Railway dashboard -> project -> Settings -> Tokens), not an account/personal token -- scopes across every service in that project, so this one secret covers all 3 workflows/6 services, not a separate copy per service or per workflow. Every Railway service referenced must already exist in that project with its own start-command override and that service's full `.env.example` env-var set already configured directly in Railway -- these workflows only trigger a redeploy, they never create a service or set its variables. |
+
+## Deploy workflow (Vercel: dashboard)
+
+`.github/workflows/deploy-dashboard-service.yml` builds `services/
+dashboard`'s real static export (`next build`, `output: "export"`) and
+deploys the prebuilt `out/` directory to Vercel on every push to `main`
+that touches `services/dashboard/**`, plus manual `workflow_dispatch`.
+Needs 3 secrets (Vercel dashboard -> project -> Settings -> General for
+the org/project IDs; Account Settings -> Tokens for the token):
+
+| Secret | Example | Notes |
+| --- | --- | --- |
+| `VERCEL_TOKEN` | | Personal or team access token. |
+| `VERCEL_ORG_ID` | | From the linked Vercel project's `Settings -> General` (or the `.vercel/project.json` created by a local `vercel link`). |
+| `VERCEL_PROJECT_ID` | | Same source as `VERCEL_ORG_ID` above. |
+
+Backend API base URLs (`NEXT_PUBLIC_INGESTION_API_URL`/`_WAREHOUSE_API_URL`/
+`_FORECAST_API_URL`) are real Vercel **Project** env vars (Production
+environment), set directly in the Vercel dashboard, not as a GitHub
+secret — `vercel pull` in this workflow fetches them automatically
+before the build step.
+
+## Deploy workflow (self-hosted: observability)
+
+`.github/workflows/deploy-obsirvility-service.yml` ships `services/
+observility`'s compose/config files to a real host over SSH and runs
+`docker compose up -d` there — a different shape from the 3 Railway
+workflows above since this is a real stateful multi-container stack, not
+a single-process service (see the workflow's own header comment for
+why). Needs 3 secrets:
+
+| Secret | Example | Notes |
+| --- | --- | --- |
+| `OBSERVABILITY_SSH_HOST` | `203.0.113.7` or a real hostname | The target VM/host already running (or about to run) this stack. |
+| `OBSERVABILITY_SSH_USER` | `deploy` | Must be able to run `docker compose` on that host (in the `docker` group or via passwordless sudo). |
+| `OBSERVABILITY_SSH_KEY` | | Private key matching a public key already in that user's `~/.ssh/authorized_keys` on the host — generate a dedicated deploy keypair, don't reuse a personal one. |
+
+This workflow deliberately never touches the host's own `.env` (real
+`GRAFANA_ADMIN_PASSWORD`/`ALERTMANAGER_WEBHOOK_URL`/retention config,
+`services/observility/.env.example`'s own "copy to `.env` before `docker
+compose up`" instructions) — that's real one-time manual setup on the
+host itself, same "this workflow only redeploys, it never provisions
+secrets" boundary the 4 workflows above keep too.
+
 ## Why not `localhost`
 
 A GitHub-hosted runner is a fresh VM for every single run — there's no

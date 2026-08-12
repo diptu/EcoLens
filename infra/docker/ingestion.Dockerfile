@@ -20,6 +20,10 @@
 # Python + compiled wheels, no build-time absolute-path baking for a
 # same-Python-version copy like this), so `COPY --from=builder` of the
 # `.venv` directory works without a re-sync in the runtime stage.
+#
+# Prod-grade hardening pass (2026-08-12, `TODO.md`'s Railway deployment
+# plan): non-root runtime user + `tini` as PID 1, see the `runtime`
+# stage below for the real reasoning on each.
 
 FROM python:3.12-slim AS builder
 
@@ -39,25 +43,61 @@ RUN uv sync --no-dev --frozen
 
 FROM python:3.12-slim AS runtime
 
+# `tini` as real PID 1, not `ecolens-ingestion` directly -- matters most
+# for the `worker` role: Celery's prefork pool forks real OS child
+# processes per task, and a process running as PID 1 without an init
+# gets Linux's PID-1-specific responsibilities (reaping any child that
+# ends up reparented to it, faithfully forwarding signals) with no
+# default handling for either. `tini` is the standard, minimal fix --
+# transparent otherwise, doesn't change how `serve`/`beat`'s own signal
+# handling behaves (both are already single-process, no forking), just
+# makes `worker` correctly reap zombies and propagate a real Railway
+# restart/redeploy's `SIGTERM` instead of relying on the app process
+# happening to behave correctly as PID 1 by accident.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tini \
+    && rm -rf /var/lib/apt/lists/*
+
+# Real, unprivileged runtime user -- the `builder` stage above still
+# runs as root (needed for `apt-get`/`uv sync`), but nothing in the
+# runtime image needs root once the venv + source are just being
+# executed. Fixed UID/GID (not left to `useradd`'s own default
+# allocation) so file ownership is reproducible across rebuilds.
+RUN groupadd --gid 10001 app && useradd --uid 10001 --gid app --no-create-home --shell /usr/sbin/nologin app
+
 WORKDIR /app/services/ingestion
 
 # Only the finished venv + source tree from `builder` -- no `uv`/`uvx`
 # binaries, no apt/uv package cache layers, no dependency-resolution
-# intermediates ship in the final image.
-COPY --from=builder /app/services/ingestion /app/services/ingestion
+# intermediates ship in the final image. Owned by the real runtime user,
+# not root, from the moment it lands in this stage.
+COPY --from=builder --chown=app:app /app/services/ingestion /app/services/ingestion
 
-ENV PATH="/app/services/ingestion/.venv/bin:$PATH"
+ENV PATH="/app/services/ingestion/.venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
 
 # `Settings.duckdb_staging_dir` (default `./data/staging`) resolves here
-# -- a shared volume with `services/waerehouse`'s own read side.
-RUN mkdir -p data/staging
+# -- a shared volume with `services/waerehouse`'s own read side on a
+# single-host deployment; pure local scratch space (never relied on for
+# durability -- real data also always goes to R2, see `services/
+# ingestion/TODO.md`'s Railway deployment plan) everywhere else. Created
+# and owned by `app`, not root, so the non-root runtime user below can
+# actually write to it.
+RUN mkdir -p data/staging && chown -R app:app data/staging
+
+USER app
 
 EXPOSE 8003
 
-# `ENTRYPOINT` + a plain `CMD` (not a full uvicorn invocation) so
-# `docker-compose.yml`'s `ingestion-worker`/`ingestion-beat` services can
-# override just the subcommand (`command: worker --loglevel=info`) --
+# `tini` as the real entrypoint, `ecolens-ingestion` as its one managed
+# child -- `--` marks the end of `tini`'s own args so everything after
+# is exec'd as-is, not parsed as a `tini` flag. `CMD` stays a plain
+# subcommand (not a full uvicorn invocation) so `docker-compose.yml`'s
+# `ingestion-worker`/`ingestion-beat` services (and this same image's
+# equivalent Railway services) can override just it (`command: worker
+# --loglevel=info`) without needing to repeat `tini --` themselves --
 # same pattern forecast-api's own Dockerfile uses for its `train-worker`
-# service.
-ENTRYPOINT ["ecolens-ingestion"]
+# service, now with the added `tini` wrapper underneath both.
+ENTRYPOINT ["tini", "--", "ecolens-ingestion"]
 CMD ["serve"]

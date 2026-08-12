@@ -51,6 +51,7 @@ from app.models.timesfm_adapter import (
     TIMESFM_REVISION,
     load_timesfm_forecaster,
 )
+from app.service.ml.bias_correction import DemandBiasCorrection
 from app.service.ml.conformal import ConformalCalibration, empirical_coverage
 from app.service.ml.data import apply_scalers, load_holidays, load_training_data
 from app.service.ml.features import (
@@ -146,6 +147,7 @@ class LSTMForecaster:
     target_scaler: object
     lookback: int
     calibration: ConformalCalibration | None = None
+    bias_correction: DemandBiasCorrection | None = None
     name: str = "lstm"
 
     def predict(
@@ -178,6 +180,8 @@ class LSTMForecaster:
         p10 = _inverse(self.target_scaler, out.p10[0].numpy())
         p50 = _inverse(self.target_scaler, out.p50[0].numpy())
         p90 = _inverse(self.target_scaler, out.p90[0].numpy())
+        if self.bias_correction is not None:
+            p10, p50, p90 = self.bias_correction.apply(region, p10, p50, p90)
         if self.calibration is not None:
             p10, p90 = self.calibration.apply(p10, p90)
         return p10, p50, p90
@@ -201,6 +205,7 @@ class TFTForecaster:
     target_scaler: object
     lookback: int
     calibration: ConformalCalibration | None = None
+    bias_correction: DemandBiasCorrection | None = None
     holidays: pd.DataFrame | None = None
     name: str = "tft"
 
@@ -259,6 +264,8 @@ class TFTForecaster:
         p10 = _inverse(self.target_scaler, out.p10[0].numpy())
         p50 = _inverse(self.target_scaler, out.p50[0].numpy())
         p90 = _inverse(self.target_scaler, out.p90[0].numpy())
+        if self.bias_correction is not None:
+            p10, p50, p90 = self.bias_correction.apply(region, p10, p50, p90)
         if self.calibration is not None:
             p10, p90 = self.calibration.apply(p10, p90)
         return p10, p50, p90
@@ -548,6 +555,7 @@ class _RegisteredRunArtifacts:
     feature_scalers: dict[str, object]
     target_scaler: object
     calibration: ConformalCalibration | None
+    bias_correction: DemandBiasCorrection | None
 
 
 def _load_registered_run_artifacts(
@@ -588,12 +596,24 @@ def _load_registered_run_artifacts(
         # than failing the whole backtest over a missing nice-to-have.
         calibration = None
 
+    try:
+        bias_dict = mlflow.artifacts.load_dict(
+            f"runs:/{run_id}/demand_bias_correction.json"
+        )
+        bias_correction = DemandBiasCorrection.from_dict(bias_dict)
+    except Exception:
+        # A run logged before `TODO.md` Phase 3 existed -- same "evaluate
+        # the raw model rather than failing the whole backtest" reasoning
+        # as `calibration` just above.
+        bias_correction = None
+
     return _RegisteredRunArtifacts(
         params=params,
         state_dict=state_dict,
         feature_scalers=feature_scalers,
         target_scaler=target_scaler,
         calibration=calibration,
+        bias_correction=bias_correction,
     )
 
 
@@ -625,6 +645,7 @@ def load_registered_model(model_name: str, version: str | int) -> LSTMForecaster
         target_scaler=artifacts.target_scaler,
         lookback=int(params["lookback"]),
         calibration=artifacts.calibration,
+        bias_correction=artifacts.bias_correction,
         name=f"{model_name}_v{version}",
     )
 
@@ -658,6 +679,7 @@ def load_registered_tft_model(
         target_scaler=artifacts.target_scaler,
         lookback=int(params["lookback"]),
         calibration=artifacts.calibration,
+        bias_correction=artifacts.bias_correction,
         holidays=holidays,
         name=f"{model_name}_v{version}",
     )
@@ -730,6 +752,12 @@ async def evaluate_and_log(
                 log.info("evaluate.skip_empty_region", region=region)
                 continue
 
+            # `bias_correction` deliberately left unset (defaults to
+            # `None`) here too, not just `calibration` -- "_raw" means
+            # the model's untouched output, no post-hoc adjustment of
+            # any kind, so the report's calibrated-vs-raw comparison
+            # shows the real combined effect of bias correction +
+            # conformal calibration together, not just the latter.
             raw_forecaster = LSTMForecaster(
                 model=lstm_forecaster.model,
                 feature_scalers=lstm_forecaster.feature_scalers,
@@ -842,6 +870,9 @@ async def evaluate_tft_and_log(
                 log.info("evaluate_tft.skip_empty_region", region=region)
                 continue
 
+            # `bias_correction` deliberately left unset here too -- same
+            # reasoning as `LSTMForecaster`'s identical raw_forecaster
+            # above.
             raw_forecaster = TFTForecaster(
                 model=tft_forecaster.model,
                 feature_scalers=tft_forecaster.feature_scalers,
@@ -1100,6 +1131,21 @@ async def run_live_evaluation_gate(
     if passed and max_acceptable_mape is not None:
         passed = overall_mape <= max_acceptable_mape
 
+    # Real coverage/bias visibility (`TODO.md` Phase 4) -- tagged, NOT
+    # gated on: unlike `overall_mape` above, neither of these ever flips
+    # `passed`. Reusing metrics `EvaluationReport` already computes (no
+    # new computation) so a human/dashboard can see a candidate's real
+    # coverage/bias without a hard-gate risking the exact failure mode
+    # `training_worker._resolve_max_acceptable_mape`'s own real
+    # 2026-08-12 bug already showed once (a hastily-added threshold that
+    # silently mis-rejected a good candidate by comparing two non-
+    # comparable metrics) -- watch real tag values across a few real
+    # training cycles before ever turning either of these into a gate.
+    overall_coverage = (
+        float(np.mean([r.empirical_coverage for r in scored])) if scored else float("nan")
+    )
+    overall_bias = float(np.mean([r.mean_error for r in scored])) if scored else float("nan")
+
     client = MlflowClient()
     client.set_model_version_tag(
         model_name, str(version), "eval_gate_passed", str(passed)
@@ -1107,12 +1153,20 @@ async def run_live_evaluation_gate(
     client.set_model_version_tag(
         model_name, str(version), "eval_gate_mape", f"{overall_mape:.4f}"
     )
+    client.set_model_version_tag(
+        model_name, str(version), "eval_gate_coverage", f"{overall_coverage:.4f}"
+    )
+    client.set_model_version_tag(
+        model_name, str(version), "eval_gate_bias_mw", f"{overall_bias:.2f}"
+    )
     log.info(
         "evaluate.live_gate",
         model_name=model_name,
         version=str(version),
         passed=passed,
         overall_mape=overall_mape,
+        overall_coverage=overall_coverage,
+        overall_bias_mw=overall_bias,
     )
 
     return LiveEvaluationGateResult(

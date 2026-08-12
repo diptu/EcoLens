@@ -34,6 +34,16 @@ class Settings(BaseSettings):
     postgres_user: str = "postgres"
     postgres_password: str = "postgres"
 
+    # Separate Postgres instance (2026-08-12) for the real "logger"
+    # tables this service writes/reads (`meta._training_log`,
+    # `meta.anomalies` reads, `meta._dbt_build_log` reads) -- same split
+    # `services/ingestion`/`services/waerehouse` use, for the same
+    # reason. Falls back to `database_url` when unset. **Must be the
+    # identical value those two services use** -- `meta.anomalies.
+    # run_id` has a real foreign key into `meta._ingest_log(id)`, so
+    # those tables can never live in different databases from each other.
+    log_db_url_env: str | None = Field(default=None, validation_alias="LOG_DB_URL")
+
     redis_url_env: str | None = Field(default=None, validation_alias="REDIS_URL")
     redis_host: str = "localhost"
     redis_port: int = 6379
@@ -344,6 +354,20 @@ class Settings(BaseSettings):
             f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
+
+    @property
+    def log_db_url(self) -> str:
+        """`postgresql+asyncpg://` DSN for the separate logging database
+        (`db.session.get_log_engine`) -- uses `LOG_DB_URL` verbatim (same
+        normalization as `database_url`) if set, else falls back to
+        `database_url` itself."""
+        if self.log_db_url_env:
+            url = self.log_db_url_env
+            if url.startswith("postgresql://"):
+                url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+            url = url.replace("sslmode=", "ssl=")
+            return url
+        return self.database_url
 
     @property
     def redis_url(self) -> str:

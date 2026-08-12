@@ -77,7 +77,7 @@ async def _recorded_schema_drifts(db: AsyncSession) -> list[dict[str, Any]]:
 async def _generate_issues(db: AsyncSession) -> list[dict[str, Any]]:
     now = datetime.now(UTC)
     sources = [entry.ingest_source for entry in CATALOG]
-    run_rows = await fetch_run_rows(db, sources, now - _STATS_WINDOW)
+    run_rows = await fetch_run_rows(sources, now - _STATS_WINDOW)
 
     issues: list[dict[str, Any]] = []
 
@@ -199,7 +199,7 @@ async def get_summary(db: AsyncSession, redis: Redis) -> DataQualitySummaryRespo
 
     now = datetime.now(UTC)
     sources = [entry.ingest_source for entry in CATALOG]
-    run_rows = await fetch_run_rows(db, sources, now - _STATS_WINDOW)
+    run_rows = await fetch_run_rows(sources, now - _STATS_WINDOW)
     issues = await _generate_issues(db)
 
     cutoff_24h = now - timedelta(hours=24)

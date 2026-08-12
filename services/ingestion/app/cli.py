@@ -310,13 +310,21 @@ def health() -> None:
 @click.option("--port", type=int, default=None)
 @click.option("--reload", is_flag=True, default=False)
 def serve(host: str, port: int | None, reload: bool) -> None:
-    """Run the FastAPI app with uvicorn (equivalent to `uvicorn app.main:app`)."""
+    """Run the FastAPI app with uvicorn (equivalent to `uvicorn app.main:app`).
+
+    Port resolution order: explicit `--port` > the platform-standard
+    `PORT` env var (Railway, Heroku, and most other PaaS targets inject
+    this and expect the process to bind it -- confirmed real gap, this
+    command never read it before) > `Settings.api_port` (8003, this
+    repo's own docker-compose default, used when nothing else is set).
+    """
+    import os
+
     import uvicorn
 
     settings = get_settings()
-    uvicorn.run(
-        "app.main:app", host=host, port=port or settings.api_port, reload=reload
-    )
+    resolved_port = port or (int(os.environ["PORT"]) if os.environ.get("PORT") else None) or settings.api_port
+    uvicorn.run("app.main:app", host=host, port=resolved_port, reload=reload)
 
 
 if __name__ == "__main__":

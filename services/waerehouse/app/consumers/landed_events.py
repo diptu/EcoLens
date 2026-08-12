@@ -19,6 +19,26 @@ don't queue 5 back-to-back builds). On failure: closes it out to
 `"sync_failed"` and re-raises — `app.db.rabbitmq.consume_landed_events`
 is what actually dead-letters/acks around this, this function's only job
 is "do the sync, raise if it didn't work".
+
+**`meta._ingest_log`/`meta.anomalies` deliberately stay on the primary
+database** (2026-08-12) -- briefly moved to the separate `LOG_DB_URL`
+database alongside this service's other audit-log tables the same day,
+then moved straight back: `meta.anomalies` is a real dbt *source*
+(`dbt/ecolens/models/staging/stg_anomalies.sql`, feeding `int_anomaly_
+by_demand.sql` -> `fct_energy_demand`'s `is_anomalous`/`anomaly_score`
+columns, which the dashboard's anomaly-detection overview chart reads
+directly). dbt's own connection profile has no knowledge of `LOG_DB_URL`
+at all, so moving that table made the chart permanently stale the moment
+it happened -- confirmed live. `meta._ingest_log` came back with it
+because `meta.anomalies.run_id` has a real foreign key into it, not
+because it has its own dbt dependency. This is also why `load_to_postgres`
++ `mark_synced` are back to sharing one `AsyncSession`/transaction below
+(committed together, atomically) -- the brief split (while `_ingest_log`
+was on `LOG_DB_URL`) genuinely gave that up; reverting the table
+placement made the original atomic version safe to restore too, not
+just possible. See `app.service.datasources.service.fetch_run_rows`'s
+own docstring (`services/ingestion`) for the fuller real story, including
+which audit-log tables correctly *do* stay on `LOG_DB_URL`.
 """
 
 from __future__ import annotations
@@ -34,7 +54,7 @@ from app.core.logging import get_logger, set_run_id
 from app.core.metrics import consume_duration_seconds, rows_loaded_total
 from app.core.tracing import get_tracer
 from app.db.duckdb_client import read_run_with_fallback
-from app.db.session import get_session
+from app.db.session import get_log_session, get_session
 from app.dbt.scheduler import trigger_build_if_due
 from app.loaders.ingest_log import mark_sync_failed, mark_synced
 from app.loaders.postgres_loader import load_to_postgres
@@ -56,7 +76,7 @@ def _trigger_scheduled_build_in_background() -> None:
 
     async def _run() -> None:
         try:
-            async with get_session() as session:
+            async with get_log_session() as session:
                 await trigger_build_if_due(session)
         except Exception as exc:  # noqa: BLE001 - a failed scheduled build must never affect the already-successful sync this was triggered from
             log.error("dbt.scheduled_build_trigger_failed", error=str(exc))

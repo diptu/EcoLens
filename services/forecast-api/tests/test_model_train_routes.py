@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from app.api.v1.deps import get_db, get_redis_client
+from app.api.v1.deps import get_log_db, get_redis_client
 from app.main import app
 from app.service.model import actions
 
@@ -216,7 +216,7 @@ def _training_log_row(**overrides):
 
 
 def test_training_runs_returns_real_rows(client):
-    app.dependency_overrides[get_db] = lambda: _FakeDbSession([_training_log_row()])
+    app.dependency_overrides[get_log_db] = lambda: _FakeDbSession([_training_log_row()])
     app.dependency_overrides[get_redis_client] = lambda: _FakeRedis()
     try:
         response = client.get("/v1/model/training-runs")
@@ -236,7 +236,7 @@ def test_training_runs_normalises_regions_when_the_driver_returns_a_json_string(
     # asyncpg/SQLAlchemy usually hand back jsonb already parsed, but a
     # raw text() query doesn't guarantee it -- confirm the string path
     # gets decoded too, not just the already-a-list happy path above.
-    app.dependency_overrides[get_db] = lambda: _FakeDbSession(
+    app.dependency_overrides[get_log_db] = lambda: _FakeDbSession(
         [_training_log_row(regions='["QLD1", "VIC1"]')]
     )
     app.dependency_overrides[get_redis_client] = lambda: _FakeRedis()
@@ -250,7 +250,7 @@ def test_training_runs_normalises_regions_when_the_driver_returns_a_json_string(
 
 
 def test_training_runs_empty_before_any_training_has_ever_run(client):
-    app.dependency_overrides[get_db] = lambda: _FakeDbSession([])
+    app.dependency_overrides[get_log_db] = lambda: _FakeDbSession([])
     app.dependency_overrides[get_redis_client] = lambda: _FakeRedis()
     try:
         response = client.get("/v1/model/training-runs")

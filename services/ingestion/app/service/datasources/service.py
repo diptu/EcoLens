@@ -48,6 +48,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.core.errors import ApiError
 from app.db.redis import get_breaker
+from app.db.session import get_session
 from app.models.datasources import CATALOG, CATALOG_BY_ID, DataSourceDef
 from app.schemas.datasources import (
     AuthInfo,
@@ -202,25 +203,54 @@ async def _update_config(
 
 
 async def fetch_run_rows(
-    db: AsyncSession, sources: list[str], since: datetime
+    sources: list[str], since: datetime
 ) -> dict[str, list[dict[str, Any]]]:
-    result = await db.execute(
-        text(
-            "SELECT l.id, l.source, l.status, l.started_at, l.finished_at, "
-            "l.rows_landed, l.rows_loaded, l.error_message, l.triggered_by, "
-            "COALESCE(a.cnt, 0) AS anomalies_flagged "
-            "FROM meta._ingest_log l "
-            "LEFT JOIN (SELECT run_id, count(*) AS cnt FROM meta.anomalies GROUP BY run_id) a "
-            "  ON a.run_id = l.id "
-            "WHERE l.source = ANY(:sources) AND l.started_at >= :since "
-            "ORDER BY l.source, l.started_at DESC"
-        ),
-        {"sources": sources, "since": since},
-    )
-    by_source: dict[str, list[dict[str, Any]]] = {s: [] for s in sources}
-    for row in result.mappings().all():
-        by_source[row["source"]].append(dict(row))
-    return by_source
+    """`meta._ingest_log`/`meta.anomalies` -- uses its own dedicated
+    `get_session()` (2026-08-12) rather than accepting a caller-supplied
+    `db`, since this helper is called from many different contexts (some
+    mixed with `meta.data_sources` config reads, some not) and is always
+    a self-contained, independent read either way -- no caller has ever
+    relied on it sharing their own transaction.
+
+    **Real correction (2026-08-12, same day)**: `meta._ingest_log`/`meta.
+    anomalies` were briefly moved to a separate `LOG_DB_URL` database
+    alongside this service's other audit-log tables, then moved back --
+    `meta.anomalies` is a real dbt *source* (`services/waerehouse/dbt/
+    ecolens/models/staging/stg_anomalies.sql`, feeding `int_anomaly_by_
+    demand.sql` -> `fct_energy_demand`'s `is_anomalous`/`anomaly_score`
+    columns, which the dashboard's anomaly-detection overview chart reads
+    directly). dbt's own connection profile has no knowledge of
+    `LOG_DB_URL` at all, so moving this table made that real, live chart
+    permanently stale the moment it happened -- confirmed live: it kept
+    showing pre-move anomalies (including ones below the real 0.95
+    score gate `pipeline.anomaly.detect_anomalies` enforces) forever,
+    since new post-gate rows were landing in a database dbt never reads.
+    `meta._ingest_log` came back with it, not because it has its own dbt
+    dependency (it doesn't), but because `meta.anomalies.run_id` has a
+    real foreign key into it -- the two can never live in different
+    databases from each other. Every *other* audit-log table this
+    service/`services/waerehouse`/`services/forecast-api` write
+    (`_training_log`, `_dbt_build_log`, `_feature_selection_log`,
+    `_marts_archive_log`, `_retention_log`) has no dbt-source dependency
+    and correctly stays on `LOG_DB_URL`."""
+    async with get_session() as db:
+        result = await db.execute(
+            text(
+                "SELECT l.id, l.source, l.status, l.started_at, l.finished_at, "
+                "l.rows_landed, l.rows_loaded, l.error_message, l.triggered_by, "
+                "COALESCE(a.cnt, 0) AS anomalies_flagged "
+                "FROM meta._ingest_log l "
+                "LEFT JOIN (SELECT run_id, count(*) AS cnt FROM meta.anomalies GROUP BY run_id) a "
+                "  ON a.run_id = l.id "
+                "WHERE l.source = ANY(:sources) AND l.started_at >= :since "
+                "ORDER BY l.source, l.started_at DESC"
+            ),
+            {"sources": sources, "since": since},
+        )
+        by_source: dict[str, list[dict[str, Any]]] = {s: [] for s in sources}
+        for row in result.mappings().all():
+            by_source[row["source"]].append(dict(row))
+        return by_source
 
 
 def _derive_cadence(cron: str) -> str:
@@ -424,7 +454,7 @@ async def list_data_sources(
     # The circuit-breaker reads use a separate Redis client, so those can
     # still run concurrently with each other.
     configs = await _fetch_source_configs(db, ids)
-    run_rows = await fetch_run_rows(db, sources, now - _STATS_WINDOW)
+    run_rows = await fetch_run_rows(sources, now - _STATS_WINDOW)
     breaker_states = await asyncio.gather(*(get_breaker(src).state for src in sources))
     circuit_by_source = dict(zip(sources, breaker_states, strict=True))
 
@@ -491,7 +521,7 @@ async def _build_one(
     config: dict[str, Any],
 ) -> DataSourceOut:
     now = datetime.now(UTC)
-    run_rows = await fetch_run_rows(db, [entry.ingest_source], now - _STATS_WINDOW)
+    run_rows = await fetch_run_rows([entry.ingest_source], now - _STATS_WINDOW)
     circuit_state = await get_breaker(entry.ingest_source).state
     return _build_entry(
         entry,

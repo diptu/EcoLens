@@ -82,3 +82,45 @@ async def get_session() -> AsyncIterator[AsyncSession]:
 async def dispose() -> None:
     """Dispose of the engine's connection pool (call on service shutdown)."""
     await get_engine().dispose()
+    await get_log_engine().dispose()
+
+
+@lru_cache
+def get_log_engine() -> AsyncEngine:
+    """Second engine, bound to `Settings.log_db_url` -- the real "logger"
+    tables (`meta._ingest_log`, `meta.anomalies`, `meta._feature_
+    selection_log`) live here, separate from `get_engine()`'s primary
+    database (2026-08-12). Falls back to the same database as `get_
+    engine()` when `LOG_DB_URL` is unset (`Settings.log_db_url`'s own
+    docstring), so this is always safe to call. Same Neon transaction-
+    pooler fix as the primary engine."""
+    return create_async_engine(
+        get_settings().log_db_url,
+        pool_pre_ping=True,
+        future=True,
+        connect_args={"statement_cache_size": 0},
+        pool_size=2,
+        max_overflow=3,
+        pool_timeout=10,
+        pool_recycle=300,
+    )
+
+
+@lru_cache
+def get_log_sessionmaker() -> async_sessionmaker[AsyncSession]:
+    return async_sessionmaker(get_log_engine(), expire_on_commit=False)
+
+
+@asynccontextmanager
+async def get_log_session() -> AsyncIterator[AsyncSession]:
+    """Same commit/rollback contract as `get_session()`, bound to the
+    separate logging database instead."""
+    session = get_log_sessionmaker()()
+    try:
+        yield session
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        raise
+    finally:
+        await session.close()

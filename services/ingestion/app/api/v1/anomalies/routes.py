@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.v1.deps import get_db
 from app.core.errors import ApiError
 from app.schemas.anomalies import (
+    AnomalyContextResponse,
     AnomalyListResponse,
     AnomalyOut,
     AnomalySummaryResponse,
@@ -28,6 +29,7 @@ from app.schemas.anomalies import (
     UpdateAnomalyStatusRequest,
 )
 from app.service.anomalies import (
+    get_anomaly_context,
     get_anomaly_summary,
     get_demand_timeseries,
     list_anomalies,
@@ -98,6 +100,21 @@ async def get_demand_timeseries_endpoint(
     except ValueError as exc:
         raise ApiError(400, "invalid_metric", str(exc)) from exc
     return AnomalyTimeseriesResponse(**result)
+
+
+@router.get("/{anomaly_id}/context", response_model=AnomalyContextResponse)
+async def get_anomaly_context_endpoint(
+    anomaly_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> AnomalyContextResponse:
+    """Real nearby readings for every numeric column this anomaly's own
+    source was scanned on (`app.service.anomalies.get_anomaly_context`'s
+    own docstring) -- works for any source, not just the 2 metrics
+    `GET /v1/anomalies/timeseries` covers."""
+    result = await get_anomaly_context(db, anomaly_id)
+    if result is None:
+        raise ApiError(404, "anomaly_not_found", f"No anomaly with id '{anomaly_id}'.")
+    return AnomalyContextResponse(**result)
 
 
 @router.patch("/{anomaly_id}", response_model=AnomalyOut)

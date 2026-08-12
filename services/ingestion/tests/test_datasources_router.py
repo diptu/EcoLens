@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
 import jwt
@@ -194,6 +195,21 @@ def _wire_fakes(monkeypatch):
     app.dependency_overrides[get_db] = lambda: session
     app.dependency_overrides[get_redis_client] = lambda: redis
     monkeypatch.setattr(datasources_service, "get_breaker", _fake_get_breaker)
+
+    # `fetch_run_rows` opens its own dedicated `get_session()` internally
+    # rather than accepting a caller-supplied `db` -- see that function's
+    # own docstring. `dependency_overrides[get_db]` above no longer
+    # reaches it (that only intercepts FastAPI's own DI, not a
+    # module-level call this service function makes directly), so the
+    # same fake session needs wiring in here too, or every `meta.
+    # _ingest_log` read this test relies on silently falls through to a
+    # real database.
+    @asynccontextmanager
+    async def _fake_get_session():
+        yield session
+
+    monkeypatch.setattr(datasources_service, "get_session", _fake_get_session)
+
     yield session, redis
     app.dependency_overrides.clear()
 

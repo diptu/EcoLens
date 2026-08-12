@@ -50,6 +50,7 @@ from torch.utils.data import ConcatDataset, DataLoader
 
 from app.core.config import Settings, get_settings
 from app.db.session import get_session
+from app.service.ml.bias_correction import DemandBiasCorrection
 from app.service.ml.conformal import (
     ConformalCalibration,
     empirical_coverage,
@@ -230,6 +231,7 @@ class TrainResult:
     # 2) for `DemandTFT`, not just `DemandLSTM`.
     model: nn.Module
     calibration: ConformalCalibration
+    bias_correction: DemandBiasCorrection
     feature_scalers: dict[str, StandardScaler]
     target_scaler: StandardScaler
     history: list[dict[str, float]] = field(default_factory=list)
@@ -492,6 +494,11 @@ def train_model(
     # `min_target_ts` in the first place.
     train_parts, val_parts, cal_parts, test_parts = [], [], [], []
     region_window_counts: dict[str, tuple[int, int, int]] = {}
+    # Kept per-region (not just folded into `cal_parts`) so the real
+    # per-region bias correction below (`TODO.md` Phase 3) can predict
+    # on each region's own calibration split separately, instead of a
+    # pooled mean that would conflate regions with opposite-signed bias.
+    region_cal_datasets: dict[str, DemandDataset] = {}
     for region, (region_train, region_earlystop_val, region_cal) in per_region_split.items():
         if region_train.empty or region_earlystop_val.empty or region_cal.empty:
             log.warning(
@@ -546,6 +553,7 @@ def train_model(
         val_parts.append(region_val_ds)
         cal_parts.append(region_cal_ds)
         test_parts.append(region_test_ds)
+        region_cal_datasets[region] = region_cal_ds
 
     log.info("train_model.region_window_counts", counts=region_window_counts)
 
@@ -568,9 +576,10 @@ def train_model(
     val_loader = DataLoader(
         val_ds, batch_size=config.batch_size, shuffle=False, collate_fn=collate
     )
-    cal_loader = DataLoader(
-        cal_ds, batch_size=config.batch_size, shuffle=False, collate_fn=collate
-    )
+    # No pooled `cal_loader` -- calibration prediction now runs per
+    # region (below, via `region_cal_datasets`) for the real per-region
+    # bias correction (`TODO.md` Phase 3); `cal_ds` itself is still used
+    # just above for the empty-split check and `n_cal_windows` logging.
     test_loader = (
         DataLoader(
             test_ds, batch_size=config.batch_size, shuffle=False, collate_fn=collate
@@ -677,10 +686,48 @@ def train_model(
     # MAPE all need to operate (and be reported) in the units
     # `README.md`'s forecast API actually returns, not the model's
     # internal scaled training space.
-    y_cal, p10_cal, _, p90_cal = _predict(model, cal_loader, device)
-    y_cal = _inverse_target(target_scaler, y_cal)
-    p10_cal = _inverse_target(target_scaler, p10_cal)
-    p90_cal = _inverse_target(target_scaler, p90_cal)
+    #
+    # Real per-region bias correction (`TODO.md` Phase 3): predicted per
+    # region (not pooled) so each region's own real
+    # `mean(actual - p50)` offset is computed without conflating it with
+    # another region's opposite-signed bias. Bias is applied to that
+    # region's own P10/P90 cal predictions *before* they're pooled for
+    # `fit_conformal` -- bias-then-conformal, the explicit, stated
+    # tradeoff `bias_correction.py`'s own module docstring covers (same
+    # cal split backs both, since NEM regions' real ~25-27-row cal
+    # splits leave no room for a fourth disjoint one).
+    bias_by_region: dict[str, np.ndarray] = {}
+    y_cal_parts: list[np.ndarray] = []
+    p10_cal_parts: list[np.ndarray] = []
+    p90_cal_parts: list[np.ndarray] = []
+    for region, region_cal_ds in region_cal_datasets.items():
+        # Non-empty *rows* (guaranteed by the per-region skip earlier in
+        # this function) doesn't guarantee at least one real *window* --
+        # skip silently if `lookback+horizon` doesn't fit, same "absent
+        # signal doesn't block" convention used elsewhere in this
+        # codebase, rather than erroring on an empty prediction.
+        if len(region_cal_ds) == 0:
+            continue
+        region_cal_loader = DataLoader(
+            region_cal_ds, batch_size=config.batch_size, shuffle=False, collate_fn=collate
+        )
+        y_region, p10_region, p50_region, p90_region = _predict(model, region_cal_loader, device)
+        y_region = _inverse_target(target_scaler, y_region)
+        p10_region = _inverse_target(target_scaler, p10_region)
+        p50_region = _inverse_target(target_scaler, p50_region)
+        p90_region = _inverse_target(target_scaler, p90_region)
+
+        region_bias = np.mean(y_region - p50_region, axis=0)
+        bias_by_region[region] = region_bias
+
+        y_cal_parts.append(y_region)
+        p10_cal_parts.append(p10_region + region_bias)
+        p90_cal_parts.append(p90_region + region_bias)
+
+    bias_correction = DemandBiasCorrection(bias_by_region=bias_by_region)
+    y_cal = np.concatenate(y_cal_parts)
+    p10_cal = np.concatenate(p10_cal_parts)
+    p90_cal = np.concatenate(p90_cal_parts)
     calibration = fit_conformal(y_cal, p10_cal, p90_cal, alpha=config.conformal_alpha)
 
     test_metrics: dict[str, float] = {}
@@ -736,6 +783,7 @@ def train_model(
     return TrainResult(
         model=model,
         calibration=calibration,
+        bias_correction=bias_correction,
         feature_scalers=scalers,
         target_scaler=target_scaler,
         history=history,
@@ -843,6 +891,13 @@ def log_and_register_run(
             }
         )
         mlflow.log_dict(result.calibration.to_dict(), "conformal_calibration.json")
+        # Real per-region P50 bias correction (`TODO.md` Phase 3) --
+        # same-run artifact alongside conformal calibration, not a
+        # separately-registered model (`bias_correction.py`'s own module
+        # docstring has the reasoning: this model retrains from scratch/
+        # incrementally every run, so a bias table has no reason to
+        # outlive one specific run's own weights).
+        mlflow.log_dict(result.bias_correction.to_dict(), "demand_bias_correction.json")
 
         # Logged twice, deliberately, for two different consumers:
         #

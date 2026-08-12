@@ -20,7 +20,7 @@ from redis.asyncio import Redis
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_app_settings, get_db, get_redis_client
+from app.api.v1.deps import get_app_settings, get_log_db, get_redis_client
 from app.core.config import Settings
 from app.core.errors import ApiError
 from app.core.response_cache import cached_response
@@ -36,7 +36,7 @@ router = APIRouter(prefix="/v1/features", tags=["features"])
 
 @router.post("/rebuild", response_model=FeatureRebuildTriggerResponse)
 async def trigger_feature_rebuild(
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_log_db),
     redis: Redis = Depends(get_redis_client),
 ) -> FeatureRebuildTriggerResponse:
     try:
@@ -71,7 +71,7 @@ async def trigger_feature_rebuild(
 @router.get("/rebuild/runs", response_model=FeatureRebuildRunsListResponse)
 async def list_feature_rebuild_runs(
     limit: int = Query(default=20, ge=1, le=200),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_log_db),
     redis: Redis = Depends(get_redis_client),
     settings: Settings = Depends(get_app_settings),
 ) -> FeatureRebuildRunsListResponse:

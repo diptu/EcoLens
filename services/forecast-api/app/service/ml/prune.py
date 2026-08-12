@@ -415,6 +415,7 @@ async def prune_and_recover(
         target_scaler=recovered_result.target_scaler,
         lookback=lookback,
         calibration=recovered_result.calibration,
+        bias_correction=recovered_result.bias_correction,
         name=f"{model_name}_pruned_candidate",
     )
     recovered_reports = []

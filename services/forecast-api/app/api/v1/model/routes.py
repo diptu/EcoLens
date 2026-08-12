@@ -20,7 +20,7 @@ from mlflow.exceptions import MlflowException
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.deps import get_app_settings, get_db, get_model_registry, get_redis_client
+from app.api.v1.deps import get_app_settings, get_log_db, get_model_registry, get_redis_client
 from app.core.errors import ApiError
 from app.schemas.model import (
     DriftListResponse,
@@ -82,7 +82,7 @@ async def trigger_training_endpoint(
 @router.get("/model/training-runs", response_model=TrainingRunsListResponse)
 async def get_training_runs(
     limit: int = Query(default=20, ge=1, le=200),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_log_db),
     redis: Redis = Depends(get_redis_client),
     settings: Settings = Depends(get_app_settings),
 ) -> TrainingRunsListResponse:

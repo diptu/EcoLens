@@ -68,6 +68,20 @@ class Settings(BaseSettings):
         default=None, validation_alias="RAW_MARTS_DATABASE_URL"
     )
 
+    # Third, separate Postgres instance (2026-08-12) for the real
+    # "logger" tables (`meta._ingest_log` -- this service's own status-
+    # update side, `app/loaders/ingest_log.py`; `meta._dbt_build_log`,
+    # `meta._retention_log`, `meta._marts_archive_log`) -- an explicit
+    # split from `DATABASE_URL` for the same reason `RAW_MARTS_DATABASE_URL`
+    # above is its own separate database, just for audit/history tables
+    # instead of `raw_marts.*`. Falls back to `database_url` when unset.
+    # **Must be the identical value `services/ingestion` and `services/
+    # forecast-api` use** -- `meta.anomalies.run_id` has a real foreign
+    # key into `meta._ingest_log(id)`, so those two tables (and by
+    # extension, every service that touches either) can never point at
+    # different physical databases from each other.
+    log_db_url_env: str | None = Field(default=None, validation_alias="LOG_DB_URL")
+
     # Redis -- new 2026-08-11 (`app.core.response_cache`), this service
     # previously had no caching layer at all (RabbitMQ-only, unlike
     # `services/ingestion`'s Redis-backed circuit breaker/backfill lock).
@@ -126,7 +140,17 @@ class Settings(BaseSettings):
     # builds the training-trigger payload but never trains, so it only
     # needs these two to fill in the payload when a caller doesn't
     # override them.
-    model_default_regions: list[str] = ["NSW1"]
+    #
+    # Real bug, confirmed live 2026-08-12: this was left at `["NSW1"]`
+    # while forecast-api's identical field default is all 6 real regions
+    # -- despite this field's own docstring above already claiming "same
+    # defaults as forecast-api's identical fields". Every automatic
+    # post-landed-event training trigger (`dbt.training_trigger.publish_
+    # training_triggers_for_build`, which fills in this default whenever
+    # a caller doesn't override it -- and the real landed-event path
+    # never does) has only ever fine-tuned NSW1 as a result; QLD1/VIC1/
+    # SA1/TAS1/WEM never received an automatic incremental fine-tune.
+    model_default_regions: list[str] = ["NSW1", "QLD1", "VIC1", "SA1", "TAS1", "WEM"]
     # Real bug, confirmed live 2026-08-11 (see forecast-api's identical
     # field for the full math): 24h guaranteed forecast-api's
     # `train_model` "not enough history" error for every real automatic
@@ -269,6 +293,21 @@ class Settings(BaseSettings):
         if self.redis_url_env:
             return self.redis_url_env
         return f"redis://{self.redis_host}:{self.redis_port}/{self.redis_db}"
+
+    @property
+    def log_db_url(self) -> str:
+        """`postgresql+asyncpg://` DSN for the separate logging database
+        (`db.session.get_log_engine`) -- uses `LOG_DB_URL` verbatim (same
+        normalization as `database_url`) if set, else falls back to
+        `database_url` itself so an unconfigured deployment keeps writing
+        logs to the primary database exactly as it always did."""
+        if self.log_db_url_env:
+            url = self.log_db_url_env
+            if url.startswith("postgresql://"):
+                url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+            url = url.replace("sslmode=", "ssl=")
+            return url
+        return self.database_url
 
     @property
     def raw_marts_archive_configured(self) -> bool:

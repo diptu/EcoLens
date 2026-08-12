@@ -96,7 +96,7 @@ async def get_source_health(
     now = datetime.now(UTC)
     configs = await _fetch_source_configs(db, [id])
     enabled = bool(configs.get(id, {}).get("enabled", True))
-    run_rows = (await fetch_run_rows(db, [source], now - _HEALTH_WINDOW))[source]
+    run_rows = (await fetch_run_rows([source], now - _HEALTH_WINDOW))[source]
 
     def _success_rate(since: datetime) -> float | None:
         window = [r for r in run_rows if r["started_at"] >= since]

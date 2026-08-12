@@ -11,6 +11,14 @@ pipeline's original did (this service has no Prefect dependency).
 `app.db.rabbitmq.publish_training_trigger_event` needs no changes: it
 already handles this event regardless of what published it.
 
+**`meta.anomalies` reads here use the primary `get_session`, not
+`get_log_session`** -- unlike `log_training_start`/`log_training_finish`/
+`list_training_runs` below (`meta._training_log`, correctly on
+`LOG_DB_URL`), `meta.anomalies` is a real dbt source feeding a live
+dashboard chart and must stay reachable from the primary database dbt
+actually connects to. See `services/ingestion`'s `app.service.
+datasources.service.fetch_run_rows` docstring for the full real story.
+
 No "training already in progress" guard, unlike ingestion's
 `trigger_run`/`trigger_backfill` -- those hold their lock/DB-row for the
 exact duration the *same process* awaits the work, so releasing it on
@@ -34,7 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.db.rabbitmq import publish_training_trigger_event
-from app.db.session import get_session
+from app.db.session import get_log_session, get_session
 from app.schemas.model import TrainingRunOut, TrainTriggerResponse
 
 
@@ -160,7 +168,7 @@ async def log_training_start(
     SQLAlchemy's async session opens an implicit transaction on first
     `execute()` and silently rolls it back on close without one."""
     log_id = uuid.uuid4()
-    async with get_session() as session:
+    async with get_log_session() as session:
         await session.execute(
             text(
                 """
@@ -195,7 +203,7 @@ async def log_training_finish(
     """Close out a `meta._training_log` row as `'success'`/`'failed'` --
     see `log_training_start`'s docstring for why the explicit `commit()`
     below is required, not optional."""
-    async with get_session() as session:
+    async with get_log_session() as session:
         await session.execute(
             text(
                 """

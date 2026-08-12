@@ -91,6 +91,61 @@ export type AnomalyTimeseriesResponse = {
   points: AnomalyTimeseriesPoint[];
 };
 
+export type AnomalyContextPoint = {
+  ts: string;
+  /** Real value per numeric column the detector scanned for this
+   * anomaly's own source (`pipeline.anomaly._NUMERIC_COLUMNS`) --
+   * e.g. `{temp_c, humidity_pct, wind_speed_kmh}` for `bom`,
+   * `{demand_mw, price_mwh}` for `aemo_nem`/`aemo_wem`. `null` for a
+   * column that's genuinely missing on this specific reading. */
+  values: Record<string, number | null>;
+  is_anomalous: boolean;
+  anomaly_score: number | null;
+};
+
+export type AnomalyContextBaseline = {
+  mean: number;
+  std: number;
+  low: number;
+  high: number;
+};
+
+export type AnomalyContext = {
+  anomaly_id: string;
+  source: string;
+  table_name: string;
+  region: string | null;
+  columns: string[];
+  center_ts: string | null;
+  points: AnomalyContextPoint[];
+  /** Real per-column expected range from a much wider ±3-real-day
+   * window than `points`' own ±2h (`services/ingestion`'s
+   * `get_anomaly_context` docstring has the full "why" -- a narrow
+   * local window can itself be almost entirely anomalous during a
+   * sustained real excursion, e.g. a multi-hour heatwave, which would
+   * otherwise make the derived range trivially contain the very
+   * reading it's meant to judge). `null` per column with too little
+   * real non-anomalous history even at that width. */
+  baseline: Record<string, AnomalyContextBaseline | null>;
+};
+
+/** Real nearby readings for ANY anomaly's own source -- unlike
+ * `fetchAnomalyTimeseries` (only ever `demand_mw`/`price_mwh`, sourced
+ * from the `raw_marts.fct_energy_demand` mart), this reads straight
+ * from the source's own `raw.*` table, so it works for `bom`'s
+ * `temp_c`/`humidity_pct`/`wind_speed_kmh` and every other source the
+ * detector covers, not just the 2 demand-mart metrics. */
+export async function fetchAnomalyContext(id: string): Promise<AnomalyContext> {
+  const res = await fetch(`${INGESTION_API_URL}/anomalies/${id}/context`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(
+      body?.error?.message ?? `GET /v1/anomalies/${id}/context failed: ${res.status}`,
+    );
+  }
+  return res.json();
+}
+
 export type AnomalyListFilters = {
   severity?: AnomalySeverity;
   method?: AnomalyMethod;

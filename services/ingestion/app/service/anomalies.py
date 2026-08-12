@@ -38,7 +38,11 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.service.dataquality import _severity_from_score
-from app.service.pipeline.anomaly import _MIN_ROWS_FOR_ZSCORE, _Z_SCORE_THRESHOLD
+from app.service.pipeline.anomaly import (
+    _MIN_ROWS_FOR_ZSCORE,
+    _NUMERIC_COLUMNS,
+    _Z_SCORE_THRESHOLD,
+)
 
 # Same real thresholds `service/dataquality.py`'s own `_severity_from_score`
 # already uses -- not reinvented, just needed as a SQL CASE expression
@@ -371,4 +375,215 @@ async def get_demand_timeseries(
         "total_points": len(points),
         "anomalous_points": anomalous_points,
         "points": points,
+    }
+
+
+# ────────────────────────────────────────────────────────────────────
+# Per-anomaly context (2026-08-12) -- real nearby readings for ANY
+# source, not just the 2 demand-mart metrics `get_demand_timeseries`
+# above covers.
+# ────────────────────────────────────────────────────────────────────
+
+# Real, fixed whitelist of `raw.*` tables this ever queries -- `table_
+# name` is a genuine column on `meta.anomalies` but still gets validated
+# against this before any use in an f-string SQL identifier position
+# (can't be a bind param there), same defense-in-depth every other
+# dynamic-identifier query in this codebase already applies. Matches
+# `pipeline.anomaly._NUMERIC_COLUMNS`'s own real key set (confirmed
+# against `information_schema.columns` before writing this -- every one
+# of these 4 raw tables has both `ts` and `region` columns).
+_CONTEXT_TABLES: dict[str, str] = {
+    "bom": "bom_observations",
+    "aemo_nem": "aemo_nem_dispatch",
+    "aemo_wem": "aemo_wem_dispatch",
+    "openelectricity": "openelectricity_mix",
+}
+
+_CONTEXT_WINDOW_HOURS = 2
+
+# Real, wider lookback for `baseline` below -- deliberately *not* the
+# same `±_CONTEXT_WINDOW_HOURS` window `points` uses. Found live
+# 2026-08-13: a sustained real excursion (e.g. a multi-hour heatwave)
+# can fill almost the entire ±2h window with other real anomalous
+# neighbors, and the naive fix (fall back to every real point in that
+# narrow window when too few non-anomalous ones exist) produces a
+# range wide enough to trivially contain the very reading it's meant to
+# judge -- self-consistent by construction, not an honest "expected"
+# range. `±_BASELINE_WINDOW_DAYS` real days is large enough to almost
+# always escape one narrow local excursion while staying cheap enough
+# to query per-anomaly-detail-view interactively (a few hundred to a
+# few thousand real rows even at `aemo_nem`/`aemo_wem`'s 5-minute
+# cadence).
+_BASELINE_WINDOW_DAYS = 3
+
+
+async def get_anomaly_context(db: AsyncSession, anomaly_id: str) -> dict[str, Any] | None:
+    """Real `±_CONTEXT_WINDOW_HOURS`-hour window of every numeric column
+    `pipeline.anomaly._NUMERIC_COLUMNS` scans for this anomaly's own
+    `source`, read straight from that source's own `raw.*` table
+    (region-scoped) -- not a mart, so this works for `bom`'s `temp_c`/
+    `humidity_pct`/`wind_speed_kmh` just as well as `aemo_nem`'s
+    `demand_mw`/`price_mwh`. `None` if the anomaly id doesn't exist, or
+    if its `row_snapshot` has no usable `ts`/`region` to center a window
+    on (both real, expected states -- an ML-only detection over a source
+    this function doesn't have a raw-table mapping for, or a malformed
+    snapshot, not something to error on).
+
+    Points are marked `is_anomalous` by a real, separate lookup against
+    `meta.anomalies` for the same `(source, table_name, region)` within
+    the same window -- every real anomaly in that window is marked, not
+    just the one the caller asked about, so the plot honestly shows
+    "here's this point among its recent neighbors, here's which of
+    those neighbors were also flagged."
+
+    `baseline` is a real, separate per-column mean/std/expected-range
+    computed from a much wider `±_BASELINE_WINDOW_DAYS`-day window
+    (own comment above has the full "why not just the ±2h window"
+    reasoning), excluding every real row flagged anomalous anywhere in
+    that wider window -- `None` for a column with fewer than 2 real
+    non-anomalous readings even at that width (genuinely too little
+    real history to say anything, not zeroed/faked)."""
+    row = (
+        await db.execute(
+            text(
+                "SELECT source, table_name, row_snapshot, detected_at "
+                "FROM meta.anomalies WHERE id = :id"
+            ),
+            {"id": anomaly_id},
+        )
+    ).mappings().first()
+    if row is None:
+        return None
+
+    source = row["source"]
+    table_name = row["table_name"]
+    raw_table = _CONTEXT_TABLES.get(source)
+    columns = list(_NUMERIC_COLUMNS.get(source, ())) if raw_table else []
+    snapshot = row["row_snapshot"] or {}
+    region = snapshot.get("region")
+    center_ts_raw = snapshot.get("ts")
+    center_ts = pd.Timestamp(center_ts_raw) if center_ts_raw else row["detected_at"]
+
+    if raw_table is None or not columns or region is None or center_ts is None:
+        return {
+            "anomaly_id": anomaly_id,
+            "source": source,
+            "table_name": table_name,
+            "region": region,
+            "columns": columns,
+            "center_ts": center_ts,
+            "points": [],
+            "baseline": {},
+        }
+
+    window_start = center_ts - timedelta(hours=_CONTEXT_WINDOW_HOURS)
+    window_end = center_ts + timedelta(hours=_CONTEXT_WINDOW_HOURS)
+    col_sql = ", ".join(columns)
+
+    raw_result = await db.execute(
+        text(
+            f"SELECT ts, {col_sql} FROM raw.{raw_table} "  # nosec B608 -- raw_table/col_sql come only from the fixed _CONTEXT_TABLES/_NUMERIC_COLUMNS maps above, never user input
+            "WHERE region = :region AND ts BETWEEN :start AND :end "
+            "ORDER BY ts"
+        ),
+        {"region": region, "start": window_start, "end": window_end},
+    )
+    raw_rows = raw_result.mappings().all()
+
+    anomaly_result = await db.execute(
+        text(
+            "SELECT row_snapshot ->> 'ts' AS ts, anomaly_score FROM meta.anomalies "
+            "WHERE source = :source AND table_name = :table_name "
+            "AND row_snapshot ->> 'region' = :region "
+            "AND (row_snapshot ->> 'ts') IS NOT NULL "
+            "AND (row_snapshot ->> 'ts')::timestamptz BETWEEN :start AND :end"
+        ),
+        {
+            "source": source,
+            "table_name": table_name,
+            "region": region,
+            "start": window_start,
+            "end": window_end,
+        },
+    )
+    anomalous_by_ts: dict[str, float] = {
+        str(pd.Timestamp(r["ts"])): float(r["anomaly_score"])
+        for r in anomaly_result.mappings().all()
+    }
+
+    points = []
+    for r in raw_rows:
+        ts_key = str(pd.Timestamp(r["ts"]))
+        score = anomalous_by_ts.get(ts_key)
+        points.append(
+            {
+                "ts": r["ts"],
+                "values": {c: (float(r[c]) if r[c] is not None else None) for c in columns},
+                "is_anomalous": score is not None,
+                "anomaly_score": score,
+            }
+        )
+
+    baseline_start = center_ts - timedelta(days=_BASELINE_WINDOW_DAYS)
+    baseline_end = center_ts + timedelta(days=_BASELINE_WINDOW_DAYS)
+
+    baseline_raw_result = await db.execute(
+        text(
+            f"SELECT ts, {col_sql} FROM raw.{raw_table} "  # nosec B608 -- same fixed raw_table/col_sql as the ±2h query above
+            "WHERE region = :region AND ts BETWEEN :start AND :end "
+            "ORDER BY ts"
+        ),
+        {"region": region, "start": baseline_start, "end": baseline_end},
+    )
+    baseline_raw_rows = baseline_raw_result.mappings().all()
+
+    baseline_anomaly_result = await db.execute(
+        text(
+            "SELECT row_snapshot ->> 'ts' AS ts FROM meta.anomalies "
+            "WHERE source = :source AND table_name = :table_name "
+            "AND row_snapshot ->> 'region' = :region "
+            "AND (row_snapshot ->> 'ts') IS NOT NULL "
+            "AND (row_snapshot ->> 'ts')::timestamptz BETWEEN :start AND :end"
+        ),
+        {
+            "source": source,
+            "table_name": table_name,
+            "region": region,
+            "start": baseline_start,
+            "end": baseline_end,
+        },
+    )
+    baseline_anomalous_ts = {
+        str(pd.Timestamp(r["ts"])) for r in baseline_anomaly_result.mappings().all()
+    }
+
+    baseline: dict[str, dict[str, float] | None] = {}
+    for c in columns:
+        vals = [
+            float(r[c])
+            for r in baseline_raw_rows
+            if r[c] is not None and str(pd.Timestamp(r["ts"])) not in baseline_anomalous_ts
+        ]
+        if len(vals) < 2:
+            baseline[c] = None
+            continue
+        mean = sum(vals) / len(vals)
+        variance = sum((v - mean) ** 2 for v in vals) / len(vals)
+        std = variance**0.5
+        baseline[c] = {
+            "mean": round(mean, 3),
+            "std": round(std, 3),
+            "low": round(mean - _Z_SCORE_THRESHOLD * std, 3),
+            "high": round(mean + _Z_SCORE_THRESHOLD * std, 3),
+        }
+
+    return {
+        "anomaly_id": anomaly_id,
+        "source": source,
+        "table_name": table_name,
+        "region": region,
+        "columns": columns,
+        "center_ts": center_ts,
+        "points": points,
+        "baseline": baseline,
     }

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from app.schemas.anomalies.response import (
+    AnomalyContextPoint,
+    AnomalyContextResponse,
     AnomalyListResponse,
     AnomalyOut,
     AnomalySummaryResponse,
@@ -10,6 +12,8 @@ from app.schemas.anomalies.response import (
 )
 
 __all__ = [
+    "AnomalyContextPoint",
+    "AnomalyContextResponse",
     "AnomalyListResponse",
     "AnomalyOut",
     "AnomalySummaryResponse",

@@ -4,7 +4,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Webhook, Play, RefreshCw, Calendar, AlertTriangle, X, Plus, Loader2 } from "lucide-react";
+import { Webhook, Play, RefreshCw, Calendar, AlertTriangle, X, Loader2 } from "lucide-react";
 
 import { Card } from "@/components/dashboard/card";
 import { SectionPage } from "@/components/dashboard/section-page";
@@ -213,9 +213,6 @@ export default function DataIngestionPage() {
         pipelines: (
           <div className="space-y-3">
             <div className="flex justify-end gap-2">
-              <button className="inline-flex items-center gap-1 rounded-md border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs text-white/80 hover:border-emerald-200/30">
-                <Plus className="h-3.5 w-3.5" /> New Pipeline
-              </button>
               <button
                 onClick={runAll}
                 className="inline-flex items-center gap-1 rounded-md bg-emerald-200/15 px-3 py-1.5 text-xs font-semibold text-emerald-100 hover:bg-emerald-200/20"

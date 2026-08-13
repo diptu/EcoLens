@@ -64,15 +64,39 @@ up: check-env ## Spin up services using profiles.
 down: ## Stop all services.
 	$(COMPOSE) -f $(DC_FILE) down
 
+# `services/observility` is its own separate compose project
+# (`ecolens-observability`, not a profile of the root $(DC_FILE)) --
+# Prometheus/Loki/Tempo/Grafana/Alertmanager/OTel Collector, scraping the
+# business services' /metrics and container logs over the root stack's
+# `ecolens_default` network (declared `external` there). Needs `make up`
+# already running first, and its own env file (copy from .env.example --
+# same check-env pattern as the root stack, just scoped to this directory).
+OBS_DIR      ?= services/observility
+OBS_DC_FILE  ?= docker-compose.yml
+OBS_ENV      ?= $(OBS_DIR)/.env
+
+.PHONY: observability-up
+observability-up: ## Start the observability stack (Prometheus/Loki/Tempo/Grafana/Alertmanager). Requires `make up` already running.
+	@if [ ! -f $(OBS_ENV) ]; then echo "Error: $(OBS_ENV) missing -- copy from $(OBS_DIR)/.env.example." && exit 1; fi
+	cd $(OBS_DIR) && $(COMPOSE) -f $(OBS_DC_FILE) up -d
+
+.PHONY: observability-down
+observability-down: ## Stop the observability stack.
+	cd $(OBS_DIR) && $(COMPOSE) -f $(OBS_DC_FILE) down
+
 # ── Docker Images ───────────────────────────────────────────────────────────
 # One target per real infra/docker/*.Dockerfile (`docker.yml`'s own build
 # matrix, mirrored locally, plus `ingestion`/`mlflow` which that workflow
-# doesn't build but docker-compose.yml does). `worker`/`web` are deliberately
-# excluded: docker-compose.yml references infra/docker/{worker,web}.Dockerfile
-# but neither file exists yet (`docker.yml`'s own "web has no Dockerfile yet"
-# note -- same gap, not something this target papers over).
+# doesn't build but docker-compose.yml does). `data-pipeline` is gone --
+# both its Dockerfile and the `services/data-pipeline` package it built
+# were removed (docker-compose.yml's own `data-pipeline`/`warehouse-sync`
+# services retired the same way, 2026-08-14 -- ingestion/warehouse are the
+# real, sole implementations now). `worker`/`web` are deliberately
+# excluded too: docker-compose.yml references infra/docker/{worker,web}.
+# Dockerfile but neither file exists yet (`docker.yml`'s own "web has no
+# Dockerfile yet" note -- same gap, not something this target papers over).
 IMAGE_TAG        ?= local
-DOCKER_SERVICES  := data-pipeline forecast-api warehouse ingestion mlflow
+DOCKER_SERVICES  := forecast-api warehouse ingestion mlflow
 
 .PHONY: docker-build
 docker-build: ## Build Docker image(s) from infra/docker/*.Dockerfile. Pass SERVICE=forecast-api to build just one; IMAGE_TAG=local overrides the tag.

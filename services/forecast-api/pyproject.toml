@@ -53,6 +53,24 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+# CPU-only torch wheels -- this service never runs on GPU infra (Railway/
+# Docker Desktop hosts, no CUDA anywhere in this deployment; confirmed
+# against docker-compose.yml/README/TODO.md, none mention GPU). Without
+# this, `uv sync` resolves PyPI's default Linux torch build, which pulls
+# ~2.7GB of unusable nvidia-*/triton CUDA packages as *dependencies* of
+# torch itself (torch's own wheel is thin now; the CUDA libs are split
+# out) -- the actual majority of `infra/docker/forecast-api.Dockerfile`'s
+# image size. `timesfm[torch]`'s own transitive `torch` dependency
+# resolves from this same index too (`[tool.uv.sources]` applies per
+# package name, not per declaring project).
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
 

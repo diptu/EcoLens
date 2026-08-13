@@ -172,46 +172,16 @@ services:
       redis:
         condition: service_healthy
 
-  # ── data-pipeline API (ECO-D49) ──────────────────────────────────────────
-  # Headless per README's service-boundary rules — this exists so
-  # `/v1/ingest`, `/v1/dbt`, `/v1/data-sources` are actually reachable, not
-  # to serve public traffic; it stays off the `edge` network in a real
-  # deployment (see `docs/microservices-action-plan.md`), unlike `api`
-  # (forecast-api) and `web` below.
-  data-pipeline:
-    build:
-      context: .
-      dockerfile: infra/docker/data-pipeline.Dockerfile
-    <<: *common-env
-    command: serve
-    ports:
-      - "8001:8001"
-    volumes:
-      - duckdb_staging:/app/services/data-pipeline/data/staging
-    depends_on:
-      postgres:
-        condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8001/v1/healthz"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-
   # ── Ingestion (services/ingestion/TODO.md) ───────────────────────────────
-  # Standalone extraction of data-pipeline's ingestion half -- own uv
-  # project/image, not a `data-pipeline` command variant. Runs alongside
-  # `data-pipeline` (unmodified) until every source is verified and cut
-  # over (Phase 4/5), not a replacement for it yet. Mounts the same
-  # `duckdb_staging` volume as `data-pipeline`/`warehouse-sync` purely as
-  # a same-host performance fast-path now, not a hard requirement --
-  # both consumers fall back to downloading the run's snapshot from
-  # object storage (`read_staged_with_fallback`/`read_run_with_fallback`)
-  # when this volume isn't actually shared, i.e. `ingestion` is deployed
-  # on a different machine than its consumer. See
+  # The real, sole ingestion implementation -- `data-pipeline`'s own
+  # ingestion half this was originally extracted from is retired (its
+  # Dockerfile/compose service are gone; cutover complete). Mounts the
+  # `duckdb_staging` volume shared with `warehouse`/`warehouse-consumer`
+  # purely as a same-host performance fast-path, not a hard requirement --
+  # both sides fall back to downloading the run's snapshot from object
+  # storage (`read_staged_with_fallback`/`read_run_with_fallback`) when
+  # this volume isn't actually shared, i.e. `ingestion` is deployed on a
+  # different machine than its consumer. See
   # `docs/runbooks/independent-service-deployment.md`.
   ingestion:
     build:
@@ -232,8 +202,7 @@ services:
       # Phase 2's "Integrate Cloudflare R2 Staging" -- `upload_staged_
       # file` falls back to local MinIO when no real R2 credentials are
       # set, so the bucket (`minio-setup`) needs to exist before this
-      # service's first ingest run, same as `data-pipeline`'s own
-      # dependency on it.
+      # service's first ingest run.
       minio-setup:
         condition: service_completed_successfully
     healthcheck:
@@ -290,12 +259,10 @@ services:
         condition: service_healthy
 
   # ── Warehouse (services/waerehouse/README.md) ────────────────────────────
-  # Standalone extraction of the warehousing half (overview.md §2) --
-  # own uv project/image, not a `data-pipeline` command variant. Runs
-  # alongside `data-pipeline`'s own `warehouse-sync` below (unmodified)
-  # until this service is verified and cut over, same "extract, don't
-  # replace yet" pattern `services/ingestion` already established.
-  # Read-only on the shared `duckdb_staging` volume when it's there
+  # The real, sole warehousing implementation (overview.md §2) --
+  # `data-pipeline`'s own `warehouse-sync` this was originally extracted
+  # from is retired (its Dockerfile/compose service are gone; cutover
+  # complete). Read-only on the shared `duckdb_staging` volume when it's there
   # (`app.db.duckdb_client`'s own module docstring -- writing/appending
   # stays ingestion's job) -- falls back to downloading from object
   # storage when `ingestion` runs on a different machine and this
@@ -325,8 +292,8 @@ services:
     # Lightweight FastAPI control plane (status/storage/metrics reads) --
     # same `deploy.resources.limits`-on-plain-`compose up` mechanism
     # `train-worker`'s own comment below explains; bounds this from
-    # starving `api`/`data-pipeline` on the same host, not a real
-    # node-pool-level isolation guarantee.
+    # starving `api` on the same host, not a real node-pool-level
+    # isolation guarantee.
     deploy:
       resources:
         limits:
@@ -359,28 +326,6 @@ services:
           cpus: "1.0"
           memory: 2g
 
-  # ── Warehouse-sync consumer (overview.md §2, data-pipeline's own
-  # legacy version) ─────────────────────────────────────────────────────────
-  # The other half of the raw-landing pipeline: `data-pipeline`'s ingest
-  # tasks stage into DuckDB and publish here via RabbitMQ; this is the
-  # long-running process that reads those files back out and loads them
-  # into Postgres `raw.*`. Same image as `data-pipeline` above, mounting
-  # the same `duckdb_staging` volume so both sides see the same files —
-  # `command: worker` is the only difference.
-  warehouse-sync:
-    build:
-      context: .
-      dockerfile: infra/docker/data-pipeline.Dockerfile
-    <<: *common-env
-    command: worker
-    volumes:
-      - duckdb_staging:/app/services/data-pipeline/data/staging
-    depends_on:
-      postgres:
-        condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
-
   # ── Training-trigger consumer (TODO.md's Event-Driven Pipeline Trigger
   # for Online/Incremental Model Training) ─────────────────────────────────
   # **Training-code migration (this change)**: moved off `data-pipeline`'s
@@ -390,11 +335,12 @@ services:
   # is retired). `services/waerehouse`'s `POST /v1/dbt/build` publishes the
   # `forecasting.training.trigger` events this consumes (moved from
   # `pipeline.flows.daily_demand`, which owned `dbt build` before
-  # `waerehouse` did); `forecast-api`'s Dockerfile has no `ENTRYPOINT`
-  # (just a `CMD` running uvicorn), so this fully overrides `command:`
-  # with the CLI invocation rather than relying on an entrypoint+subcommand
-  # split the way `data-pipeline`'s image still uses for `worker`/
-  # `train-worker`.
+  # `waerehouse` did); `forecast-api`'s Dockerfile's `ENTRYPOINT` is just
+  # `tini --` (multi-stage rewrite, 2026-08-14), so `command:` below still
+  # fully replaces the default `CMD` (the uvicorn invocation) -- it just
+  # lands as `tini`'s args now instead of running unwrapped, same
+  # entrypoint+subcommand-override shape `ingestion`/`warehouse`'s own
+  # Dockerfiles already use for their worker roles.
   #
   # `deploy.resources.limits` below is item 5's "Dedicated compute/
   # hardware isolation" point, at the scale this repo's plain `docker
@@ -537,8 +483,8 @@ volumes:
   miniodata:
   promdata:
   grafana:
-  # Shared between `data-pipeline` and `warehouse-sync` — per-run DuckDB
-  # staging files (`Settings.duckdb_staging_dir`) written by the one,
+  # Shared between `ingestion` and `warehouse`/`warehouse-consumer` — per-run
+  # DuckDB staging files (`Settings.duckdb_staging_dir`) written by the one,
   # read + deleted by the other (`overview.md` §2, `pipeline.duckdb_staging`).
   duckdb_staging:
   # Rendered alertmanager.yml (envsubst output from `alertmanager-config`),

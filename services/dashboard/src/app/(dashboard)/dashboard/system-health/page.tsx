@@ -7,23 +7,20 @@
  * 2026-08-08 (root TODO.md's "make every page fully functional with
  * real data") to `fetchAllServicesHealth()` (`lib/health.ts`) -- the
  * same real `/v1/readyz` checks `operational-tasks/page.tsx`'s System
- * Diagnostics card already uses, real for all 5 services (forecast-api/
- * data-pipeline/ingestion/warehouse/iam) with real per-component
- * (database/redis/rabbitmq/model) detail and a real single-sample
- * round-trip latency per check.
+ * Diagnostics card already uses, real for 4 of the 5 services `lib/
+ * health.ts` can check (database/redis/rabbitmq/model detail, real
+ * single-sample round-trip latency per check).
  *
- * Disk/memory usage and a rolling error log have no real backend
- * anywhere in this platform (no host-metrics endpoint, no centralized
- * log aggregation -- confirmed, same gap `operational-tasks/page.tsx`'s
- * own KPI row already discloses for "System Load") -- marked
- * `IllustrativeBadge` rather than silently kept as fabricated numbers.
+ * IAM (services/iam) is no longer building, so it's filtered out of
+ * this page's grid rather than permanently reading as unhealthy --
+ * same treatment `operational-tasks/page.tsx`'s System Diagnostics
+ * card already applies. `lib/health.ts`'s `fetchAllServicesHealth`
+ * is left as-is -- `operations/` still surfaces IAM.
  */
 "use client";
 
 import { useEffect, useState } from "react";
 import {
-  AlertCircle,
-  Clock,
   RefreshCw,
   Server,
   ShieldCheck,
@@ -31,7 +28,6 @@ import {
 } from "lucide-react";
 
 import { Card } from "@/components/dashboard/card";
-import { IllustrativeBadge } from "@/components/dashboard/illustrative-badge";
 import { cn } from "@/lib/utils";
 import { fetchAllServicesHealth, type ServiceHealth } from "@/lib/health";
 
@@ -43,6 +39,7 @@ export default function AdminSystemPage() {
   function refresh() {
     setRefreshing(true);
     fetchAllServicesHealth()
+      .then((results) => results.filter((r) => r.service !== "iam"))
       .then((results) => {
         setHealth(results);
         setCheckedAt(new Date().toISOString());
@@ -117,11 +114,6 @@ export default function AdminSystemPage() {
       )}
 
       <ComponentsCard health={health} />
-
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-        <IllustrativeResourcesCard />
-        <IllustrativeErrorsCard />
-      </div>
     </div>
   );
 }
@@ -181,51 +173,6 @@ function ComponentsCard({ health }: { health: ServiceHealth[] | null }) {
           })}
         </div>
       )}
-    </Card>
-  );
-}
-
-/** No host-metrics endpoint exists on any service (same gap
- * `operational-tasks/page.tsx`'s "System Load" KPI already discloses)
- * -- an honest illustrative shape preview, not fabricated live numbers. */
-function IllustrativeResourcesCard() {
-  return (
-    <Card
-      title={
-        <span className="flex items-center gap-2">
-          <Clock className="h-4 w-4 text-amber-200" />
-          Resources
-        </span>
-      }
-      subtitle="Disk/memory usage — no host-metrics endpoint exists on any service yet."
-      badge={<IllustrativeBadge />}
-    >
-      <p className="py-6 text-center text-xs text-white/40">
-        Would show real disk/memory usage per service once a metrics endpoint exists.
-        No fabricated numbers shown in the meantime.
-      </p>
-    </Card>
-  );
-}
-
-/** No centralized log aggregation exists anywhere in this platform --
- * same honest-illustrative treatment. */
-function IllustrativeErrorsCard() {
-  return (
-    <Card
-      title={
-        <span className="flex items-center gap-2">
-          <AlertCircle className="h-4 w-4 text-amber-200" />
-          Recent errors
-        </span>
-      }
-      subtitle="Rolling error log — no centralized log aggregation exists across services yet."
-      badge={<IllustrativeBadge />}
-    >
-      <p className="py-6 text-center text-xs text-white/40">
-        Would show a real rolling error log across services once one exists.
-        Each service&apos;s own structured logs are real today, just not aggregated here.
-      </p>
     </Card>
   );
 }

@@ -16,10 +16,7 @@
  * experiments.py`) — every architecture this platform trains logs to
  * one shared MLflow experiment, so this is a real but typically
  * single-experiment list, not a per-model breakdown the old mock
- * implied. "Hyperparameter Tuning" is real now too (`POST /v1/
- * model/tune` triggers `ml/tune.py`'s real grid search; `GET /v1/
- * model/tuning-runs` lists real MLflow runs tagged `tuning=true`).
- * "Deployments" is real now too (2026-08-11): this platform's actual
+ * implied. "Deployments" is real now too (2026-08-11): this platform's actual
  * "deploy" action is `POST /v1/model/versions/{version}/promote`, so a
  * version's registry `stage` (Production/Staging) already *is* its
  * deployment status -- `GET /v1/model/versions` per architecture plus
@@ -33,7 +30,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Beaker, Play, Clock } from "lucide-react";
+import { Beaker, Clock } from "lucide-react";
 
 import { Card } from "@/components/dashboard/card";
 import { cn } from "@/lib/utils";
@@ -41,16 +38,12 @@ import {
   fetchModelVersions,
   fetchMlflowExperiments,
   fetchMlflowRuns,
-  fetchTuningRuns,
   fetchModelInfo,
-  triggerTune,
   MODEL_ARCHITECTURES,
   type ModelVersion,
   type ModelInfo,
   type MlflowExperiment,
   type MlflowRun,
-  type TuningRun,
-  type TuneTriggerResult,
 } from "@/lib/emissions";
 import { fetchTrainingRuns, formatRelativeTime, type TrainingRunLog } from "@/lib/ingestion";
 
@@ -208,53 +201,15 @@ function useDeployments() {
   return { rows, error };
 }
 
-function useTuningRuns() {
-  const [runs, setRuns] = useState<TuningRun[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [reloadKey, setReloadKey] = useState(0);
-
-  useEffect(() => {
-    let cancelled = false;
-    fetchTuningRuns(20)
-      .then((res) => {
-        if (!cancelled) setRuns(res);
-      })
-      .catch((err) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : "failed to load");
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [reloadKey]);
-
-  return { runs, error, reload: () => setReloadKey((k) => k + 1) };
-}
-
 export default function TrainingPage() {
   const { versions, error: versionsError } = useModelVersions();
   const { runs, error: runsError } = useTrainingRuns();
   const { experiments, error: experimentsError } = useMlflowExperiments();
   const { runs: mlflowRuns, error: mlflowRunsError } = useMlflowRuns(8);
-  const { runs: tuningRuns, reload: reloadTuningRuns } = useTuningRuns();
   const { info: servingModel, error: servingModelError } = useServingModel();
   const { rows: deployments, error: deploymentsError } = useDeployments();
-  const [tuneStatus, setTuneStatus] = useState<
-    { state: "idle" } | { state: "running" } | { state: "error"; message: string } | { state: "done"; result: TuneTriggerResult }
-  >({ state: "idle" });
 
-  function startTuning() {
-    setTuneStatus({ state: "running" });
-    triggerTune()
-      .then((result) => {
-        setTuneStatus({ state: "done", result });
-        reloadTuningRuns();
-      })
-      .catch((err) => {
-        setTuneStatus({ state: "error", message: err instanceof Error ? err.message : "tuning failed" });
-      });
-  }
-
-  const [tab, setTab] = useState<"jobs" | "hptune" | "experiments" | "deployments">("jobs");
+  const [tab, setTab] = useState<"jobs" | "experiments" | "deployments">("jobs");
 
   const kpis = useMemo(() => {
     const runningCount = runs?.filter((r) => r.status === "running").length ?? null;
@@ -274,7 +229,7 @@ export default function TrainingPage() {
           Model Training &amp; Experiments
         </h1>
         <p className="mt-1 text-sm text-white/60">
-          Train, tune, and track ML models. Hyperparameter search, experiment comparison, and deployment status.
+          Train and track ML models. Experiment comparison and deployment status.
         </p>
       </div>
 
@@ -293,7 +248,6 @@ export default function TrainingPage() {
       <div className="flex flex-wrap items-center gap-1 border-b border-white/5">
         {([
           { id: "jobs",        label: "Training Jobs"   },
-          { id: "hptune",      label: "Hyperparameter Tuning" },
           { id: "experiments", label: "Experiments"     },
           { id: "deployments", label: "Deployments"     },
         ] as const).map((t) => (
@@ -388,103 +342,6 @@ export default function TrainingPage() {
                       <td className="py-2 text-emerald-100 tabular-nums text-[11px]">
                         {v.metrics.test_mape != null ? `MAPE ${v.metrics.test_mape.toFixed(2)}%` : "—"}
                       </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </Card>
-        </div>
-      )}
-
-      {tab === "hptune" && (
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-          <Card>
-            <div className="mb-3 flex items-center justify-between">
-              <div>
-                <h2 className="text-base font-semibold text-white">Hyperparameter Tuning</h2>
-                <p className="text-xs text-white/50">
-                  Real grid search — <code className="rounded bg-black/30 px-1 font-mono text-lime-100">POST /v1/model/tune</code> runs
-                  3 hidden sizes × 2 learning rates (6 full trials) and returns the best config. Takes ~1 minute.
-                </p>
-              </div>
-            </div>
-            <button
-              type="button"
-              disabled={tuneStatus.state === "running"}
-              onClick={startTuning}
-              className={cn(
-                "inline-flex w-full items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-semibold",
-                tuneStatus.state === "running"
-                  ? "cursor-wait bg-emerald-200/40 text-black/60"
-                  : "bg-emerald-300 text-black hover:bg-emerald-200",
-              )}
-            >
-              <Play className="h-4 w-4" /> {tuneStatus.state === "running" ? "Running search…" : "Start Tuning"}
-            </button>
-
-            {tuneStatus.state === "error" && (
-              <p className="mt-3 text-xs text-rose-300">{tuneStatus.message}</p>
-            )}
-
-            {tuneStatus.state === "done" && (
-              <div className="mt-4 space-y-2 text-xs">
-                <p className="text-white/70">
-                  Best: hidden_size=<span className="text-emerald-100">{tuneStatus.result.best_hidden_size}</span>,
-                  {" "}lr=<span className="text-emerald-100">{tuneStatus.result.best_lr}</span>,
-                  {" "}val_mape=<span className="text-emerald-100">{tuneStatus.result.best_val_mape.toFixed(2)}%</span>
-                </p>
-                <table className="w-full text-left text-sm">
-                  <thead className="border-b border-white/5 text-[11px] uppercase tracking-wide text-white/40">
-                    <tr>
-                      <th className="py-2">Hidden</th>
-                      <th className="py-2">LR</th>
-                      <th className="py-2">Val MAPE</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-white/5 text-white/85">
-                    {tuneStatus.result.trials.map((t) => (
-                      <tr key={t.run_id}>
-                        <td className="py-1.5 text-white/60">{t.hidden_size}</td>
-                        <td className="py-1.5 text-white/60">{t.lr}</td>
-                        <td className="py-1.5 text-emerald-100 tabular-nums">{t.val_mape.toFixed(2)}%</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </Card>
-
-          <Card>
-            <div className="mb-3 flex items-center justify-between">
-              <h2 className="text-base font-semibold text-white">Hparam Search History</h2>
-            </div>
-            {tuningRuns === null ? (
-              <p className="text-sm text-white/40">Loading…</p>
-            ) : tuningRuns.length === 0 ? (
-              <p className="text-sm text-white/40">No tuning runs yet — run a search to populate this table.</p>
-            ) : (
-              <table className="w-full text-left text-sm">
-                <thead className="border-b border-white/5 text-[11px] uppercase tracking-wide text-white/40">
-                  <tr>
-                    <th className="py-2">Run</th>
-                    <th className="py-2">LR</th>
-                    <th className="py-2">Hidden</th>
-                    <th className="py-2">MAPE</th>
-                    <th className="py-2">Status</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-white/5 text-white/85">
-                  {tuningRuns.map((r) => (
-                    <tr key={r.run_id}>
-                      <td className="py-1.5 font-mono text-[11px] text-white/60">{r.run_id.slice(0, 8)}</td>
-                      <td className="py-1.5 text-white/60">{r.params.lr ?? "—"}</td>
-                      <td className="py-1.5 text-white/60">{r.params.hidden_size ?? "—"}</td>
-                      <td className="py-1.5 text-emerald-100 tabular-nums">
-                        {r.metrics.val_mape !== undefined ? `${r.metrics.val_mape.toFixed(2)}%` : "—"}
-                      </td>
-                      <td className="py-1.5 text-white/60">{r.status}</td>
                     </tr>
                   ))}
                 </tbody>

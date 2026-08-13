@@ -64,7 +64,6 @@ import {
   Loader2,
   Search,
   ShieldAlert,
-  ShieldCheck,
   Sparkles,
   TrendingUp,
   X,
@@ -116,7 +115,6 @@ const METHOD_FILTERS: Array<{ value: AnomalyMethod | "all"; label: string }> = [
   { value: "hybrid",      label: "Hybrid"            },
   { value: "statistical", label: "Statistical"       },
   { value: "ml",          label: "ML"                },
-  { value: "rule",        label: "Rule (legacy)"     },
 ];
 
 const STATUS_FILTERS: Array<{ value: AnomalyStatus | "all"; label: string }> = [
@@ -420,7 +418,7 @@ export default function AdminAnomalyDetectionPage() {
       </Card>
 
       {/* Detection methods breakdown */}
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
         <MethodCard
           label="Statistical"
           count={summary?.by_method.statistical ?? 0}
@@ -441,13 +439,6 @@ export default function AdminAnomalyDetectionPage() {
           icon={Sparkles}
           color="rose"
           blurb="Both statistical AND ML flagged the same row. Highest confidence."
-        />
-        <MethodCard
-          label="Rule (legacy)"
-          count={summary?.by_method.rule ?? 0}
-          icon={ShieldCheck}
-          color="emerald"
-          blurb="Retired 2026-08-12 -- out-of-range bounds and missing-value flagging. Historical rows only, nothing new lands here."
         />
       </div>
 

@@ -1,14 +1,11 @@
 /**
- * Dashboard topbar — sticky, with breadcrumb (left), global search
- * with ⌘K hint, and notification bell (with badge). Subtle bottom
+ * Dashboard topbar — sticky, with breadcrumb (left). Subtle bottom
  * border.
  */
 "use client";
 
-import { Bell, Search } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useState } from "react";
 
 import { cn } from "@/lib/utils";
 
@@ -46,19 +43,6 @@ function buildCrumbs(pathname: string): Crumb[] {
 export function Topbar() {
   const pathname = usePathname() ?? "";
   const crumbs = buildCrumbs(pathname);
-  const [q, setQ] = useState("");
-
-  // ⌘K to focus search
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
-        e.preventDefault();
-        document.getElementById("dash-search")?.focus();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
 
   return (
     <header className="sticky top-0 z-20 border-b border-white/5 bg-[#050a08]/80 backdrop-blur-xl">
@@ -79,34 +63,6 @@ export function Topbar() {
 
         {/* Spacer (mobile) */}
         <div className="flex-1 md:hidden" />
-
-        {/* Search */}
-        <div className="relative hidden w-72 md:block">
-          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-white/40" />
-          <input
-            id="dash-search"
-            type="text"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="Search anything…"
-            className="w-full rounded-full border border-white/10 bg-white/5 py-1.5 pl-9 pr-12 text-sm text-white placeholder:text-white/40 focus:border-emerald-200/50 focus:outline-none"
-          />
-          <kbd className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 rounded border border-white/10 bg-white/5 px-1.5 py-0.5 text-[10px] text-white/50">
-            ⌘K
-          </kbd>
-        </div>
-
-        {/* Notification bell */}
-        <Link
-          href="/dashboard/system-health"
-          className="relative grid h-9 w-9 place-items-center rounded-full border border-white/10 bg-white/5 text-white/70 transition-colors hover:text-white"
-          aria-label="Notifications"
-        >
-          <Bell className="h-4 w-4" />
-          <span className="absolute right-1 top-1 grid h-4 w-4 place-items-center rounded-full bg-rose-500 text-[9px] font-bold text-white">
-            3
-          </span>
-        </Link>
       </div>
     </header>
   );

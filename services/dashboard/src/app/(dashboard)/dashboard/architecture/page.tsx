@@ -6,7 +6,7 @@
  * looking at. Splits the architecture into 5 sections (one per tab):
  *
  *   1. Pipeline Overview  — 4-stage horizontal flow (Ingest → Warehouse → Model → Frontend)
- *   2. Anomaly Detection  — hybrid rule + ML approach, flag-not-remove
+ *   2. Anomaly Detection  — statistical + ML approach, flag-not-remove
  *   3. ML Lifecycle       — LSTM + TFT + TimesFM, conformal calibration, MLflow
  *   4. Storage Strategy   — DuckDB staging, raw.* + dbt, PostgreSQL warehouse
  *   5. Frontend & API     — Next.js 14, REST decoupling, visualisation
@@ -280,74 +280,64 @@ function AnomalyTab() {
   return (
     <div className="space-y-6">
       <Card
-        title="Hybrid anomaly detection"
-        subtitle="Rule-based checks + ML z-score. Flag, never remove."
-        badge={<span className="rounded-md border border-amber-300/30 bg-amber-300/10 px-2 py-0.5 text-[10px] text-amber-200">CRITICAL DESIGN CHOICE</span>}
+        title="Statistical + ML anomaly detection"
+        subtitle="Two independent signals, worse-of-the-two wins. Flag, never remove."
       >
         <div className="space-y-3 text-[13px] text-white/75">
           <p>
             Energy systems occasionally produce unusual readings. Some are caused by sensor failures, communication issues, or incomplete API responses. Others represent genuine operational events — sudden demand spikes, unexpected renewable generation changes.
           </p>
           <p>
-            The platform distinguishes these two cases with a <span className="font-medium text-white">hybrid approach</span> that combines <span className="font-medium text-white">rule-based checks</span> with <span className="font-medium text-white">ML-based z-score detection</span>. Every ingested record is scored, and the score plus an explanation flows through to downstream systems.
+            The platform scores every ingested record with two independent signals — a <span className="font-medium text-white">statistical</span> per-batch z-score and an <span className="font-medium text-white">ML</span> IsolationForest — and keeps whichever signal scored worse for that row. A row that clears both at once is the highest-confidence case (<code className="rounded bg-black/30 px-1 font-mono text-[11px] text-lime-100">hybrid</code>). The score plus an explanation flows through to downstream systems.
+          </p>
+          <p className="text-white/55">
+            <span className="font-medium text-amber-200">Rule-based checks (out-of-range bounds, missing-value flagging) were retired 2026-08-12.</span> Live-observed cost: the missing-value check alone accounted for 121K/150K+ flagged rows, the large majority structurally expected rather than anomalous (e.g. WEM only publishes <code className="rounded bg-black/30 px-1 font-mono text-[11px] text-lime-100">price_mwh</code> on the :00/:30 marks, so 5/6 of every WEM batch was flagged on a column that was never going to have a value). Historical rows flagged under that check are kept as-is; nothing new lands there going forward.
           </p>
         </div>
       </Card>
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <Card title="Rule-based checks" subtitle="Fast, deterministic, transparent.">
+        <Card title="Statistical checks" subtitle="Per-batch z-score, self-contained.">
           <div className="space-y-2">
             <div className="rounded-lg border border-white/10 bg-white/[0.02] p-3">
-              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-white/50">Range checks</div>
+              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-white/50">Per-batch z-score</div>
               <p className="text-[12px] text-white/70">
-                Demand &lt; 0 MW or &gt; 50,000 MW (NEM total) is rejected at the edge.
+                Each numeric column (demand, price, temperature, wind speed…) is scored against its own mean/std within the current fetch — no historical baseline query, no trained model artifact. Records with z &gt; 4.0 are candidates.
               </p>
             </div>
             <div className="rounded-lg border border-white/10 bg-white/[0.02] p-3">
-              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-white/50">Schema checks</div>
+              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-white/50">Lightweight, local</div>
               <p className="text-[12px] text-white/70">
-                Missing required fields, wrong types, malformed timestamps.
+                Deliberately cheap and self-contained — complementary to the ML signal's actual trained model, not a replacement for it.
               </p>
             </div>
             <div className="rounded-lg border border-white/10 bg-white/[0.02] p-3">
-              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-white/50">Completeness</div>
+              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-white/50">High-confidence gate</div>
               <p className="text-[12px] text-white/70">
-                Generation mix must sum to within 5% of total demand. Detects missing fuel types.
-              </p>
-            </div>
-            <div className="rounded-lg border border-white/10 bg-white/[0.02] p-3">
-              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-white/50">Freshness</div>
-              <p className="text-[12px] text-white/70">
-                Data older than 3× the source's normal cadence is flagged as stale.
+                Clearing z &gt; 4.0 is necessary but not sufficient — the winning signal's combined score must also exceed 0.98 to actually get persisted.
               </p>
             </div>
           </div>
         </Card>
 
-        <Card title="ML-based detection" subtitle="Z-score over a rolling window.">
+        <Card title="ML-based detection" subtitle="Per-source IsolationForest.">
           <div className="space-y-2">
             <div className="rounded-lg border border-white/10 bg-white/[0.02] p-3">
-              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-white/50">Per-metric z-score</div>
+              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-white/50">Trained per source</div>
               <p className="text-[12px] text-white/70">
-                Each metric (demand, temperature, wind speed) gets its own rolling median + std over the last 7 days. Records with z &gt; 3 are flagged.
+                A scikit-learn <code className="rounded bg-black/30 px-1 font-mono text-[11px] text-lime-100">IsolationForest</code> per ingest source (e.g. <code className="rounded bg-black/30 px-1 font-mono text-[11px] text-lime-100">aemo_nem</code>, <code className="rounded bg-black/30 px-1 font-mono text-[11px] text-lime-100">bom</code>), fit against that source's accumulated DuckDB staging history over the same numeric columns the statistical check scans.
               </p>
             </div>
             <div className="rounded-lg border border-white/10 bg-white/[0.02] p-3">
-              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-white/50">Cross-source</div>
+              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-white/50">Manual retraining</div>
               <p className="text-[12px] text-white/70">
-                AEMO SCADA values are cross-validated against OpenElectricity aggregates. Discrepancy &gt; 10% is flagged.
+                Retrained via <code className="rounded bg-black/30 px-1 font-mono text-[11px] text-lime-100">ecolens-ingestion train-anomaly-model &lt;source&gt;</code>, not on an automatic schedule — an operator decides when. A source with no model yet just runs on the statistical signal alone (expected, not an error).
               </p>
             </div>
             <div className="rounded-lg border border-white/10 bg-white/[0.02] p-3">
-              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-white/50">Spatial sanity</div>
+              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-white/50">Persisted to R2</div>
               <p className="text-[12px] text-white/70">
-                Weather readings compared across neighboring BoM stations. An outlier against the local median is flagged.
-              </p>
-            </div>
-            <div className="rounded-lg border border-white/10 bg-white/[0.02] p-3">
-              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-white/50">Forecast residual</div>
-              <p className="text-[12px] text-white/70">
-                If actual demand is more than 3× the prediction residual (from the conformal calibration), it's flagged for review.
+                Model artifacts (<code className="rounded bg-black/30 px-1 font-mono text-[11px] text-lime-100">models/anomaly/{"{source}"}.joblib</code>) live in Cloudflare R2, same as every other artifact this platform produces.
               </p>
             </div>
           </div>
@@ -379,25 +369,24 @@ function AnomalyTab() {
           </div>
         </div>
         <div className="mt-4 rounded-lg border border-white/10 bg-white/[0.02] p-3">
-          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-white/50">Anomaly output structure</div>
+          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-white/50">Anomaly output structure (real `meta.anomalies` row shape)</div>
           <pre className="overflow-x-auto rounded border border-white/10 bg-black/40 p-3 font-mono text-[11px] text-emerald-100">{`{
-  "record_id":   "rec-1730000000-abc12",
-  "anomaly_score": 0.87,
-  "is_anomaly":    true,
-  "rules_passed":  ["range", "schema", "completeness"],
-  "rules_failed":  ["freshness"],
-  "ml_signals":    [
-    { "kind": "z_score",  "metric": "demand_mw",  "value": 3.4 },
-    { "kind": "spatial",  "metric": "temp_c",     "value": 5.2 }
-  ],
-  "explanation":   "Demand 12,400 MW is 3.4σ above the 7-day rolling median (8,200 MW). Neighboring regions show normal load. Likely genuine heatwave peak.",
-  "flagged_at":    "2024-06-01T10:00:00.123Z",
-  "downstream": {
-    "included_in_warehouse": true,
-    "included_in_training":  false,
-    "user_visible":          true
-  }
+  "source":            "aemo_nem",
+  "anomaly_score":     0.99,
+  "anomaly_reason":    "statistical_outlier:demand_mw(z=8.1)",
+  "metric":            "demand_mw",
+  "value":             12400.0,
+  "z_score":           8.1,
+  "expected_low":      4200.0,
+  "expected_high":     8600.0,
+  "rule_based_score":  null,
+  "statistical_score": 0.99,
+  "ml_score":          null,
+  "row_snapshot":      { "...": "every column of the flagged row" }
 }`}</pre>
+          <p className="mt-2 text-[11px] text-white/50">
+            <code className="rounded bg-black/30 px-1 font-mono text-[11px] text-lime-100">rule_based_score</code> is always <code className="rounded bg-black/30 px-1 font-mono text-[11px] text-lime-100">null</code> on any row detected today — the column stays on real historical rows from before the 2026-08-12 retirement, never populated on a new one. <code className="rounded bg-black/30 px-1 font-mono text-[11px] text-lime-100">statistical_score</code>/<code className="rounded bg-black/30 px-1 font-mono text-[11px] text-lime-100">ml_score</code> record each signal's own score independently (either can be <code className="rounded bg-black/30 px-1 font-mono text-[11px] text-lime-100">null</code> if that signal didn't fire) — a row where both fire is the <code className="rounded bg-black/30 px-1 font-mono text-[11px] text-lime-100">hybrid</code> case.
+          </p>
         </div>
       </Card>
     </div>
@@ -779,7 +768,7 @@ function FrontendTab() {
               <Cpu className="h-4 w-4" /> Backend services
             </div>
             <p className="text-[12px] text-white/65">
-              6 services: <Code>forecast-api</Code>, <Code>data-pipeline</Code>, <Code>iam-service</Code>, <Code>notification-service</Code>, <Code>reporting-service</Code>, plus the dashboard's Next.js BFF. Each owns its own data and is independently deployable.
+              4 services: <Code>forecast-api</Code>, <Code>ingestion</Code>, <Code>warehouse</Code>, <Code>observability</Code>, plus the dashboard's Next.js BFF. Each owns its own data and is independently deployable.
             </p>
             <div className="mt-2 grid grid-cols-2 gap-1.5 text-[11px]">
               <div className="rounded border border-sky-400/20 bg-sky-500/[0.04] px-2 py-1">
@@ -787,16 +776,16 @@ function FrontendTab() {
                 <div className="text-white/55">port 8000</div>
               </div>
               <div className="rounded border border-purple-400/20 bg-purple-500/[0.04] px-2 py-1">
-                <span className="text-purple-200">data-pipeline</span>
-                <div className="text-white/55">Prefect headless</div>
-              </div>
-              <div className="rounded border border-emerald-300/20 bg-emerald-300/[0.04] px-2 py-1">
-                <span className="text-emerald-100">iam-service</span>
-                <div className="text-white/55">port 8001</div>
+                <span className="text-purple-200">ingestion</span>
+                <div className="text-white/55">port 8003</div>
               </div>
               <div className="rounded border border-amber-300/20 bg-amber-500/[0.04] px-2 py-1">
-                <span className="text-amber-200">reporting</span>
-                <div className="text-white/55">port 8003</div>
+                <span className="text-amber-200">warehouse</span>
+                <div className="text-white/55">port 8004</div>
+              </div>
+              <div className="rounded border border-emerald-300/20 bg-emerald-300/[0.04] px-2 py-1">
+                <span className="text-emerald-100">observability</span>
+                <div className="text-white/55">Grafana :3002</div>
               </div>
             </div>
           </div>

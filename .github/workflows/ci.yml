@@ -1,34 +1,5 @@
 name: CI
 
-# Runs the checks this repo's own tooling already defines and passes
-# locally (`uv run ruff check .`, `uv run mypy ...`, `uv run pytest ...`)
-# for both services — not `make lint`/`make test` verbatim, because `make
-# lint` also runs `ruff format --check .` and `bandit`, neither of which
-# currently pass repo-wide (`ruff format --check .` alone flags 24 files,
-# none touched by the passes that added this workflow or forecast-api) —
-# enforcing either here would make CI red on unrelated existing code, not
-# on anything a given change actually touches. Deliberately left out
-# rather than silently "fixed" by reformatting files outside scope; a
-# follow-up pass should run `uv run ruff format .` + resolve `bandit`'s
-# findings once, then switch this workflow to `make lint`/`make test`
-# instead of duplicating their command list here.
-#
-# forecast-api and services/waerehouse are each their own independent
-# `uv` project (own venv/lockfile, not a member of the root workspace) —
-# both restructured packages are named `app`, so sharing one workspace
-# venv would collide them. Their steps use `uv run --directory
-# services/<name>` rather than a root workspace sync. (`services/
-# ingestion` is the same shape but isn't wired into this workflow yet —
-# a pre-existing gap, not something this change touches.) `services/
-# data-pipeline`'s own lint/test steps were removed 2026-08-08 -- that
-# service no longer exists on disk (decommissioned in favor of
-# ingestion/waerehouse/forecast-api); its history is still in git if
-# ever needed (commit `6d0b5cb`).
-#
-# `warehouse-dbt` is a separate job from `lint`/`test` (README Phase 5's
-# "execute dbt test runs against an ephemeral test database") — it needs
-# a real Postgres service container to run `dbt seed`/`run`/`test`
-# against, which the other two jobs have no reason to pay for.
 
 on:
   push:

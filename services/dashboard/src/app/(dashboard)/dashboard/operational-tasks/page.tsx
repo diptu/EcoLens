@@ -322,8 +322,8 @@ export default function OperationalTasksPage() {
   // IAM (services/iam) is no longer building, so it's filtered out of
   // this page's grid + "Check System Health" result rather than
   // permanently reading as unhealthy. `lib/health.ts`'s
-  // `fetchAllServicesHealth` is left as-is -- system-health/ and
-  // operations/ still surface IAM.
+  // `fetchAllServicesHealth` is left as-is -- system-health/ now applies
+  // this same filter too; operations/ still surfaces IAM.
   const fetchOperationalServicesHealth = () =>
     fetchAllServicesHealth().then((results) => results.filter((r) => r.service !== "iam"));
 

@@ -21,9 +21,7 @@ function makeForecast(points: Forecast["points"]): Forecast {
     asOf: "2026-07-22T00:00:00Z",
     generatedAt: "2026-07-22T00:00:00Z",
     model: "ecolens_demand_lstm@production",
-    modelVersion: 1,
     intervalMinutes: 30,
-    source: "api",
     points,
   };
 }

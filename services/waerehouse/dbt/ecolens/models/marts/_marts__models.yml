@@ -1,0 +1,148 @@
+version: 2
+
+models:
+  - name: fct_energy_demand
+    description: Demand + weather + lag/rolling features, one row per (ts, region).
+    columns:
+      - name: ts
+        tests: [not_null]
+      - name: region
+        tests: [not_null]
+      - name: demand_mw
+        tests: [not_null]
+      - name: renewable_mw_source
+        description: >
+          'provider' / 'derived' / null — see int_demand_with_weather's
+          own column doc (TODO.md Phase 2). Tested there, not duplicated
+          here.
+      - name: coal_mw
+        description: >
+          Generation-mix bucket for the multi-task forecast model's
+          generation head (4 named buckets + other_mw catch-all — see
+          int_demand_with_weather's own column doc). Null only when
+          total_generation_mw itself is null for that row.
+      - name: gas_mw
+      - name: wind_mw
+      - name: solar_mw
+        description: solar_utility_mw + solar_rooftop_mw, summed.
+      - name: other_mw
+        description: >
+          hydro + biomass + distillate + pumped_hydro + battery_discharge
+          — everything real generation that isn't coal/gas/wind/solar.
+          Sum-within-total bound tested in
+          assert_generation_buckets_within_total.sql, not duplicated here.
+      - name: is_anomalous
+        description: >
+          True if services/ingestion's hybrid detector flagged this
+          (ts, region)'s demand reading (meta.anomalies, joined via
+          int_anomaly_by_demand — TODO.md Phase 3). Never filtered out —
+          flagged rows stay in this mart, just labeled.
+        tests: [not_null]
+      - name: anomaly_reason
+        tests:
+          - not_null:
+              config:
+                where: "is_anomalous"
+
+  - name: fct_emissions_5min
+    description: Row-level carbon intensity + emissions, one row per (ts, network_code, region).
+    columns:
+      - name: ts
+        tests: [not_null]
+      - name: region
+        tests: [not_null]
+      - name: intensity_kgco2e_per_mwh
+        description: Null when total_generation_mwh is 0/null for that row — nothing to weight.
+      - name: is_anomalous
+        description: >
+          True if services/ingestion's hybrid detector flagged the
+          openelectricity_mix reading behind this row (meta.anomalies,
+          joined via int_anomaly_by_mix_row, row-grain — TODO.md's "prod
+          grade" pass, extending Phase 3 past its original 2 marts).
+        tests: [not_null]
+      - name: anomaly_reason
+        tests:
+          - not_null:
+              config:
+                where: "is_anomalous"
+
+  - name: fct_carbon_intensity
+    description: Hourly generation-weighted carbon intensity per region.
+    columns:
+      - name: hour
+        tests: [not_null]
+      - name: region
+        tests: [not_null]
+      - name: is_anomalous
+        description: >
+          True if services/ingestion's hybrid detector flagged the
+          openelectricity_mix reading behind this (hour, network_code,
+          region) (meta.anomalies, joined via int_anomaly_by_mix, same
+          hourly rollup fct_generation_mix uses — TODO.md's "prod grade"
+          pass, extending Phase 3 past its original 2 marts).
+        tests: [not_null]
+      - name: anomaly_reason
+        tests:
+          - not_null:
+              config:
+                where: "is_anomalous"
+
+  - name: fct_generation_mix
+    description: >
+      Hourly generation + emissions by fuel type, per region — the
+      per-fuel detail fct_carbon_intensity sums away. Backs
+      `GET /v1/generation-mix` and the Executive Dashboard's
+      "Emissions by Source" donut.
+    columns:
+      - name: hour
+        tests: [not_null]
+      - name: region
+        tests: [not_null]
+      - name: fuel_type
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('emissions_factors')
+                field: fuel_type
+      - name: is_anomalous
+        description: >
+          True if services/ingestion's hybrid detector flagged the
+          openelectricity_mix reading behind this (hour, network_code,
+          region) (meta.anomalies, joined via int_anomaly_by_mix —
+          TODO.md Phase 3). Shared across every fuel_type row for that
+          hour — the flag is on the mix reading, not one fuel in
+          isolation.
+        tests: [not_null]
+      - name: anomaly_reason
+        tests:
+          - not_null:
+              config:
+                where: "is_anomalous"
+
+  - name: dim_energy_mix
+    description: One row per fuel type — emissions factor + renewable/fossil/storage classification.
+    columns:
+      - name: fuel_type
+        tests: [not_null, unique]
+      - name: intensity_kgco2e_per_mwh
+        tests: [not_null]
+      - name: category
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["renewable", "fossil", "storage", "interconnector"]
+
+  - name: dim_facility
+    description: >
+      Region/network pseudo-facility dimension — see the model's own
+      header comment for why this isn't true per-generator NGER facility
+      data.
+    columns:
+      - name: region
+        tests: [not_null, unique]
+      - name: grain
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["region"]

@@ -1,0 +1,134 @@
+name: CI
+
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Sync root dev tools
+        run: uv sync
+
+      - name: Sync forecast-api (independent project)
+        run: uv sync --directory services/forecast-api
+
+      - name: Sync warehouse (independent project)
+        run: uv sync --directory services/waerehouse
+
+      - name: ruff check (forecast-api)
+        run: uv run --directory services/forecast-api ruff check .
+
+      - name: ruff check (warehouse)
+        run: uv run --directory services/waerehouse ruff check .
+
+      - name: mypy (forecast-api)
+        run: uv run --directory services/forecast-api mypy app
+
+      - name: mypy (warehouse)
+        run: uv run --directory services/waerehouse mypy app
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Sync forecast-api (independent project)
+        run: uv sync --directory services/forecast-api
+
+      - name: Sync warehouse (independent project)
+        run: uv sync --directory services/waerehouse
+
+      - name: pytest (forecast-api)
+        run: uv run --directory services/forecast-api pytest -q
+
+      - name: pytest (warehouse)
+        run: uv run --directory services/waerehouse pytest -q
+
+  warehouse-dbt:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ecolens
+          POSTGRES_PASSWORD: ecolens
+          POSTGRES_DB: ecolens
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql+asyncpg://ecolens:ecolens@localhost:5432/ecolens
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Sync warehouse (independent project)
+        run: uv sync --directory services/waerehouse
+
+      - name: Apply raw.* schema migrations
+        run: |
+          sudo apt-get update && sudo apt-get install -y postgresql-client
+          ENV_FILE=/dev/null services/waerehouse/scripts/apply-migrations.sh
+
+      - name: dbt seed
+        run: uv run --directory services/waerehouse ecolens-warehouse dbt seed
+
+      - name: dbt run
+        run: uv run --directory services/waerehouse ecolens-warehouse dbt run
+
+      # Re-run so the 4 incremental fct_* marts (TODO.md Phase 1) actually
+      # exercise their `is_incremental()` branch at least once -- on the
+      # first run above the relations don't exist yet, so that Jinja
+      # block never executes and a syntax/logic error in it would
+      # otherwise pass CI silently.
+      - name: dbt run (second pass, exercises incremental path)
+        run: uv run --directory services/waerehouse ecolens-warehouse dbt run
+
+      - name: dbt test
+        run: uv run --directory services/waerehouse ecolens-warehouse dbt test
+
+      # README Phase 4's "Automated Documentation" -- `dbt docs generate`
+      # needs a real `dbt run`/`manifest.json` to describe, so this runs
+      # after the real seed/run/test above, not standalone. Uploaded as a
+      # build artifact (downloadable from the Actions run, `actions/
+      # download-artifact` or the UI) rather than published anywhere
+      # public -- there's no static-hosting target in this repo to push
+      # it to yet, and a self-documenting data dictionary that's one
+      # click away from every CI run already closes the real gap (no
+      # `dbt docs generate` had ever been run/documented anywhere before
+      # this). `dbt docs serve` (a local dev server over these same
+      # generated files) is documented in `services/waerehouse/README.md`
+      # for local use instead.
+      - name: dbt docs generate
+        run: uv run --directory services/waerehouse ecolens-warehouse dbt docs generate
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dbt-docs
+          path: services/waerehouse/dbt/ecolens/target/
+          retention-days: 30

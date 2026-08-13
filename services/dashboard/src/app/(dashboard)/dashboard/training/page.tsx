@@ -1,0 +1,529 @@
+/**
+ * /dashboard/training — Model Training & Experiments (ML Engineers)
+ *
+ * Focused view on training jobs, hyperparameter tuning, and experiment
+ * tracking. Distinct from /operational-tasks (which handles ingestion,
+ * warehouse refresh, and system maintenance).
+ *
+ * This page used to be this app's own documented "known precedent
+ * violation" of its no-silently-fabricated-dashboards rule
+ * (`IllustrativeBadge`'s own docstring named it directly) — every tab
+ * read from hardcoded mock generators with no real backend at all.
+ * Fixed incrementally: "Training Jobs"/"Model Registry" (`GET /v1/
+ * model/versions`, `GET /v1/model/training-runs`) were real first;
+ * "Experiments" is real now too (`GET /v1/model/experiments`, `GET
+ * /v1/model/mlflow-runs` — new endpoints, `service/mlops/
+ * experiments.py`) — every architecture this platform trains logs to
+ * one shared MLflow experiment, so this is a real but typically
+ * single-experiment list, not a per-model breakdown the old mock
+ * implied. "Deployments" is real now too (2026-08-11): this platform's actual
+ * "deploy" action is `POST /v1/model/versions/{version}/promote`, so a
+ * version's registry `stage` (Production/Staging) already *is* its
+ * deployment status -- `GET /v1/model/versions` per architecture plus
+ * `GET /v1/model` (which version this process has actually loaded)
+ * needed no new endpoint, just honest framing instead of the old
+ * fabricated replica/CPU/traffic mock. The Feature Store tab is gone
+ * outright (not illustrative-marked) -- this platform has no
+ * feature-group store, registered or otherwise, so there was no real
+ * concept left to honestly represent even as a placeholder.
+ */
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import { Beaker, Clock } from "lucide-react";
+
+import { Card } from "@/components/dashboard/card";
+import { cn } from "@/lib/utils";
+import {
+  fetchModelVersions,
+  fetchMlflowExperiments,
+  fetchMlflowRuns,
+  fetchModelInfo,
+  MODEL_ARCHITECTURES,
+  type ModelVersion,
+  type ModelInfo,
+  type MlflowExperiment,
+  type MlflowRun,
+} from "@/lib/emissions";
+import { fetchTrainingRuns, formatRelativeTime, type TrainingRunLog } from "@/lib/ingestion";
+
+function useModelVersions() {
+  const [versions, setVersions] = useState<ModelVersion[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchModelVersions(MODEL_ARCHITECTURES[0].modelName)
+      .then((res) => {
+        if (!cancelled) setVersions(res.data);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : "failed to load");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return { versions, error };
+}
+
+function useTrainingRuns() {
+  const [runs, setRuns] = useState<TrainingRunLog[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchTrainingRuns(20)
+      .then((res) => {
+        if (!cancelled) setRuns(res.data);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : "failed to load");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return { runs, error };
+}
+
+function useMlflowExperiments() {
+  const [experiments, setExperiments] = useState<MlflowExperiment[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchMlflowExperiments()
+      .then((res) => {
+        if (!cancelled) setExperiments(res);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : "failed to load");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return { experiments, error };
+}
+
+function useMlflowRuns(limit: number) {
+  const [runs, setRuns] = useState<MlflowRun[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchMlflowRuns(limit)
+      .then((res) => {
+        if (!cancelled) setRuns(res);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : "failed to load");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [limit]);
+
+  return { runs, error };
+}
+
+function useServingModel() {
+  const [info, setInfo] = useState<ModelInfo | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchModelInfo()
+      .then((res) => {
+        if (!cancelled) setInfo(res);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : "failed to load");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return { info, error };
+}
+
+type DeployedVersion = {
+  architecture: string;
+  modelName: string;
+  version: string;
+  stage: string;
+  created_at: string;
+  metrics: Record<string, number>;
+};
+
+/** Real "deployments": this platform's own deploy action is `POST
+ * /v1/model/versions/{version}/promote`, so a version's registry
+ * `stage` already tells you whether (and where) it's deployed --
+ * Production and Staging both count, Archived/None don't. Fetches
+ * every registered architecture's versions and keeps only the
+ * deployed ones. */
+function useDeployments() {
+  const [rows, setRows] = useState<DeployedVersion[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all(MODEL_ARCHITECTURES.map((a) => fetchModelVersions(a.modelName)))
+      .then((results) => {
+        if (cancelled) return;
+        const deployed = results.flatMap((res, i) =>
+          res.data
+            .filter((v) => v.stage === "Production" || v.stage === "Staging")
+            .map((v) => ({
+              architecture: MODEL_ARCHITECTURES[i].label,
+              modelName: MODEL_ARCHITECTURES[i].modelName,
+              version: v.version,
+              stage: v.stage,
+              created_at: v.created_at,
+              metrics: v.metrics,
+            })),
+        );
+        setRows(deployed);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : "failed to load");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return { rows, error };
+}
+
+export default function TrainingPage() {
+  const { versions, error: versionsError } = useModelVersions();
+  const { runs, error: runsError } = useTrainingRuns();
+  const { experiments, error: experimentsError } = useMlflowExperiments();
+  const { runs: mlflowRuns, error: mlflowRunsError } = useMlflowRuns(8);
+  const { info: servingModel, error: servingModelError } = useServingModel();
+  const { rows: deployments, error: deploymentsError } = useDeployments();
+
+  const [tab, setTab] = useState<"jobs" | "experiments" | "deployments">("jobs");
+
+  const kpis = useMemo(() => {
+    const runningCount = runs?.filter((r) => r.status === "running").length ?? null;
+    const lastRun = runs?.[0];
+    return [
+      { label: "Model Versions", value: versions ? String(versions.length) : "…", sub: versions ? `${versions.filter((v) => v.stage === "Production").length} production` : undefined },
+      { label: "Active Training Jobs", value: runningCount != null ? String(runningCount) : "…", sub: undefined },
+      { label: "Last Train", value: lastRun ? formatRelativeTime(lastRun.started_at) : (runs ? "—" : "…"), sub: lastRun?.model_name },
+    ];
+  }, [versions, runs]);
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="flex items-center gap-2 text-2xl font-bold text-white">
+          <Beaker className="h-6 w-6 text-emerald-100" />
+          Model Training &amp; Experiments
+        </h1>
+        <p className="mt-1 text-sm text-white/60">
+          Train and track ML models. Experiment comparison and deployment status.
+        </p>
+      </div>
+
+      {/* KPIs — only the ones with a real source (GET /v1/model/versions, GET /v1/model/training-runs) */}
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+        {kpis.map((k) => (
+          <div key={k.label} className="rounded-xl border border-white/10 bg-white/[0.02] p-4">
+            <h3 className="text-xs font-medium uppercase tracking-wide text-white/60">{k.label}</h3>
+            <div className="mt-1.5 text-2xl font-bold text-white">{k.value}</div>
+            {k.sub && <p className="mt-1 text-[11px] text-white/50">{k.sub}</p>}
+          </div>
+        ))}
+      </div>
+
+      {/* Tabs */}
+      <div className="flex flex-wrap items-center gap-1 border-b border-white/5">
+        {([
+          { id: "jobs",        label: "Training Jobs"   },
+          { id: "experiments", label: "Experiments"     },
+          { id: "deployments", label: "Deployments"     },
+        ] as const).map((t) => (
+          <button
+            key={t.id}
+            onClick={() => setTab(t.id)}
+            className={cn(
+              "border-b-2 px-3 py-1.5 text-xs font-medium transition-colors",
+              tab === t.id ? "border-emerald-200 text-emerald-100" : "border-transparent text-white/60 hover:text-white",
+            )}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {tab === "jobs" && (
+        <div className="space-y-4">
+          <Card>
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="text-base font-semibold text-white">Recent Training Runs</h2>
+              <span className="text-[11px] text-white/40">GET /v1/model/training-runs (forecast-api)</span>
+            </div>
+            {runsError ? (
+              <p className="py-6 text-center text-sm text-white/40">Couldn&apos;t load training runs ({runsError}).</p>
+            ) : runs === null ? (
+              <p className="py-6 text-center text-sm text-white/40">Loading…</p>
+            ) : runs.length === 0 ? (
+              <p className="text-sm text-white/55">No training runs yet.</p>
+            ) : (
+              <table className="w-full text-left text-sm">
+                <thead className="border-b border-white/5 text-[11px] uppercase tracking-wide text-white/40">
+                  <tr>
+                    <th className="py-2">Run ID</th>
+                    <th className="py-2">Model</th>
+                    <th className="py-2">Triggered By</th>
+                    <th className="py-2">Started</th>
+                    <th className="py-2">Status</th>
+                    <th className="py-2">Version</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {runs.map((r) => (
+                    <tr key={r.id} className="text-white/85">
+                      <td className="py-2 font-mono text-[11px] text-white/60">{r.id.slice(0, 8)}</td>
+                      <td className="py-2">{r.model_name}</td>
+                      <td className="py-2 text-white/60">{r.triggered_by}</td>
+                      <td className="py-2 text-white/60">{formatRelativeTime(r.started_at)}</td>
+                      <td className="py-2">
+                        <span className={cn("rounded-md border px-2 py-0.5 text-[11px] font-medium",
+                          r.status === "success" ? "border-emerald-200/40 bg-emerald-200/10 text-emerald-100" :
+                          r.status === "running"  ? "border-cyan-300/40 bg-cyan-300/10 text-cyan-200" :
+                                                    "border-rose-300/40 bg-rose-300/10 text-rose-200"
+                        )}>{r.status}</span>
+                      </td>
+                      <td className="py-2 font-mono text-[11px] text-purple-200">{r.model_version ?? "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </Card>
+
+          <Card>
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="text-base font-semibold text-white">Model Registry</h2>
+              <span className="text-[11px] text-white/40">GET /v1/model/versions (forecast-api)</span>
+            </div>
+            {versionsError ? (
+              <p className="py-6 text-center text-sm text-white/40">Couldn&apos;t load model versions ({versionsError}).</p>
+            ) : versions === null ? (
+              <p className="py-6 text-center text-sm text-white/40">Loading…</p>
+            ) : versions.length === 0 ? (
+              <p className="text-sm text-white/55">No registered versions yet.</p>
+            ) : (
+              <table className="w-full text-left text-sm">
+                <thead className="border-b border-white/5 text-[11px] uppercase tracking-wide text-white/40">
+                  <tr><th className="py-2">Version</th><th className="py-2">Stage</th><th className="py-2">Created</th><th className="py-2">Metrics</th></tr>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {versions.map((v) => (
+                    <tr key={v.version} className="text-white/85">
+                      <td className="py-2"><span className="rounded bg-purple-300/15 px-1.5 py-0.5 font-mono text-[11px] text-purple-200">v{v.version}</span></td>
+                      <td className="py-2">
+                        <span className={cn("rounded-md border px-2 py-0.5 text-[11px] font-medium",
+                          v.stage === "Production" ? "border-emerald-200/40 bg-emerald-200/10 text-emerald-100" :
+                          v.stage === "Staging"    ? "border-amber-300/40 bg-amber-300/10 text-amber-200" :
+                                                      "border-white/10 bg-white/5 text-white/60"
+                        )}>{v.stage}</span>
+                      </td>
+                      <td className="py-2 text-white/60">{formatRelativeTime(v.created_at)}</td>
+                      <td className="py-2 text-emerald-100 tabular-nums text-[11px]">
+                        {v.metrics.test_mape != null ? `MAPE ${v.metrics.test_mape.toFixed(2)}%` : "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </Card>
+        </div>
+      )}
+
+      {tab === "experiments" && (
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <Card>
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="text-base font-semibold text-white">MLflow Experiments</h2>
+              <span className="text-[11px] text-white/40">GET /v1/model/experiments (forecast-api)</span>
+            </div>
+            {experimentsError ? (
+              <p className="py-6 text-center text-sm text-white/40">Couldn&apos;t load experiments ({experimentsError}).</p>
+            ) : experiments === null ? (
+              <p className="py-6 text-center text-sm text-white/40">Loading…</p>
+            ) : experiments.length === 0 ? (
+              <p className="text-sm text-white/55">No MLflow experiments yet.</p>
+            ) : (
+              <ul className="space-y-1.5 text-sm">
+                {experiments.map((e) => (
+                  <li key={e.experiment_id} className="rounded-md border border-white/5 bg-white/[0.02] p-3">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <div className="text-white/85 font-medium">{e.name}</div>
+                        <div className="text-[11px] text-white/50">
+                          Every architecture trained here logs to this experiment
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <div className="text-emerald-100 tabular-nums">{e.run_count} runs</div>
+                        <div className="text-[11px] text-white/50">
+                          {e.last_run_at ? `last ${formatRelativeTime(e.last_run_at)}` : "no runs yet"}
+                        </div>
+                      </div>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Card>
+
+          <Card>
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="text-base font-semibold text-white">Recent MLflow Runs</h2>
+              <span className="text-[11px] text-white/40">GET /v1/model/mlflow-runs (forecast-api)</span>
+            </div>
+            {mlflowRunsError ? (
+              <p className="py-6 text-center text-sm text-white/40">Couldn&apos;t load runs ({mlflowRunsError}).</p>
+            ) : mlflowRuns === null ? (
+              <p className="py-6 text-center text-sm text-white/40">Loading…</p>
+            ) : mlflowRuns.length === 0 ? (
+              <p className="text-sm text-white/55">No MLflow runs yet.</p>
+            ) : (
+              <table className="w-full text-left text-sm">
+                <thead className="border-b border-white/5 text-[11px] uppercase tracking-wide text-white/40">
+                  <tr>
+                    <th className="py-2">Run</th>
+                    <th className="py-2">Architecture</th>
+                    <th className="py-2">Started</th>
+                    <th className="py-2">Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {mlflowRuns.map((r) => (
+                    <tr key={r.run_id} className="text-white/85">
+                      <td className="py-2 font-mono text-[11px] text-white/60">{r.run_id.slice(0, 8)}</td>
+                      <td className="py-2 text-white/80">{r.architecture ?? "—"}</td>
+                      <td className="py-2 text-white/60">{r.started_at ? formatRelativeTime(r.started_at) : "—"}</td>
+                      <td className="py-2"><span className={cn("rounded-md border px-2 py-0.5 text-[11px] font-medium",
+                        r.status === "finished" ? "border-emerald-200/40 bg-emerald-200/10 text-emerald-100" :
+                        r.status === "running"  ? "border-cyan-300/40 bg-cyan-300/10 text-cyan-200" :
+                        r.status === "failed"   ? "border-rose-300/40 bg-rose-300/10 text-rose-200" :
+                                                  "border-white/10 bg-white/5 text-white/60"
+                      )}>{r.status}</span></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </Card>
+        </div>
+      )}
+
+      {tab === "deployments" && (
+        <div className="space-y-4">
+          <Card>
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="text-base font-semibold text-white">Currently Serving</h2>
+              <span className="text-[11px] text-white/40">GET /v1/model (forecast-api)</span>
+            </div>
+            {servingModelError ? (
+              <p className="py-6 text-center text-sm text-white/40">Couldn&apos;t load serving model ({servingModelError}).</p>
+            ) : servingModel === null ? (
+              <p className="py-6 text-center text-sm text-white/40">Loading…</p>
+            ) : servingModel.status === "not_loaded" ? (
+              <p className="text-sm text-white/55">No model currently loaded ({servingModel.name}).</p>
+            ) : (
+              <div className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
+                <div>
+                  <div className="text-[11px] uppercase tracking-wide text-white/40">Model</div>
+                  <div className="mt-0.5 text-white/85">{servingModel.name}</div>
+                </div>
+                <div>
+                  <div className="text-[11px] uppercase tracking-wide text-white/40">Version / Stage</div>
+                  <div className="mt-0.5 flex items-center gap-1.5">
+                    <span className="rounded bg-purple-300/15 px-1.5 py-0.5 font-mono text-[11px] text-purple-200">v{servingModel.version}</span>
+                    <span className={cn("rounded-md border px-2 py-0.5 text-[11px] font-medium",
+                      servingModel.stage === "Production" ? "border-emerald-200/40 bg-emerald-200/10 text-emerald-100" :
+                      servingModel.stage === "Staging"    ? "border-amber-300/40 bg-amber-300/10 text-amber-200" :
+                                                            "border-white/10 bg-white/5 text-white/60"
+                    )}>{servingModel.stage}</span>
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[11px] uppercase tracking-wide text-white/40">Loaded</div>
+                  <div className="mt-0.5 text-white/85">{servingModel.loaded_at ? formatRelativeTime(servingModel.loaded_at) : "—"}</div>
+                </div>
+                <div>
+                  <div className="text-[11px] uppercase tracking-wide text-white/40">Git SHA</div>
+                  <div className="mt-0.5 font-mono text-[11px] text-white/70">{servingModel.git_sha ? servingModel.git_sha.slice(0, 8) : "—"}</div>
+                </div>
+              </div>
+            )}
+          </Card>
+
+          <Card>
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="text-base font-semibold text-white">Deployed Versions</h2>
+              <span className="text-[11px] text-white/40">GET /v1/model/versions × {MODEL_ARCHITECTURES.length} architectures</span>
+            </div>
+            <p className="mb-3 text-[11px] text-white/50">
+              This platform&apos;s deploy action is promoting a registered version to Production
+              or Staging (<code>POST /v1/model/versions/{"{version}"}/promote</code>) — a version&apos;s
+              registry stage is its real deployment status. There&apos;s no multi-replica/traffic-split
+              layer in front of this single-process serving setup, so replica count, CPU%, and
+              traffic split aren&apos;t shown here.
+            </p>
+            {deploymentsError ? (
+              <p className="py-6 text-center text-sm text-white/40">Couldn&apos;t load deployed versions ({deploymentsError}).</p>
+            ) : deployments === null ? (
+              <p className="py-6 text-center text-sm text-white/40">Loading…</p>
+            ) : deployments.length === 0 ? (
+              <p className="text-sm text-white/55">No versions currently in Production or Staging.</p>
+            ) : (
+              <table className="w-full text-left text-sm">
+                <thead className="border-b border-white/5 text-[11px] uppercase tracking-wide text-white/40">
+                  <tr>
+                    <th className="py-2">Architecture</th>
+                    <th className="py-2">Version</th>
+                    <th className="py-2">Stage</th>
+                    <th className="py-2">Deployed</th>
+                    <th className="py-2">Metrics</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {deployments.map((d) => (
+                    <tr key={`${d.modelName}-${d.version}`} className="text-white/85">
+                      <td className="py-2">{d.architecture}</td>
+                      <td className="py-2 font-mono text-[11px] text-purple-200">v{d.version}</td>
+                      <td className="py-2">
+                        <span className={cn("rounded-md border px-2 py-0.5 text-[11px] font-medium",
+                          d.stage === "Production" ? "border-emerald-200/40 bg-emerald-200/10 text-emerald-100" :
+                                                      "border-amber-300/40 bg-amber-300/10 text-amber-200"
+                        )}>{d.stage}</span>
+                      </td>
+                      <td className="py-2 text-white/60">{formatRelativeTime(d.created_at)}</td>
+                      <td className="py-2 text-emerald-100 tabular-nums text-[11px]">
+                        {d.metrics.test_mape != null ? `MAPE ${d.metrics.test_mape.toFixed(2)}%` : "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </Card>
+        </div>
+      )}
+    </div>
+  );
+}

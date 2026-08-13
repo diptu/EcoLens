@@ -1,0 +1,44 @@
+# `.template` because Alertmanager's config parser does NOT interpolate
+# `${VAR}` itself (unlike docker-compose's own YAML) -- the
+# `alertmanager-config` init container in docker-compose.yml runs this
+# through `envsubst` into a real config file (a shared `alertmanagerconfig`
+# volume) before `alertmanager` starts, same pattern the older
+# infra/alertmanager/alertmanager.yml.template already used for the root
+# compose's own simpler stack.
+#
+# `webhook_configs` (generic) rather than `slack_configs` -- README.md's
+# own "Running this stack in production" section names the env var
+# `ALERTMANAGER_WEBHOOK_URL`, not a Slack-specific one, and a generic
+# webhook receiver POSTs Alertmanager's own JSON schema
+# (https://prometheus.io/docs/alerting/latest/configuration/#webhook_config)
+# to any endpoint -- Slack's *own* incoming-webhook format needs the
+# Slack-specific payload shape `slack_configs` sends, which this receiver
+# deliberately doesn't assume. Point `ALERTMANAGER_WEBHOOK_URL` at
+# something that speaks Alertmanager's webhook schema (e.g. a small relay
+# into Slack/PagerDuty, or PagerDuty's own Events API v2 webhook
+# endpoint) -- or swap this block for `slack_configs`/`pagerduty_configs`
+# directly if you'd rather integrate one of those natively.
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: default-webhook
+  group_by: ["alertname", "job", "source"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    # Anything severity=critical repeats sooner than the default 4h --
+    # IngestionCircuitBreakerOpen, WarehouseTargetDown,
+    # PlatformServiceUnavailable, PlatformTelemetryCollectorDown
+    # (prometheus/rules/*.yml) all set this label.
+    - matchers:
+        - severity="critical"
+      receiver: default-webhook
+      repeat_interval: 1h
+
+receivers:
+  - name: default-webhook
+    webhook_configs:
+      - url: "${ALERTMANAGER_WEBHOOK_URL}"
+        send_resolved: true

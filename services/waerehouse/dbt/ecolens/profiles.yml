@@ -1,0 +1,44 @@
+# Lives next to dbt_project.yml rather than ~/.dbt/ — dbt_runner.runner.run_dbt
+# passes `--profiles-dir <project_dir>` explicitly so this is found no
+# matter what user/container runs it, instead of relying on a
+# home-directory file or the DBT_PROFILES_DIR env var being set correctly.
+#
+# `dbt-postgres` needs discrete host/port/user/password/dbname fields, not
+# a single DSN — these default to the same POSTGRES_* values
+# docker-compose.yml's `postgres` service and Settings' decomposed fields
+# use (config.py), so local dev works with no extra configuration. A
+# NeonDB (or other single-DATABASE_URL) deployment needs those pieces
+# split out into PG*/POSTGRES_* env vars separately for dbt specifically
+# — Settings.database_url's single-DSN convenience doesn't carry over to
+# dbt's profile format.
+ecolens:
+  target: "{{ env_var('DBT_TARGET', 'dev') }}"
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var('POSTGRES_HOST', 'localhost') }}"
+      port: "{{ env_var('POSTGRES_PORT', '5432') | as_number }}"
+      user: "{{ env_var('POSTGRES_USER', 'ecolens') }}"
+      password: "{{ env_var('POSTGRES_PASSWORD', 'ecolens') }}"
+      dbname: "{{ env_var('POSTGRES_DB', 'ecolens') }}"
+      schema: "raw"
+      threads: 4
+      sslmode: "{{ env_var('POSTGRES_SSLMODE', 'prefer') }}"
+    prod:
+      type: postgres
+      # No default -- unlike `dev`'s `localhost` (a genuinely reasonable
+      # same-host default), `prod` previously defaulted to the literal
+      # Docker Compose service name `postgres`, which only resolves
+      # inside that one network. A real production deploy (NeonDB or
+      # otherwise) forgetting to set POSTGRES_HOST would have silently
+      # inherited a Docker-only hostname instead of getting a clear
+      # "you forgot to configure this" failure -- `env_var()` with no
+      # default raises immediately instead.
+      host: "{{ env_var('POSTGRES_HOST') }}"
+      port: "{{ env_var('POSTGRES_PORT', '5432') | as_number }}"
+      user: "{{ env_var('POSTGRES_USER', 'ecolens') }}"
+      password: "{{ env_var('POSTGRES_PASSWORD', 'ecolens') }}"
+      dbname: "{{ env_var('POSTGRES_DB', 'ecolens') }}"
+      schema: "raw"
+      threads: 4
+      sslmode: "{{ env_var('POSTGRES_SSLMODE', 'require') }}"

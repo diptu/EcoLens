@@ -1,0 +1,324 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ecoLens — observability stack (README.md)
+# `docker compose up -d` to start, `docker compose down` to stop.
+#
+# Deployed independently from the business services (README.md's
+# "Deployment" section) -- this is a *separate* compose project from the
+# root `../../docker-compose.yml` (project name `ecolens`). It attaches
+# to that project's own default network (`ecolens_default`, declared
+# `external` below) purely to reach the business services' `/metrics`
+# endpoints for scraping and their container logs for Promtail -- the
+# root stack must already be running (`docker compose up` from the repo
+# root) before `prometheus`/`promtail` here can resolve `data-pipeline`,
+# `ingestion`, `warehouse`, `api`. A failure anywhere in *this* compose
+# project does not stop or restart anything in that one (README's
+# "Deployment" guarantee: "A failure in Grafana or the observability UI
+# should not stop ingestion, warehouse processing, or forecasting").
+#
+# Host ports are deliberately offset from the root compose's OWN
+# prometheus/alertmanager/grafana/loki services (9090/9093/3001/3100,
+# `../../docker-compose.yml` + `../../infra/{prometheus,alertmanager,grafana}`)
+# so both stacks CAN run side by side without a port collision --
+# TODO.md's Known Gaps section flags that older, simpler inline stack as
+# functionally superseded by this one and recommends retiring it, but
+# doesn't remove it here (out of scope for implementing this README, and
+# `../../README.md`'s documented `make up` flow still depends on it as
+# of this writing).
+# ─────────────────────────────────────────────────────────────────────────────
+name: ecolens-observability
+
+x-common-env: &common-env
+  env_file:
+    - .env
+  restart: unless-stopped
+
+networks:
+  default:
+    name: ecolens_default
+    external: true
+
+services:
+  # ── Metrics ──────────────────────────────────────────────────────────────
+  # prometheus.yml.template isn't a real Prometheus config on its own --
+  # same reasoning/pattern as `alertmanager-config` below (Prometheus has
+  # no `${VAR}` interpolation either), rendering the business-service
+  # scrape targets (DATA_PIPELINE_TARGET/etc, `.env.example`) so a
+  # service running on a different machine can be pointed at a real
+  # host:port instead of a Docker-network-only service name.
+  prometheus-config:
+    image: alpine:3.20
+    <<: *common-env
+    restart: "no"
+    volumes:
+      - ./prometheus/prometheus.yml.template:/template/prometheus.yml.template:ro
+      - prometheusconfig:/config
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - apk add --no-cache gettext >/dev/null && envsubst < /template/prometheus.yml.template > /config/prometheus.yml
+    # `TODO.md` Observability Phase 6's "Docker Deployment" -- real
+    # `deploy.resources` quotas across this whole stack, not just this
+    # one service (see each service below for its own number). Modest
+    # even for a one-shot `envsubst` init container -- generous headroom
+    # over what `apk add gettext` + rendering one small template
+    # actually needs, not a tuned-tight number.
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    <<: *common-env
+    volumes:
+      # `prometheusconfig` mounted as its own directory (not layered
+      # onto `/etc/prometheus` itself) -- same pattern `alertmanager`
+      # below already uses (`alertmanagerconfig:/config`, then
+      # `--config.file=/config/alertmanager.yml`), for the same reason:
+      # mounting a named volume straight onto a *file* path doesn't
+      # work reliably when the volume's actual root is a directory (the
+      # init container writes into a subpath of its own mount point),
+      # and mounting the whole `/etc/prometheus` directory read-only
+      # blocks Docker from creating the nested `rules` mountpoint inside
+      # it (hit this exact "read-only file system" container-create
+      # failure while building this).
+      - prometheusconfig:/etc/prometheus-config:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+      - promdata:/prometheus
+    command:
+      - --config.file=/etc/prometheus-config/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}
+    ports:
+      - "9091:9090"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    depends_on:
+      prometheus-config:
+        condition: service_completed_successfully
+      alertmanager:
+        condition: service_healthy
+    # Prometheus is this stack's heaviest steady-state consumer (holds
+    # every scraped series in memory + TSDB writes) -- the largest quota
+    # here, not a copy-pasted default.
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+
+  # Container-level CPU/memory metrics for prometheus/rules/platform.yml's
+  # "High CPU / memory usage" alerts -- none of the four business
+  # services export process-level resource metrics themselves.
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    <<: *common-env
+    ports:
+      - "8085:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+      - /dev/disk:/dev/disk:ro
+    devices:
+      - /dev/kmsg:/dev/kmsg
+    privileged: true
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+  # ── Alerting ─────────────────────────────────────────────────────────────
+  # alertmanager.yml.template isn't a real Alertmanager config on its own
+  # -- Alertmanager doesn't do `${VAR}` interpolation, so this renders it
+  # via `envsubst` into the `alertmanagerconfig` volume before
+  # `alertmanager` starts. One-shot init container, not `alertmanager`'s
+  # own command, because the official image is a minimal base with no
+  # `envsubst`/`gettext` on it.
+  alertmanager-config:
+    image: alpine:3.20
+    <<: *common-env
+    restart: "no"
+    volumes:
+      - ./alertmanager/alertmanager.yml.template:/template/alertmanager.yml.template:ro
+      - alertmanagerconfig:/config
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - test -n "$$ALERTMANAGER_WEBHOOK_URL" || (echo "ALERTMANAGER_WEBHOOK_URL is not set -- copy .env.example to .env and fill it in" >&2 && exit 1); apk add --no-cache gettext >/dev/null && envsubst < /template/alertmanager.yml.template > /config/alertmanager.yml
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    <<: *common-env
+    volumes:
+      - alertmanagerconfig:/config:ro
+      - alertmanagerdata:/alertmanager
+    command:
+      - --config.file=/config/alertmanager.yml
+      - --storage.path=/alertmanager
+    ports:
+      - "9094:9093"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9093/-/healthy"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    depends_on:
+      alertmanager-config:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 256M
+
+  # ── Logs ─────────────────────────────────────────────────────────────────
+  loki:
+    image: grafana/loki:3.2.1
+    <<: *common-env
+    environment:
+      LOKI_RETENTION_PERIOD: ${LOKI_RETENTION_PERIOD:-168h}
+    volumes:
+      - ./loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - lokidata:/loki
+    command:
+      - -config.file=/etc/loki/loki-config.yml
+      - -config.expand-env=true
+    ports:
+      - "3101:3100"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3100/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  # Ships every ecolens-project container's stdout JSON logs into Loki --
+  # README.md's "a log collector such as Fluent Bit, Vector, or an
+  # equivalent agent collects them" (see promtail-config.yml's header
+  # comment for why Promtail specifically).
+  promtail:
+    image: grafana/promtail:3.2.1
+    <<: *common-env
+    volumes:
+      - ./promtail/promtail-config.yml:/etc/promtail/promtail-config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    command:
+      - -config.file=/etc/promtail/promtail-config.yml
+    depends_on:
+      loki:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 256M
+
+  # ── Traces ───────────────────────────────────────────────────────────────
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.110.0
+    <<: *common-env
+    volumes:
+      - ./otel/otel-collector-config.yml:/etc/otelcol/config.yml:ro
+    command:
+      - --config=/etc/otelcol/config.yml
+    ports:
+      - "4317:4317"   # OTLP gRPC -- point a service's OTEL_EXPORTER_OTLP_ENDPOINT here
+      - "4318:4318"   # OTLP HTTP
+      - "8888:8888"   # collector's own metrics (scraped by prometheus.yml)
+      - "13133:13133" # health_check extension -- no container-level healthcheck
+                       # possible (image has no shell), see README.md's own note
+    depends_on:
+      tempo:
+        condition: service_healthy
+    # 512M container ceiling against `otel-collector-config.yml`'s own
+    # `memory_limiter` processor (256 MiB soft/64 MiB spike, internal to
+    # the collector process) -- deliberately roughly 2x that internal
+    # figure, so the container limit is never what actually kills the
+    # process; `memory_limiter` shedding load early is meant to be the
+    # real backstop, not this.
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  tempo:
+    image: grafana/tempo:2.6.1
+    <<: *common-env
+    environment:
+      TEMPO_RETENTION: ${TEMPO_RETENTION:-72h}
+    volumes:
+      - ./tempo/tempo-config.yml:/etc/tempo/tempo-config.yml:ro
+      - tempodata:/var/tempo
+    command:
+      - -config.file=/etc/tempo/tempo-config.yml
+      - -config.expand-env=true
+    ports:
+      - "3200:3200"   # Tempo's own query API (Grafana datasource)
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3200/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  # ── Dashboards ───────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:11.2.0
+    <<: *common-env
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    ports:
+      - "3002:3000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    depends_on:
+      prometheus:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+      tempo:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+volumes:
+  promdata:
+  grafanadata:
+  lokidata:
+  tempodata:
+  # Rendered prometheus.yml (envsubst output from `prometheus-config`),
+  # handed to `prometheus` read-only.
+  prometheusconfig:
+  alertmanagerconfig:
+  alertmanagerdata:

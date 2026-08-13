@@ -1,0 +1,100 @@
+# `.template` because Prometheus, like Alertmanager (see
+# `alertmanager/alertmanager.yml.template`'s own header comment), has no
+# built-in `${VAR}` expansion -- the `prometheus-config` init container
+# in docker-compose.yml renders this via `envsubst` into the
+# `prometheusconfig` volume before `prometheus` starts, same one-shot
+# pattern `alertmanager-config` already established.
+#
+# Each business-service target below is env-driven
+# (`DATA_PIPELINE_TARGET`/`INGESTION_TARGET`/`WAREHOUSE_TARGET`/
+# `FORECAST_API_TARGET`, set with their current same-host defaults in
+# `.env.example`) specifically so this stack can monitor services
+# running on OTHER machines, not just ones sharing this stack's own
+# `ecolens_default` Docker network -- point a target at a real
+# `host:port` (or a Tailscale/VPN/internal-DNS name reachable from
+# wherever this Prometheus container actually runs) once a service
+# moves off this host. If every service still runs on this same
+# machine/network, the `.env.example` defaults already match the exact
+# hardcoded values this file used before it was templated -- nothing
+# to change for that common case.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    environment: development
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  # ── Business services (services/data-pipeline, services/ingestion,
+  #    services/waerehouse, services/forecast-api) ─────────────────────
+  #
+  # data-pipeline and ingestion currently ingest the *same* 5 sources in
+  # parallel (services/ingestion/TODO.md's migration is mid-flight,
+  # Phase 4/5 not started) -- both are scraped as distinct jobs rather
+  # than merged, so `source`-keyed queries need `by (source, job)` to
+  # avoid silently summing both services' series into one number (see
+  # prometheus/rules/ingestion.yml). This holds true even when the two
+  # are on separate machines -- the `job` label is what disambiguates
+  # them, not which host answered the scrape.
+  - job_name: data-pipeline
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["${DATA_PIPELINE_TARGET}"]
+
+  - job_name: ingestion
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["${INGESTION_TARGET}"]
+
+  - job_name: warehouse
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["${WAREHOUSE_TARGET}"]
+
+  - job_name: forecast-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["${FORECAST_API_TARGET}"]
+
+  # ── Shared infra (RabbitMQ, both ingestion and warehouse depend on
+  #    it) ────────────────────────────────────────────────────────────
+  # `rabbitmq_prometheus` (`../../infra/docker/rabbitmq/enabled_plugins`
+  # enables it) -- two jobs, not one, because the plugin's default
+  # `/metrics` only exposes cluster-wide aggregates; per-queue labels
+  # (`queue`, needed for `prometheus/rules/rabbitmq.yml`'s DLQ/queue-
+  # depth alerts) only come from `/metrics/detailed`'s
+  # `family=queue_coarse_metrics` query param.
+  - job_name: rabbitmq
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["${RABBITMQ_TARGET}"]
+
+  - job_name: rabbitmq-queues
+    metrics_path: /metrics/detailed
+    params:
+      family: ["queue_coarse_metrics"]
+    static_configs:
+      - targets: ["${RABBITMQ_TARGET}"]
+
+  # ── Observability stack's own components ────────────────────────────
+  # Unparametrized -- these always run alongside this Prometheus
+  # instance itself (same compose project), never on a separate
+  # machine, so there's nothing to make configurable here.
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8888"]
+
+  - job_name: cadvisor
+    static_configs:
+      - targets: ["cadvisor:8080"]

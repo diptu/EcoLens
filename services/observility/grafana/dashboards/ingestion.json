@@ -1,0 +1,123 @@
+{
+  "uid": "ecolens-ingestion",
+  "title": "ecoLens / Ingestion",
+  "tags": ["ecolens", "ingestion"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "24h success rate by source",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "ecolens:ingest_success_rate_24h",
+          "legendFormat": "{{job}} / {{source}}",
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1, "min": 0 } },
+      "description": "job=data-pipeline and job=ingestion currently ingest the same 5 sources in parallel -- see prometheus/rules/ingestion.yml's header comment."
+    },
+    {
+      "id": 2,
+      "title": "Seconds since last successful ingest",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "ecolens:ingest_seconds_since_last_success",
+          "legendFormat": "{{job}} / {{source}}",
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "description": "aemo_holidays excluded from IngestionNoDataReceived (annual snapshot, not continuous) but still shown here for visibility."
+    },
+    {
+      "id": 3,
+      "title": "Ingest duration p95 by source",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(ecolens_ingest_duration_seconds_bucket[10m])) by (le, source, job))",
+          "legendFormat": "{{job}} / {{source}}",
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "id": 4,
+      "title": "Rows ingested / failures (5m rate)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(ecolens_ingest_rows_total[5m])) by (source, job)",
+          "legendFormat": "{{job}} / {{source}} rows",
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        },
+        {
+          "expr": "sum(rate(ecolens_ingest_failures_total[5m])) by (source, job)",
+          "legendFormat": "{{job}} / {{source}} failures",
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+    {
+      "id": 5,
+      "title": "Circuit breaker state (0=closed, 1=half_open, 2=open)",
+      "type": "state-timeline",
+      "gridPos": { "x": 0, "y": 16, "w": 24, "h": 6 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "ecolens_circuit_breaker_state",
+          "legendFormat": "{{job}} / {{source}}",
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "closed", "color": "green" } } },
+            { "type": "value", "options": { "1": { "text": "half_open", "color": "yellow" } } },
+            { "type": "value", "options": { "2": { "text": "open", "color": "red" } } }
+          ]
+        }
+      }
+    },
+    {
+      "id": 6,
+      "title": "Recent ingestion logs (structured JSON via Promtail)",
+      "type": "logs",
+      "gridPos": { "x": 0, "y": 22, "w": 24, "h": 10 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "expr": "{service=~\"ingestion|data-pipeline\"}",
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "loki" }
+        }
+      ],
+      "options": { "showTime": true, "wrapLogMessage": true }
+    }
+  ]
+}

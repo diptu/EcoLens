@@ -1,0 +1,115 @@
+version: 2
+
+models:
+  - name: stg_aemo_nem_dispatch
+    description: Thin passthrough over raw.aemo_nem_dispatch.
+    columns:
+      - name: ts
+        tests: [not_null]
+      - name: region
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["NSW1", "QLD1", "VIC1", "SA1", "TAS1"]
+      - name: demand_mw
+        tests: [not_null]
+
+  - name: stg_aemo_wem_dispatch
+    description: Thin passthrough over raw.aemo_wem_dispatch.
+    columns:
+      - name: ts
+        tests: [not_null]
+      - name: region
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["WEM"]
+      - name: demand_mw
+        tests: [not_null]
+
+  - name: stg_openelectricity_mix
+    description: >
+      Generation mix over raw.openelectricity_mix. Thin passthrough for
+      every column except total_renewable_mw, which falls back to a
+      derived sum over the observed per-fuel renewable columns when the
+      provider's own figure is null (model's own header comment;
+      `TODO.md` Phase 2).
+    columns:
+      - name: ts
+        tests: [not_null]
+      - name: network_code
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["NEM", "WEM"]
+      - name: region
+        tests: [not_null]
+      - name: total_renewable_mw
+        description: >
+          Provider-reported when available, else derived from
+          hydro/wind/solar_utility/solar_rooftop/biomass — see
+          renewable_mw_source.
+        tests:
+          - not_null:
+              config:
+                where: "total_generation_mw is not null"
+      - name: renewable_mw_source
+        description: >
+          'provider' when OpenElectricity reported total_renewable_mw
+          directly, 'derived' when computed from the per-fuel mix instead,
+          null when neither total_renewable_mw nor total_generation_mw
+          were available for that row.
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["provider", "derived"]
+
+  - name: stg_bom_observations
+    description: Thin passthrough over raw.bom_observations.
+    columns:
+      - name: ts
+        tests: [not_null]
+      - name: station_id
+        tests: [not_null]
+      - name: region
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["NSW1", "QLD1", "VIC1", "SA1", "TAS1", "WEM"]
+
+  - name: stg_anomalies
+    description: >
+      meta.anomalies with ts/region/network_code extracted from
+      row_snapshot, scoped to the 3 sources that have a usable (ts,
+      region) shape (TODO.md Phase 3). Not a passthrough of every
+      meta.anomalies row — see the model's own header comment.
+    columns:
+      - name: id
+        tests: [not_null, unique]
+      - name: table_name
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["aemo_nem_dispatch", "aemo_wem_dispatch", "openelectricity_mix"]
+      - name: anomaly_score
+        tests: [not_null]
+      - name: anomaly_reason
+        tests: [not_null]
+
+  - name: stg_aemo_holidays
+    description: Thin passthrough over raw.aemo_holidays.
+    columns:
+      - name: date
+        tests: [not_null]
+      - name: region
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["NSW1", "QLD1", "VIC1", "SA1", "TAS1", "WEM"]
+      - name: holiday_name
+        tests: [not_null]

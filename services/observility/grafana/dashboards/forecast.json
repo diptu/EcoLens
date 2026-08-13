@@ -1,0 +1,151 @@
+{
+  "uid": "ecolens-forecast",
+  "title": "ecoLens / Forecast",
+  "tags": ["ecolens", "forecast"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 2,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Two views, on purpose",
+      "type": "text",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 3 },
+      "options": {
+        "mode": "markdown",
+        "content": "**Top half** = forecast-api's own server-side view of handling `GET /v1/forecast` (`ecolens_forecast_predictions_total{region,cache}` / `ecolens_forecast_prediction_latency_seconds{region}`). **Bottom half** = data-pipeline's caller-side view of calling it (`ecolens_forecast_requests_total{region}` / `ecolens_forecast_latency_seconds`). Kept separate deliberately -- they measure different hops and can diverge (e.g. network/queueing latency between the two services). See `prometheus/rules/forecast.yml`'s header comment."
+      }
+    },
+    {
+      "id": 2,
+      "title": "forecast-api: predictions served by region + cache outcome (5m rate)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 3, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(ecolens_forecast_predictions_total[5m])) by (region, cache)",
+          "legendFormat": "{{region}} ({{cache}})",
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" } }
+    },
+    {
+      "id": 3,
+      "title": "forecast-api: handler latency p50 / p95 / p99 (all regions)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 3, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(ecolens_forecast_prediction_latency_seconds_bucket[10m])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(ecolens_forecast_prediction_latency_seconds_bucket[10m])) by (le))",
+          "legendFormat": "p95",
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(ecolens_forecast_prediction_latency_seconds_bucket[10m])) by (le))",
+          "legendFormat": "p99",
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "description": "Includes cache hits (near-zero) and misses (a real model inference) together -- filter the panel above by cache=\"miss\" if you need inference-only latency."
+    },
+    {
+      "id": 4,
+      "title": "forecast-api: cache hit ratio (5m)",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 11, "w": 6, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(ecolens_forecast_predictions_total{cache=\"hit\"}[5m])) / sum(rate(ecolens_forecast_predictions_total[5m]))",
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1, "min": 0 } }
+    },
+    {
+      "id": 5,
+      "title": "forecast-api readiness (via GET /v1/readyz -- not scraped as a metric, manual reference only)",
+      "type": "text",
+      "gridPos": { "x": 6, "y": 11, "w": 18, "h": 4 },
+      "options": {
+        "mode": "markdown",
+        "content": "`GET /v1/readyz` on forecast-api (port 8000) already checks Postgres, Redis, and whether a Production model is loaded -- but its components aren't mirrored into `/metrics` as gauges yet, and nothing scrapes `/v1/readyz` directly via blackbox-exporter either. Check it directly: `curl http://localhost:8000/v1/readyz` -- see `TODO.md`'s Known Gaps section."
+      }
+    },
+    {
+      "id": 6,
+      "title": "data-pipeline: caller-side request rate by region (5m)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 15, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(ecolens_forecast_requests_total[5m])) by (region)",
+          "legendFormat": "{{region}}",
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" } }
+    },
+    {
+      "id": 7,
+      "title": "data-pipeline: caller-side latency p50 / p95 / p99",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 15, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(ecolens_forecast_latency_seconds_bucket[10m])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(ecolens_forecast_latency_seconds_bucket[10m])) by (le))",
+          "legendFormat": "p95",
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(ecolens_forecast_latency_seconds_bucket[10m])) by (le))",
+          "legendFormat": "p99",
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "id": 8,
+      "title": "Recent forecast-related logs (structured JSON via Promtail)",
+      "type": "logs",
+      "gridPos": { "x": 0, "y": 23, "w": 24, "h": 10 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "expr": "{service=~\"api|data-pipeline\"}",
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "loki" }
+        }
+      ],
+      "options": { "showTime": true, "wrapLogMessage": true }
+    }
+  ]
+}

@@ -12,6 +12,7 @@ dependencies = [
     "gunicorn>=26.0.0",
     "pre-commit>=4.6.0",
     "pydantic>=2.13.4",
+    "pytest-cov>=7.1.0",
     "uvicorn>=0.51.0",
 ]
 
@@ -19,23 +20,35 @@ dependencies = [
 [dependency-groups]
 dev = [
     "mypy>=2.3.0",
+    "pip-audit>=2.7",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
     "ruff>=0.15.22",
 ]
 
 [tool.mypy]
-# Set the base for each service
+# Root-level dev tooling only now -- every business service (data-pipeline
+# included, TODO.md's "microservice independence" pass) has its own venv
+# + local [tool.mypy] config and is linted/type-checked via `uv run
+# --directory services/<name> mypy app`, not from here (no `mypy_path`
+# pointing into `services/` anymore -- there used to be one, for
+# data-pipeline, back when it was this workspace's only member).
 python_version = "3.12"
 namespace_packages = true
 explicit_package_bases = true
-# Mypy will now look for packages relative to these directories
-mypy_path = [
-    "services/forecast-api/src",
-    "services/data-pipeline/src"
-]
 
-# Tell Mypy to ignore the top-level directory and focus on src/
-[[tool.mypy.overrides]]
-module = "tests.*"
-ignore_missing_imports = true
+[tool.uv.workspace]
+# Empty on purpose: every business service (data-pipeline, forecast-api,
+# ingestion, waerehouse) is now its own independent `uv` project (own
+# venv/lockfile, own `pyproject.toml`), not a member of this root
+# workspace -- `TODO.md`'s "microservice independence" pass, completing
+# what forecast-api/ingestion/waerehouse already established for
+# themselves. Each restructured service's package is named `app`, which
+# is exactly why they can't share one workspace venv -- `uv sync
+# --directory services/<name>` (or that service's own Dockerfile) syncs
+# each one independently. This section is kept (rather than deleted) so
+# a future root-level dev-tooling package has an obvious place to
+# register, not because anything currently belongs here.
+members = [
+    "services/observility",
+]

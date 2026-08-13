@@ -1,0 +1,139 @@
+# Ingestion alerts -- covers both services that currently do ingestion
+# work in parallel: `data-pipeline` (job=data-pipeline, the legacy
+# monolith) and `ingestion` (job=ingestion, its in-progress extraction --
+# services/ingestion/TODO.md Phase 4/5, not cut over yet). Both scrape
+# jobs export metrics under the same `ecolens_ingest_*` names
+# (services/data-pipeline/app/core/metrics.py,
+# services/ingestion/app/core/metrics.py) but as two independent series
+# for the *same* `source` label values -- every rule below groups `by
+# (source, job)` so a query never silently sums both services' numbers
+# into one.
+#
+# KNOWN GAP (see TODO.md): `services/ingestion` does not export
+# `ecolens_ingest_runs_total{source,outcome}` -- only `data-pipeline`
+# does. `IngestionSuccessRateLow` below will only ever produce data for
+# job="data-pipeline" until that counter is added to `services/ingestion`
+# too.
+
+groups:
+  - name: ecolens_ingestion_recording_rules
+    interval: 1m
+    rules:
+      - record: ecolens:ingest_success_rate_24h
+        expr: >
+          sum(increase(ecolens_ingest_runs_total{outcome="success"}[24h])) by (source, job)
+          /
+          sum(increase(ecolens_ingest_runs_total[24h])) by (source, job)
+
+      - record: ecolens:ingest_seconds_since_last_success
+        expr: time() - ecolens_latest_ingest_timestamp_seconds
+
+  - name: ecolens_ingestion_alerts
+    rules:
+      # "No data received for X minutes" (README's Ingestion alert
+      # list). Per-source threshold = 2x the source's own cron cadence
+      # (openelectricity every 5min -> 600s, aemo_nem/aemo_wem every
+      # 15min -> 1800s, bom every 30min -> 3600s). `aemo_holidays` is
+      # deliberately excluded -- an annual snapshot, not a continuous
+      # source, so "time since last success" isn't a staleness signal
+      # for it the way it is for the other 4.
+      - alert: IngestionNoDataReceived
+        expr: >
+          (ecolens:ingest_seconds_since_last_success{source="openelectricity"} > 600)
+          or
+          (ecolens:ingest_seconds_since_last_success{source=~"aemo_nem|aemo_wem"} > 1800)
+          or
+          (ecolens:ingest_seconds_since_last_success{source="bom"} > 3600)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.job }}/{{ $labels.source }} hasn't ingested successfully in a while"
+          description: >
+            {{ $labels.job }}'s {{ $labels.source }} source last succeeded
+            {{ $value | humanizeDuration }} ago -- more than 2x its
+            expected cron cadence. Check
+            `GET /v1/data-sources/{id}/health` and `meta._ingest_log` for
+            the failure reason.
+
+      # "High ingestion failure rate" (README's Ingestion alert list).
+      - alert: IngestionHighFailureRate
+        expr: >
+          sum(rate(ecolens_ingest_failures_total[15m])) by (source, job)
+          /
+          sum(rate(ecolens_ingest_rows_total[15m]) + rate(ecolens_ingest_failures_total[15m])) by (source, job)
+          > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.job }}/{{ $labels.source }}'s ingest failure rate is above 10%"
+          description: >
+            {{ $labels.job }}'s {{ $labels.source }} source has failed
+            more than 10% of its attempts over the last 15m
+            ({{ $value | humanizePercentage }}).
+
+      - alert: IngestionSuccessRateLow
+        expr: ecolens:ingest_success_rate_24h < 0.9
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.job }}/{{ $labels.source }}'s 24h ingest success rate is below 90%"
+          description: >
+            {{ $labels.job }}'s {{ $labels.source }} source has
+            succeeded on only {{ $value | humanizePercentage }} of runs
+            in the last 24h.
+
+      # "External provider API failures" (README's Ingestion alert
+      # list) -- same underlying failure counter as
+      # IngestionHighFailureRate, tighter window/threshold so a sudden
+      # spike (e.g. the provider itself returning 5xx) pages faster
+      # than the rolling 15m ratio alert above would.
+      - alert: IngestionExternalProviderFailureSpike
+        expr: increase(ecolens_ingest_failures_total[5m]) >= 3
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.job }}/{{ $labels.source }} has failed {{ $value }} times in 5 minutes"
+          description: >
+            A burst of failures usually means the external provider
+            (AEMO/BoM/OpenElectricity) is erroring or rate-limiting,
+            not a bug in this service -- check
+            `GET /v1/data-sources/{id}/health` for the recent error
+            detail.
+
+      # "Ingestion latency above threshold" (README's Ingestion alert
+      # list). p95 over 10m, per source/job.
+      - alert: IngestionLatencyHigh
+        expr: >
+          histogram_quantile(0.95, sum(rate(ecolens_ingest_duration_seconds_bucket[10m])) by (le, source, job))
+          > 30
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.job }}/{{ $labels.source }}'s p95 ingest latency is above 30s"
+          description: >
+            p95 ingest duration is {{ $value | humanizeDuration }} --
+            check the provider's own response times before assuming a
+            regression in this service.
+
+      - alert: IngestionCircuitBreakerOpen
+        expr: ecolens_circuit_breaker_state == 2
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }}/{{ $labels.source }}'s circuit breaker is open"
+          description: >
+            {{ $labels.job }}'s {{ $labels.source }} source's circuit
+            breaker tripped open after repeated failures -- ingestion
+            for this source is currently being skipped rather than
+            retried.
+
+      # "warehouse-sync consumer is backlogged/down" -- now covered by
+      # `prometheus/rules/rabbitmq.yml`'s `RabbitMQQueueDepthHigh`
+      # (real RabbitMQ queue depth via `rabbitmq_prometheus`), not
+      # duplicated here.

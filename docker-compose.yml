@@ -1,0 +1,493 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ecoLens — local development stack
+# `make up` to start, `make down` to stop, `make logs` to tail.
+# ─────────────────────────────────────────────────────────────────────────────
+name: ecolens
+
+x-common-env: &common-env
+  env_file:
+    - .env
+  restart: unless-stopped
+
+services:
+  # ── Database ───────────────────────────────────────────────────────────────
+  postgres:
+    image: timescale/timescaledb:2.16.1-pg16
+    <<: *common-env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ecolens}
+      POSTGRES_USER: ${POSTGRES_USER:-ecolens}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ecolens}
+    ports:
+      # Host-side port overridable via POSTGRES_HOST_PORT -- a real,
+      # previously-hit blocker (services/waerehouse/README.md's own
+      # "Not yet verified" note): a native Postgres install already
+      # bound to 5432 on the host makes `docker compose up` fail to bind
+      # this service, with nothing wrong in the repo itself. Container-
+      # to-container traffic (e.g. `warehouse` -> `postgres:5432`) is
+      # unaffected either way -- only the host-side mapping changes.
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ecolens} -d ${POSTGRES_DB:-ecolens}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Event bus — decouples ingestion from warehousing (overview.md §2) ──────
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    <<: *common-env
+    ports:
+      - "5672:5672"    # AMQP
+      - "15672:15672"  # management UI
+      # `rabbitmq_prometheus` (enabled via the mounted `enabled_plugins`
+      # below) -- real queue-depth/DLQ metrics for `services/observility`
+      # to scrape (`TODO.md` Observability Phase 5's "Pipeline Health
+      # Alarms" DLQ/queue-depth gap: no service exported one before this).
+      - "15692:15692"
+    volumes:
+      - rabbitmqdata:/var/lib/rabbitmq
+      - ./infra/docker/rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Cache ──────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7.4-alpine
+    <<: *common-env
+    command: >
+      sh -c "
+        if [ -n \"$$REDIS_PASSWORD\" ]; then
+          redis-server --requirepass $$REDIS_PASSWORD --maxmemory 256mb --maxmemory-policy allkeys-lru;
+        else
+          redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru;
+        fi
+      "
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── Object storage ────────────────────────────────────────────────────────
+  minio:
+    image: minio/minio:RELEASE.2024-08-29T01-40-52Z
+    <<: *common-env
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-minioadmin}
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # web console
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio-setup:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${S3_ACCESS_KEY:-minioadmin} ${S3_SECRET_KEY:-minioadmin};
+      mc mb -p local/${S3_BUCKET_RAW:-ecolens} || true;
+      mc mb -p local/${S3_BUCKET_MODELS:-ecolens}/mlflow || true;
+      mc anonymous set none local/${S3_BUCKET_RAW:-ecolens};
+      mc anonymous set none local/${S3_BUCKET_MODELS:-ecolens};
+      "
+    restart: "no"
+
+  # ── MLflow tracking server ────────────────────────────────────────────────
+  mlflow:
+    build:
+      context: .
+      dockerfile: infra/docker/mlflow.Dockerfile
+    <<: *common-env
+    environment:
+      MLFLOW_BACKEND_STORE_URI: postgresql://${POSTGRES_USER:-ecolens}:${POSTGRES_PASSWORD:-ecolens}@postgres:5432/${POSTGRES_DB:-ecolens}
+      # Already R2-ready with zero further compose changes: set
+      # MLFLOW_S3_ENDPOINT_URL/S3_ACCESS_KEY/S3_SECRET_KEY/S3_BUCKET_MODELS
+      # (root .env) to the real Cloudflare R2 values (endpoint = R2's
+      # account-scoped S3 API URL, keys = an R2 API token) and every new
+      # run this service tracks lands on R2 instead of local MinIO --
+      # `TODO.md`'s Storage item. Only affects a *fresh* MLflow deployment
+      # (this compose service); does not touch/migrate the separately-run
+      # local `.mlflow/` sqlite server's existing artifacts -- see
+      # `scripts/sync_mlflow_artifacts_to_r2.py` for backing those up.
+      MLFLOW_S3_ENDPOINT_URL: ${MLFLOW_S3_ENDPOINT_URL:-http://minio:9000}
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-minioadmin}
+      # R2 doesn't support the newer AWS SDK default of sending
+      # `x-amz-checksum-*` request headers / requiring response checksum
+      # validation on every call (botocore >=1.36's default
+      # `when_supported`) -- `when_required` is what every S3-compatible
+      # provider, R2 included, actually accepts. Harmless no-op against
+      # real AWS S3 or MinIO too, so this is safe to set unconditionally
+      # rather than only when R2 is actually the target.
+      AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+      AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+    command: >
+      mlflow server
+        --host 0.0.0.0
+        --port 5000
+        --backend-store-uri postgresql://${POSTGRES_USER:-ecolens}:${POSTGRES_PASSWORD:-ecolens}@postgres:5432/${POSTGRES_DB:-ecolens}
+        --default-artifact-root s3://${S3_BUCKET_MODELS:-ecolens}/mlflow
+    ports:
+      - "5000:5000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-setup:
+        condition: service_completed_successfully
+
+  # ── Prefect worker ────────────────────────────────────────────────────────
+  prefect:
+    build:
+      context: .
+      dockerfile: infra/docker/worker.Dockerfile
+    <<: *common-env
+    command: >
+      prefect worker start --pool ecolens-pool --type process
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ── Ingestion (services/ingestion/TODO.md) ───────────────────────────────
+  # The real, sole ingestion implementation -- `data-pipeline`'s own
+  # ingestion half this was originally extracted from is retired (its
+  # Dockerfile/compose service are gone; cutover complete). Mounts the
+  # `duckdb_staging` volume shared with `warehouse`/`warehouse-consumer`
+  # purely as a same-host performance fast-path, not a hard requirement --
+  # both sides fall back to downloading the run's snapshot from object
+  # storage (`read_staged_with_fallback`/`read_run_with_fallback`) when
+  # this volume isn't actually shared, i.e. `ingestion` is deployed on a
+  # different machine than its consumer. See
+  # `docs/runbooks/independent-service-deployment.md`.
+  ingestion:
+    build:
+      context: .
+      dockerfile: infra/docker/ingestion.Dockerfile
+    <<: *common-env
+    ports:
+      - "8003:8003"
+    volumes:
+      - duckdb_staging:/app/services/ingestion/data/staging
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      # Phase 2's "Integrate Cloudflare R2 Staging" -- `upload_staged_
+      # file` falls back to local MinIO when no real R2 credentials are
+      # set, so the bucket (`minio-setup`) needs to exist before this
+      # service's first ingest run.
+      minio-setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8003/v1/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Celery worker -- executes ingestion tasks `ingestion-beat` enqueues
+  # on each source's real schedule (`app/celery_app.py`'s `beat_
+  # schedule`). Same image/entrypoint as `ingestion` itself, just a
+  # different subcommand -- the ingest logic (`registry.run_source`) is
+  # identical either way, this is only the scheduled-dispatch mechanism.
+  ingestion-worker:
+    build:
+      context: .
+      dockerfile: infra/docker/ingestion.Dockerfile
+    <<: *common-env
+    command: worker --loglevel=info
+    restart: unless-stopped
+    volumes:
+      - duckdb_staging:/app/services/ingestion/data/staging
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-setup:
+        condition: service_completed_successfully
+
+  # Celery Beat -- fires each `beat_schedule` entry on its real cadence.
+  # **2026-08-07: this is now a single unified `ingest-all-sources` entry
+  # every 30 minutes for all 5 sources** (`app/celery_app.py`), not the
+  # earlier per-source cadence (`oe` every 5 min, `aemo-nem`/`aemo-wem`
+  # every 15, `bom` every 30) this comment used to describe -- that
+  # design was replaced 2026-08-05; this comment just hadn't caught up.
+  # `ingestion-worker` is what actually executes what this enqueues.
+  # Exactly one `beat` process must ever run at a time (it's the sole
+  # scheduler) -- `replicas` isn't set here for exactly that reason,
+  # don't scale this service.
+  ingestion-beat:
+    build:
+      context: .
+      dockerfile: infra/docker/ingestion.Dockerfile
+    <<: *common-env
+    command: beat --loglevel=info
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ── Warehouse (services/waerehouse/README.md) ────────────────────────────
+  # The real, sole warehousing implementation (overview.md §2) --
+  # `data-pipeline`'s own `warehouse-sync` this was originally extracted
+  # from is retired (its Dockerfile/compose service are gone; cutover
+  # complete). Read-only on the shared `duckdb_staging` volume when it's there
+  # (`app.db.duckdb_client`'s own module docstring -- writing/appending
+  # stays ingestion's job) -- falls back to downloading from object
+  # storage when `ingestion` runs on a different machine and this
+  # volume isn't actually shared, see
+  # `docs/runbooks/independent-service-deployment.md`.
+  warehouse:
+    build:
+      context: .
+      dockerfile: infra/docker/warehouse.Dockerfile
+    <<: *common-env
+    ports:
+      - "8004:8004"
+    volumes:
+      - duckdb_staging:/app/services/waerehouse/data/staging:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      minio-setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8004/v1/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    # Lightweight FastAPI control plane (status/storage/metrics reads) --
+    # same `deploy.resources.limits`-on-plain-`compose up` mechanism
+    # `train-worker`'s own comment below explains; bounds this from
+    # starving `api` on the same host, not a real node-pool-level
+    # isolation guarantee.
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
+
+  # The actual RabbitMQ consumer (`ecolens.landing` -> Postgres `raw.*`)
+  # -- same image/entrypoint as `warehouse` above, `command: consume` is
+  # the only difference.
+  warehouse-consumer:
+    build:
+      context: .
+      dockerfile: infra/docker/warehouse.Dockerfile
+    <<: *common-env
+    command: consume
+    volumes:
+      - duckdb_staging:/app/services/waerehouse/data/staging:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    # Same `deploy.resources.limits` reasoning as `warehouse` above --
+    # DuckDB reads + pyarrow COPY loads are heavier per-message than the
+    # API's own reads, hence the higher memory ceiling than `warehouse`'s
+    # own 1g, still nowhere near `train-worker`'s 4g.
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 2g
+
+  # ── Training-trigger consumer (TODO.md's Event-Driven Pipeline Trigger
+  # for Online/Incremental Model Training) ─────────────────────────────────
+  # **Training-code migration (this change)**: moved off `data-pipeline`'s
+  # image onto `forecast-api`'s -- `ml/train.py`, MLflow, and the warehouse
+  # connection all live there now (this service's own README.md documents
+  # the cutover; the old "forecast-api never trains" service-boundary rule
+  # is retired). `services/waerehouse`'s `POST /v1/dbt/build` publishes the
+  # `forecasting.training.trigger` events this consumes (moved from
+  # `pipeline.flows.daily_demand`, which owned `dbt build` before
+  # `waerehouse` did); `forecast-api`'s Dockerfile's `ENTRYPOINT` is just
+  # `tini --` (multi-stage rewrite, 2026-08-14), so `command:` below still
+  # fully replaces the default `CMD` (the uvicorn invocation) -- it just
+  # lands as `tini`'s args now instead of running unwrapped, same
+  # entrypoint+subcommand-override shape `ingestion`/`warehouse`'s own
+  # Dockerfiles already use for their worker roles.
+  #
+  # `deploy.resources.limits` below is item 5's "Dedicated compute/
+  # hardware isolation" point, at the scale this repo's plain `docker
+  # compose up` (no Kubernetes/swarm) actually runs at: bounding this
+  # service's CPU/memory keeps a training run from starving `api`
+  # (forecast-api's own live inference path, same image, separate
+  # container) on the same host. Compose V2 applies `deploy.resources.
+  # limits` for plain `compose up`, not only `docker stack deploy` under
+  # swarm — real node-pool-level isolation (a separate Kubernetes worker
+  # pool with its own hardware) is still out of scope here, same
+  # honestly-documented gap `TODO.md` already notes for this item.
+  train-worker:
+    build:
+      context: .
+      dockerfile: infra/docker/forecast-api.Dockerfile
+    <<: *common-env
+    command: ["ecolens-forecast", "train-worker"]
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4g
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      mlflow:
+        condition: service_started
+
+  # ── API (forecast-api) ───────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: infra/docker/forecast-api.Dockerfile
+    <<: *common-env
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mlflow:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8000/v1/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ── Web ───────────────────────────────────────────────────────────────────
+  web:
+    build:
+      context: ./frontend
+      dockerfile: ../infra/docker/web.Dockerfile
+    <<: *common-env
+    environment:
+      NEXT_PUBLIC_API_BASE: http://api:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
+  # ── Observability ─────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/prometheus/recording_rules.yml:/etc/prometheus/recording_rules.yml:ro
+      - promdata:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - alertmanager
+
+  # alertmanager.yml.template isn't a real Alertmanager config on its own
+  # -- Alertmanager doesn't do `${VAR}` interpolation (see the template's
+  # own header comment), so this renders it via `envsubst` into the
+  # `alertmanagerconfig` volume before `alertmanager` starts. Same
+  # one-shot-init-container pattern `minio-setup` already uses below --
+  # not `alertmanager`'s own command, because the official image is a
+  # minimal busybox base with no `envsubst` (no `gettext` package) on it.
+  alertmanager-config:
+    image: alpine:3.20
+    <<: *common-env
+    volumes:
+      - ./infra/alertmanager/alertmanager.yml.template:/template/alertmanager.yml.template:ro
+      - alertmanagerconfig:/config
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - apk add --no-cache gettext >/dev/null && envsubst < /template/alertmanager.yml.template > /config/alertmanager.yml
+    restart: "no"
+
+  # infra/prometheus/recording_rules.yml's alert rules route here
+  # (Prometheus's own `alerting.alertmanagers` block).
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    <<: *common-env
+    volumes:
+      - alertmanagerconfig:/config:ro
+      - alertmanagerdata:/alertmanager
+    command:
+      - --config.file=/config/alertmanager.yml
+      - --storage.path=/alertmanager
+    depends_on:
+      alertmanager-config:
+        condition: service_completed_successfully
+    ports:
+      - "9093:9093"
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana:/var/lib/grafana
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus
+
+  loki:
+    image: grafana/loki:3.2.1
+    command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "3100:3100"
+
+# ── Volumes ──────────────────────────────────────────────────────────────────
+volumes:
+  pgdata:
+  rabbitmqdata:
+  redisdata:
+  miniodata:
+  promdata:
+  grafana:
+  # Shared between `ingestion` and `warehouse`/`warehouse-consumer` — per-run
+  # DuckDB staging files (`Settings.duckdb_staging_dir`) written by the one,
+  # read + deleted by the other (`overview.md` §2, `pipeline.duckdb_staging`).
+  duckdb_staging:
+  # Rendered alertmanager.yml (envsubst output from `alertmanager-config`),
+  # handed to `alertmanager` read-only.
+  alertmanagerconfig:
+  alertmanagerdata:

@@ -1,18 +1,8 @@
-# EcoLens Project TODOs
+# Todo's
 
-## 🚀 Priority (Immediate)
-- [ ] [ECO-101] `forecast-api`: Implement Redis rate limiting for external energy queries.
-- [ ] [ECO-102] `data-pipeline`: Add drift detection trigger for AEMO data.
+## Book keeping
 
-## 🏗 Service: Forecast API
-- [ ] Add OpenAPI schema validation for emission response models.
-- [ ] Optimize PostgreSQL async pool connections.
+### fetch data before Aug 2025 scinece 2020 and store to duckdb locally and train model locally and push that model to prd for online/incrementatl learning with online incomming data
 
-## 📊 Service: Data Pipeline
-- [ ] Implement incremental dbt model run for carbon factors.
-
-## 🛠 Service: Dashboard
-- [ ] Migrate legacy state management to React Query.
-
----
-<!-- *Legend: [ECO-XXX] refers to GitHub Issue ID.* -->
+[] Nem : https://www.nemweb.com.au/Data_Archive/Wholesale_Electricity/MMSDM/
+[] WEM : https://data.wa.aemo.com.au/public/market-data/wemde/operationalDemandWithdrawal/dailyFiles/

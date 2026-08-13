@@ -1,0 +1,55 @@
+name: "ecolens"
+version: "1.0.0"
+config-version: 2
+
+profile: "ecolens"
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+# Materializations per docs/data/dbt-commands.md's documented DAG:
+# staging = view (cheap, always fresh off raw.*), intermediate = ephemeral
+# by default (inlined into whatever mart references it, never
+# materialized on its own — these are feature-engineering CTEs, not
+# something queried directly), marts = table by default.
+#
+# `+schema: intermediate` (-> physical `raw_intermediate`) exists for the
+# one intermediate model that overrides its own materialization away
+# from ephemeral (`int_demand_with_weather.sql` -> `incremental`, see
+# that model's own header comment for why) -- ephemeral models never
+# materialize into a schema at all, so this has no effect on the other
+# 6 intermediate models that still use the ephemeral default above.
+#
+# The 4 time-series `fct_*` marts override this to `materialized:
+# incremental` in their own model-level `config()` block (`TODO.md`
+# Phase 1) — `raw.*`'s 60-day retention (app/retention/pruning.py) means
+# a full `table` rebuild on every `dbt run` would silently drop mart
+# history older than the retention window, which contradicts this
+# project's own "curated tables retain the complete historical dataset"
+# contract (README's Storage Policy). The 2 `dim_*` marts stay plain
+# `table` — small reference/dimension sets (one row per fuel type or
+# per region), not history that a full rebuild can lose.
+models:
+  ecolens:
+    staging:
+      +materialized: view
+      +schema: staging
+    intermediate:
+      +materialized: ephemeral
+      +schema: intermediate
+    marts:
+      +materialized: table
+      +schema: marts
+
+seeds:
+  ecolens:
+    +schema: seeds
+    emissions_factors:
+      +column_types:
+        intensity_kgco2e_per_mwh: numeric

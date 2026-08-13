@@ -1,0 +1,66 @@
+# Shared build-context ignore for every `infra/docker/*.Dockerfile`
+# (all use `context: .`, the repo root, per `docker-compose.yml`) --
+# real, verified gap fixed 2026-08-12: with no `.dockerignore` at all,
+# every `docker build` was uploading the *entire* repo as build context
+# (every service's `.venv`, `node_modules`, `.git`, notebooks, etc.)
+# before a single `COPY` instruction even ran, and `services/ingestion`
+# alone was shipping a stale, 10MB+13MB pair of local dev DuckDB files
+# (`data/staging/landed.duckdb`, `data/training/master.duckdb` -- real,
+# git-tracked bootstrap/dev-seed data, not something a fresh production
+# container should start pre-loaded with) baked directly into the image
+# via its `COPY services/ingestion .` step, since nothing excluded them.
+
+# Version control / editor / OS cruft
+.git
+.github
+.gitignore
+.DS_Store
+.claude/
+
+# Python
+__pycache__/
+*.pyc
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+*.egg-info/
+
+# Per-service virtualenvs -- each Dockerfile runs its own `uv sync`
+# inside its own build stage; a locally-synced `.venv` must never be
+# copied in (wrong-platform wheels, stale, and large -- forecast-api's
+# alone carries a full local torch install).
+**/.venv/
+
+# Node / dashboard
+node_modules/
+**/node_modules/
+services/dashboard/.next/
+*.tsbuildinfo
+
+# Env files -- never let a real secret ride into an image layer, even
+# as defense in depth beyond "no Dockerfile COPYs .env directly" (none
+# do today -- this doesn't fix a live leak, it forecloses a future one).
+.env
+.env.*
+!*.env.example
+
+# Local runtime data artifacts -- real, git-tracked files meant as dev
+# bootstrap/seed data, not something a fresh prod container should ship
+# with baked in (real data flows through R2/Postgres at runtime).
+# Trained ML artifacts under `data/staging/models/**` are NOT matched by
+# this (the pattern below only excludes `*.duckdb*` files specifically)
+# -- those stay, since the anomaly-detection pipeline actually loads
+# them at runtime and they're small (~5MB total).
+**/data/staging/*.duckdb*
+**/data/training/*.duckdb*
+
+# Jupyter notebooks -- dev/EDA scratchpads, never imported by any
+# service's own runtime code.
+**/notebooks/
+*.ipynb
+
+# Celery Beat's local schedule file / Redis dump -- local runtime state
+# from `make dev`, not source.
+celerybeat-schedule*
+dump.rdb

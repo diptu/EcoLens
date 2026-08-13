@@ -1,0 +1,60 @@
+# Scrapes each business service's real `GET /metrics`
+# (`services/{data-pipeline,ingestion,waerehouse,forecast-api}/app/core/
+# metrics.py` -- the `ecolens/...` module paths this comment used to
+# cite don't exist anywhere in this repo, stale from before the
+# `services/` split).
+#
+# This is the older, simpler stack the root `docker-compose.yml` still
+# runs by default -- `services/observility/` is its intended eventual
+# replacement (same metrics, same alert rules ported forward, plus
+# logs/traces/richer alerting this one never had, and env-driven scrape
+# targets for services running on a different machine — see that
+# stack's own `prometheus/prometheus.yml.template`). This file's targets
+# stay hardcoded Docker Compose service names deliberately -- not
+# templated for cross-machine overrides here, since this stack is
+# scoped to "everything on one host" by design; point at
+# `services/observility/` instead once a service needs to move off this
+# host.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/recording_rules.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  - job_name: data-pipeline
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["data-pipeline:8001"]
+
+  - job_name: forecast-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["api:8000"]
+
+  # `services/ingestion` has always exported real `GET /metrics`
+  # (`app/core/metrics.py`) but was never actually scraped here --
+  # added while auditing this file for cross-machine deployability.
+  - job_name: ingestion
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["ingestion:8003"]
+
+  # services/waerehouse/README.md Phase 5 -- ecolens_warehouse_* metrics
+  # existed and were populated long before this scrape target did; add
+  # it here, not a warehouse-side code change (services/waerehouse/
+  # TODO.md's "prod grade" pass).
+  - job_name: warehouse
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["warehouse:8004"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

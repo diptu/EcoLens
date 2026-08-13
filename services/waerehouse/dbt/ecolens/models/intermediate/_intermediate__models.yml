@@ -1,0 +1,102 @@
+version: 2
+
+models:
+  - name: int_demand_with_weather
+    description: >
+      NEM + WEM demand joined to same-region/same-timestamp BoM weather,
+      with hour/day-of-week and lag/rolling-average demand features —
+      README.md's documented feature-engineering example.
+    columns:
+      - name: ts
+        tests: [not_null]
+      - name: region
+        tests: [not_null]
+      - name: demand_mw
+        tests: [not_null]
+      - name: renewable_mw_source
+        description: >
+          Passed through from stg_openelectricity_mix ('provider' /
+          'derived' / null — TODO.md Phase 2).
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["provider", "derived"]
+
+  - name: int_mix_share
+    description: >
+      stg_openelectricity_mix's wide per-fuel MW columns, unpivoted to one
+      row per (ts, network_code, region, fuel_type) plus each fuel's
+      share of total generation for that interval.
+    columns:
+      - name: fuel_type
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('emissions_factors')
+                field: fuel_type
+
+  - name: int_carbon_intensity
+    description: >
+      Per-(ts, network_code, region) generation-weighted carbon
+      intensity — README's "live_mix_weighted" emissions method.
+    columns:
+      - name: ts
+        tests: [not_null]
+      - name: region
+        tests: [not_null]
+
+  - name: int_fuel_emissions
+    description: >
+      Per-(ts, network_code, region, fuel_type) generation (MWh) +
+      weighted emissions (kgCO2e) — the per-fuel math int_carbon_intensity
+      sums away; shared by int_carbon_intensity and fct_generation_mix so
+      neither duplicates the weighting logic.
+    columns:
+      - name: ts
+        tests: [not_null]
+      - name: region
+        tests: [not_null]
+      - name: fuel_type
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('emissions_factors')
+                field: fuel_type
+
+  - name: int_anomaly_by_demand
+    description: >
+      Worst flagged meta.anomalies row per (ts, region), scoped to the 2
+      demand-table sources — what fct_energy_demand.sql's is_anomalous/
+      anomaly_score/anomaly_reason columns join against (TODO.md Phase 3).
+    columns:
+      - name: ts
+        tests: [not_null]
+      - name: region
+        tests: [not_null]
+
+  - name: int_anomaly_by_mix
+    description: >
+      Worst flagged meta.anomalies row per (hour, network_code, region),
+      rolled up from openelectricity_mix's row-level anomalies to the same
+      hourly grain fct_generation_mix.sql/fct_carbon_intensity.sql
+      aggregate to (TODO.md Phase 3 + "prod grade" pass).
+    columns:
+      - name: hour
+        tests: [not_null]
+      - name: region
+        tests: [not_null]
+
+  - name: int_anomaly_by_mix_row
+    description: >
+      Worst flagged meta.anomalies row per (ts, network_code, region) --
+      the row-level counterpart of int_anomaly_by_mix, for
+      fct_emissions_5min.sql (row-grain, not hourly-aggregated —
+      TODO.md's "prod grade" pass, extending Phase 3 past its original
+      2 marts).
+    columns:
+      - name: ts
+        tests: [not_null]
+      - name: region
+        tests: [not_null]

@@ -28,6 +28,31 @@ purely because `OE_API_KEY` was unset -- AEMO NEM/WEM ingestion kept
 landing fresh rows the entire time, completely unaffected, because none
 of this depends on AEMO data at all.
 
+**Real, live-confirmed hang found + fixed (2026-08-13), while running a
+real multi-month historical backfill for the first time**: `_fetch_metric`
+awaited `client.get_network_data(...)` with no timeout at all. The
+installed SDK's `_build_session` (`openelectricity/client.py`) forces
+`aiohttp`'s `ThreadedResolver` for DNS instead of the C-ares
+`AsyncResolver` (its own comment explains why -- a different, unrelated
+DNS-failure workaround), but a stalled OS-level `getaddrinfo()` call
+inside that resolver's worker thread isn't reliably interrupted by
+`aiohttp`'s own per-request timeout machinery -- confirmed live: a real
+backfill process sat with **zero CPU activity, no exception, no log
+line** on one single day's request for 20+ minutes before it was killed
+by hand. Every call normally takes ~1-2s (this module's own docstring
+already knew that), so a real stall there is silent and unbounded, not
+just slow. Fixed by wrapping the call in `asyncio.wait_for` with a
+generous-but-bounded timeout, retried a few times with a **fresh**
+`AsyncOEClient`/connection each attempt (reusing the same stuck
+connection would just hang again) -- same jittered-backoff shape
+`pipeline.http_retry.fetch_with_retry` already uses for the `httpx`-based
+ingest sources, not reusable here as-is since this SDK is
+`aiohttp`-based and raises different exception types, but the same
+pattern. A timeout that exhausts all retries still raises, same as any
+other real error -- `ingest_openelectricity._fetch_all_regions`'s
+existing per-region `try/except Exception` already logs and moves on to
+the next region/day rather than losing the whole run.
+
 `network_region` (`todo-model-training.md`'s OE region-join blocker,
 fixed 2026-08-05): `AsyncOEClient.get_network_data`'s own real, typed
 signature (confirmed by reading the installed SDK directly, not
@@ -74,15 +99,29 @@ records returned for NEM/WEM alike).
 
 from __future__ import annotations
 
+import asyncio
+import random
 from datetime import datetime, timedelta, timezone
 
+import aiohttp
 import pandas as pd
 from openelectricity import AsyncOEClient, DataMetric
 from openelectricity.models.timeseries import TimeSeriesResponse
 
 from app.core.config import get_settings
+from app.core.logging import get_logger
+
+log = get_logger(__name__)
 
 _LONG_FORM_COLUMNS = ("ts", "fuel_type", "value")
+
+# A real call normally takes ~1-2s (module docstring) -- generous
+# headroom over that, but still bounded, so a genuine stall (see module
+# docstring's "Real, live-confirmed hang" note) fails fast instead of
+# hanging forever.
+_REQUEST_TIMEOUT_SECONDS = 45.0
+_MAX_ATTEMPTS = 3
+_BASE_DELAY_SECONDS = 1.0
 
 
 def _to_records_linear(self: TimeSeriesResponse) -> list[dict]:
@@ -163,15 +202,43 @@ async def _fetch_metric(
     naive_local_since = since.astimezone(tz).replace(tzinfo=None)
     naive_local_until = until.astimezone(tz).replace(tzinfo=None) if until else None
 
-    async with AsyncOEClient(api_key=settings.oe_api_key) as client:
-        response = await client.get_network_data(
-            network_code=network_code,
-            metrics=[metric],
-            date_start=naive_local_since,
-            date_end=naive_local_until,
-            network_region=network_region,
-            secondary_grouping="fueltech",
-        )
+    response: TimeSeriesResponse | None = None
+    last_error: Exception | None = None
+    for attempt in range(_MAX_ATTEMPTS):
+        try:
+            # A fresh client (and connection) each attempt -- retrying
+            # against the same stuck connection would just hang again.
+            async with AsyncOEClient(api_key=settings.oe_api_key) as client:
+                response = await asyncio.wait_for(
+                    client.get_network_data(
+                        network_code=network_code,
+                        metrics=[metric],
+                        date_start=naive_local_since,
+                        date_end=naive_local_until,
+                        network_region=network_region,
+                        secondary_grouping="fueltech",
+                    ),
+                    timeout=_REQUEST_TIMEOUT_SECONDS,
+                )
+            break
+        except (TimeoutError, aiohttp.ClientError) as exc:
+            last_error = exc
+            if attempt < _MAX_ATTEMPTS - 1:
+                delay = _BASE_DELAY_SECONDS * (2**attempt) + random.uniform(0, 0.25)
+                log.warning(
+                    "oe.fetch_metric_retry",
+                    attempt=attempt + 1,
+                    max_attempts=_MAX_ATTEMPTS,
+                    sleep_seconds=round(delay, 2),
+                    network_code=network_code,
+                    metric=metric.value,
+                    error=str(exc),
+                )
+                await asyncio.sleep(delay)
+
+    if response is None:
+        assert last_error is not None  # noqa: S101 -- loop above always sets it before falling through
+        raise last_error
 
     records = response.to_records()
     if not records:

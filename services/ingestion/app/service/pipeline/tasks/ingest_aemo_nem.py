@@ -416,20 +416,35 @@ def _parse_dispatchis_csv(text: str) -> list[dict]:
 
 _MMSDM_BASE = "https://www.nemweb.com.au/Data_Archive/Wholesale_Electricity/MMSDM"
 
-# AEMO changed this archive's own filename convention starting 2025 --
-# confirmed live (2026-08-12): both the old `PUBLIC_DVD_*` pattern
-# (against a real 2020-01 sample) and the new `PUBLIC_ARCHIVE#*` pattern
-# (against a real 2025-07 sample) return real HTTP 200 with real zip
-# content. AEMO's own published retention for this archive goes back to
-# 2009, but only 2020-01 has actually been checked here -- treat
-# anything earlier as unverified by this code, not guaranteed to work.
-_MMSDM_NEW_PATTERN_FIRST_YEAR = 2025
+# AEMO changed this archive's own filename convention starting the
+# **2024-08** monthly folder, not "2025" as this constant used to claim
+# (a real, previously-undiscovered bug -- confirmed live 2026-08-13 while
+# backfilling real Aug-Dec 2024 NEM data: every day in that window 404'd
+# on *both* the live DispatchIS Archive (outside its own rolling ~13-
+# month window, expected) *and* the old `PUBLIC_DVD_*` MMSDM fallback URL
+# this function used to build for any `year < 2025`, since AEMO had
+# already switched formats for 2024-08 specifically. Binary-searched the
+# real cutoff directly against the live archive: `MMSDM_2024_07`'s old
+# `PUBLIC_DVD_*` URL returns a real 200, `MMSDM_2024_08`'s does not (404)
+# but its new `PUBLIC_ARCHIVE#*` URL does. `_MMSDM_NEW_PATTERN_FIRST_YEAR`
+# (a bare year, real HTTP 200 confirmed 2026-08-12 only at the two
+# extremes -- 2020-01 old, 2025-07 new, nothing in between ever actually
+# checked) couldn't express a mid-year boundary at all, so every request
+# for Aug-Dec 2024 silently built a URL for a file that no longer existed
+# instead of a working one -- the code never even had a chance to notice,
+# since a 404 there just looks like "this day of history isn't available"
+# rather than "we're asking for the wrong filename." Replaced with a real
+# `(year, month)` tuple so the comparison can express this boundary
+# precisely. AEMO's own published retention for this archive goes back to
+# 2009, but only 2020-01 has actually been checked here -- treat anything
+# earlier as unverified by this code, not guaranteed to work.
+_MMSDM_NEW_PATTERN_FIRST_YM = (2024, 8)
 
 
 def _mmsdm_table_url(table: str, year: int, month: int) -> str:
     folder = f"{_MMSDM_BASE}/{year}/MMSDM_{year}_{month:02d}/MMSDM_Historical_Data_SQLLoader/DATA"
     yyyymm = f"{year}{month:02d}"
-    if year >= _MMSDM_NEW_PATTERN_FIRST_YEAR:
+    if (year, month) >= _MMSDM_NEW_PATTERN_FIRST_YM:
         # The literal "#" separators must be percent-encoded in the URL.
         filename = f"PUBLIC_ARCHIVE%23{table}%23FILE01%23{yyyymm}010000.zip"
     else:

@@ -7,6 +7,7 @@ SHELL := /bin/bash
 
 # ── Vars ────────────────────────────────────────────────────────────────────
 UV       ?= uv
+DOCKER   ?= docker
 COMPOSE  ?= docker compose
 DC_FILE  ?= docker-compose.yml
 ENV_FILE ?= .env
@@ -62,6 +63,26 @@ up: check-env ## Spin up services using profiles.
 .PHONY: down
 down: ## Stop all services.
 	$(COMPOSE) -f $(DC_FILE) down
+
+# ── Docker Images ───────────────────────────────────────────────────────────
+# One target per real infra/docker/*.Dockerfile (`docker.yml`'s own build
+# matrix, mirrored locally, plus `ingestion`/`mlflow` which that workflow
+# doesn't build but docker-compose.yml does). `worker`/`web` are deliberately
+# excluded: docker-compose.yml references infra/docker/{worker,web}.Dockerfile
+# but neither file exists yet (`docker.yml`'s own "web has no Dockerfile yet"
+# note -- same gap, not something this target papers over).
+IMAGE_TAG        ?= local
+DOCKER_SERVICES  := data-pipeline forecast-api warehouse ingestion mlflow
+
+.PHONY: docker-build
+docker-build: ## Build Docker image(s) from infra/docker/*.Dockerfile. Pass SERVICE=forecast-api to build just one; IMAGE_TAG=local overrides the tag.
+	@for svc in $(if $(SERVICE),$(SERVICE),$(DOCKER_SERVICES)); do \
+		if [ ! -f infra/docker/$$svc.Dockerfile ]; then \
+			echo "Unknown SERVICE '$$svc' -- no infra/docker/$$svc.Dockerfile (have: $(DOCKER_SERVICES))"; exit 1; \
+		fi; \
+		echo "── docker build $$svc:$(IMAGE_TAG) ──"; \
+		$(DOCKER) build -f infra/docker/$$svc.Dockerfile -t ecolens/$$svc:$(IMAGE_TAG) . || exit 1; \
+	done
 
 # ── Quality Assurance ───────────────────────────────────────────────────────
 .PHONY: lint

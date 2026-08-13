@@ -302,6 +302,22 @@ def test_mmsdm_table_url_uses_the_new_pattern_from_2025_onward():
     )
 
 
+def test_mmsdm_table_url_real_boundary_is_2024_08_not_2025():
+    """Regression: the real cutoff (binary-searched live 2026-08-13
+    against `nemweb.com.au` -- `MMSDM_2024_07`'s old-pattern URL 200s,
+    `MMSDM_2024_08`'s doesn't but its new-pattern URL does) is mid-2024,
+    not "any year >= 2025" -- the bug this test guards against silently
+    built a 404-guaranteed URL for every real Aug-Dec 2024 NEM backfill
+    request before this fix."""
+    july = ingest_aemo_nem._mmsdm_table_url("DISPATCHREGIONSUM", 2024, 7)
+    assert july.endswith("PUBLIC_DVD_DISPATCHREGIONSUM_202407010000.zip")
+
+    august = ingest_aemo_nem._mmsdm_table_url("DISPATCHREGIONSUM", 2024, 8)
+    assert august.endswith(
+        "PUBLIC_ARCHIVE%23DISPATCHREGIONSUM%23FILE01%23202408010000.zip"
+    )
+
+
 def _mmsdm_regionsum_csv(rows: list[tuple[str, str, float]]) -> str:
     """A minimal but structurally real MMSDM `DISPATCHREGIONSUM` monthly
     CSV — same real column layout as a downloaded 2020-01 sample

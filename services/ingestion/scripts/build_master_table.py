@@ -43,6 +43,25 @@ anywhere in AEMO NEM/WEM demand, crossed with all 6 known regions — so
 gaps show up as NULL rows rather than missing timestamps, matching a
 regular time index a training pipeline can rely on.
 
+**Historical dumps merged in too (2026-08-13).** `landed.duckdb` only
+holds `retention.DEFAULT_RETENTION_DAYS` (30 days) of already-synced
+history — real multi-year history instead lives in the standalone
+`data/historical_{nem,wem,oe}.duckdb` files `scripts/backfill_*_to_
+duckdb.py` write (kept separate from `landed.duckdb` for the same
+pruning reason this module's own docstring above already explains for
+`master` itself). If those files exist next to `landed.duckdb`, they're
+ATTACHed read-only and UNIONed into `aemo_demand`/`oe_mix` alongside
+`landed.duckdb`'s own rows, so `master` spans however much real history
+is available across *all* of them, not just the live 30-day window.
+Silently degrades to the old landed-only behavior if none of the three
+are present (e.g. a fresh checkout, CI). The historical NEM/WEM dumps
+only ever carry `demand_mw`/`price_mwh` (no per-fuel columns — AEMO's
+`DISPATCHREGIONSUM` archive doesn't have them) — their fuel-mix columns
+are NULL-padded in the union, same pattern the original nem/wem union
+below already used for each other's *own* missing columns; real
+per-fuel data for that period still comes through `oe_mix`, which the
+historical OE dump does carry.
+
 Run from `services/ingestion/`:
 
     uv run python scripts/build_master_table.py
@@ -63,7 +82,49 @@ log = get_logger(__name__)
 
 _REGIONS = ["NSW1", "QLD1", "SA1", "TAS1", "VIC1", "WEM"]
 
-_BUILD_SQL = """
+# NULL-padded to the same 15-column shape as the nem/wem branches above
+# them -- these historical dumps only ever carry demand_mw/price_mwh
+# (see module docstring). Interpolated into `aemo_demand`'s FROM only
+# when the corresponding historical file is actually attached.
+_HIST_NEM_BRANCH = """
+    UNION ALL
+    SELECT
+        ts, region, demand_mw, price_mwh,
+        NULL::DOUBLE AS coal_mw, NULL::DOUBLE AS gas_mw,
+        NULL::DOUBLE AS hydro_mw, NULL::DOUBLE AS wind_mw,
+        NULL::DOUBLE AS solar_utility_mw, NULL::DOUBLE AS solar_rooftop_mw,
+        NULL::DOUBLE AS battery_mw, NULL::DOUBLE AS net_import_mw,
+        NULL::DOUBLE AS diesel_mw, NULL::DOUBLE AS biomass_mw,
+        NULL::DOUBLE AS total_generation_mw
+    FROM hist_nem.aemo_nem_dispatch
+"""
+
+_HIST_WEM_BRANCH = """
+    UNION ALL
+    SELECT
+        ts, region, demand_mw, price_mwh,
+        NULL::DOUBLE AS coal_mw, NULL::DOUBLE AS gas_mw,
+        NULL::DOUBLE AS hydro_mw, NULL::DOUBLE AS wind_mw,
+        NULL::DOUBLE AS solar_utility_mw, NULL::DOUBLE AS solar_rooftop_mw,
+        NULL::DOUBLE AS battery_mw, NULL::DOUBLE AS net_import_mw,
+        NULL::DOUBLE AS diesel_mw, NULL::DOUBLE AS biomass_mw,
+        NULL::DOUBLE AS total_generation_mw
+    FROM hist_wem.aemo_wem_dispatch
+"""
+
+
+def _build_sql(*, has_hist_nem: bool, has_hist_wem: bool, has_hist_oe: bool) -> str:
+    """`master`'s build query, with the historical-dump UNION branches
+    spliced in only for whichever of `hist_nem`/`hist_wem`/`hist_oe` are
+    actually ATTACHed (see module docstring) -- `has_hist_*=False` across
+    the board reproduces the exact original landed-only query."""
+    oe_source = (
+        "staging.openelectricity_mix"
+        if not has_hist_oe
+        else "(SELECT * FROM staging.openelectricity_mix "
+        "UNION ALL BY NAME SELECT * FROM hist_oe.openelectricity_mix)"
+    )
+    return f"""
 CREATE OR REPLACE TABLE master AS
 WITH aemo_demand AS (
     SELECT
@@ -96,6 +157,8 @@ WITH aemo_demand AS (
             battery_mw, NULL::DOUBLE AS net_import_mw, diesel_mw, biomass_mw,
             total_generation_mw
         FROM staging.aemo_wem_dispatch
+        {_HIST_NEM_BRANCH if has_hist_nem else ""}
+        {_HIST_WEM_BRANCH if has_hist_wem else ""}
     )
     GROUP BY 1, 2
 ),
@@ -119,7 +182,7 @@ oe_mix AS (
         avg(wind_mw) AS oe_wind_mw,
         avg(total_generation_mw) AS oe_total_generation_mw,
         avg(total_renewable_mw) AS oe_total_renewable_mw
-    FROM staging.openelectricity_mix
+    FROM {oe_source}
     GROUP BY 1, 2
 ),
 weather AS (
@@ -239,6 +302,15 @@ def master_path() -> Path:
     return _training_dir() / "master.duckdb"
 
 
+def _historical_paths() -> dict[str, Path]:
+    data_dir = staging_path().parent.parent
+    return {
+        "hist_nem": data_dir / "historical_nem.duckdb",
+        "hist_wem": data_dir / "historical_wem.duckdb",
+        "hist_oe": data_dir / "historical_oe.duckdb",
+    }
+
+
 def build_master_table() -> None:
     source_path = staging_path()
     if not source_path.exists():
@@ -246,6 +318,9 @@ def build_master_table() -> None:
 
     out_path = master_path()
     out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    historical = _historical_paths()
+    present = {name: path.exists() for name, path in historical.items()}
 
     con = duckdb.connect(str(out_path))
     try:
@@ -256,9 +331,19 @@ def build_master_table() -> None:
         # `staging.*`-qualified table references below just read from
         # the attached file.
         con.execute(f"ATTACH '{source_path}' AS staging (READ_ONLY)")
-        con.execute(_BUILD_SQL, {"regions": _REGIONS})
+        for name, path in historical.items():
+            if present[name]:
+                con.execute(f"ATTACH '{path}' AS {name} (READ_ONLY)")
+        build_sql = _build_sql(
+            has_hist_nem=present["hist_nem"],
+            has_hist_wem=present["hist_wem"],
+            has_hist_oe=present["hist_oe"],
+        )
+        con.execute(build_sql, {"regions": _REGIONS})
     finally:
         con.close()
+    if any(present.values()):
+        log.info("build_master_table.merged_historical", **present)
 
 
 @click.command()

@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime
 
 import pandas as pd
@@ -187,3 +188,63 @@ async def test_fetch_network_data_converts_response_ts_back_to_utc(monkeypatch):
     df = await oe.fetch_network_data("NEM", datetime(2026, 1, 1, tzinfo=UTC))
 
     assert df.iloc[0]["ts"] == pd.Timestamp("2026-01-01T00:00:00", tz="UTC")
+
+
+def _fake_client_hangs_then_succeeds(records, hangs_for_attempts, captured_calls):
+    """A fake `AsyncOEClient` whose `get_network_data` never returns for
+    the first `hangs_for_attempts` client constructions (simulating the
+    real stuck-DNS-resolver-thread hang this module's docstring
+    describes), then succeeds on a fresh client after that -- regression
+    for the fix itself: `_fetch_metric` must give up on a hung attempt
+    (via `asyncio.wait_for`) and retry with a **new** client rather than
+    waiting on the same stuck one forever."""
+    attempt = {"n": 0}
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get_network_data(self, **kwargs):
+            captured_calls.append(kwargs)
+            attempt["n"] += 1
+            if attempt["n"] <= hangs_for_attempts:
+                await asyncio.sleep(3600)  # never actually reached -- wait_for cuts in first
+            return FakeResponse(records)
+
+    return lambda **kwargs: FakeClient()
+
+
+async def test_fetch_network_data_retries_past_a_hung_attempt(monkeypatch):
+    monkeypatch.setattr(oe, "_REQUEST_TIMEOUT_SECONDS", 0.02)
+    monkeypatch.setattr(oe, "_BASE_DELAY_SECONDS", 0.001)
+    naive_local = datetime(2026, 1, 1, 10, 0)
+    records = [{"interval": naive_local, "fueltech": "coal", "power": 100.0}]
+    calls = []
+    monkeypatch.setattr(
+        oe, "AsyncOEClient", _fake_client_hangs_then_succeeds(records, 1, calls)
+    )
+
+    df = await oe.fetch_network_data("NEM", datetime(2026, 1, 1, tzinfo=UTC))
+
+    assert len(df) == 1
+    # One hung attempt (timed out, discarded) + one real attempt on a
+    # fresh client -- not stuck forever, and not reusing the stuck one.
+    assert len(calls) == 2
+
+
+async def test_fetch_network_data_raises_after_exhausting_retries_on_hang(monkeypatch):
+    monkeypatch.setattr(oe, "_REQUEST_TIMEOUT_SECONDS", 0.02)
+    monkeypatch.setattr(oe, "_BASE_DELAY_SECONDS", 0.001)
+    monkeypatch.setattr(oe, "_MAX_ATTEMPTS", 2)
+    calls = []
+    monkeypatch.setattr(
+        oe, "AsyncOEClient", _fake_client_hangs_then_succeeds([], 99, calls)
+    )
+
+    with pytest.raises(TimeoutError):
+        await oe.fetch_network_data("NEM", datetime(2026, 1, 1, tzinfo=UTC))
+
+    assert len(calls) == 2

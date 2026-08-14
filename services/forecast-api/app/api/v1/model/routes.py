@@ -14,6 +14,7 @@ action in this platform's current scope)."""
 from __future__ import annotations
 
 import math
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Query
 from mlflow.exceptions import MlflowException
@@ -25,6 +26,7 @@ from app.core.errors import ApiError
 from app.schemas.model import (
     DriftListResponse,
     DriftReportOut,
+    EvaluateModelRequest,
     EvaluationHistoryOut,
     EvaluationSummaryOut,
     ExperimentOut,
@@ -62,6 +64,7 @@ from app.service.ml.registry import (
     list_versions,
     promote_version,
 )
+from app.service.ml.evaluate import evaluate_and_log, evaluate_tft_and_log
 
 router = APIRouter(prefix="/v1", tags=["model"])
 
@@ -390,6 +393,67 @@ async def get_model_version_loss_curve(
                 val_mae=p.val_mae,
             )
             for p in curve.points
+        ],
+    )
+
+
+@router.post(
+    "/model/versions/{version}/evaluate", response_model=EvaluationSummaryOut
+)
+async def evaluate_model_version(
+    version: str,
+    body: EvaluateModelRequest = EvaluateModelRequest(),
+    settings: Settings = Depends(get_app_settings),
+) -> EvaluationSummaryOut:
+    """Triggers a real walk-forward backtest over HTTP -- previously
+    `ecolens-forecast evaluate` was CLI-only, so `GET .../evaluation`
+    almost always returned `null` and the dashboard's Model Comparison
+    page had nothing beyond a version's training-time `test_mape` to
+    show (confirmed live 2026-08-15: every registered version showed
+    blank Accuracy/Reliability/Consistency and "not enough real data to
+    recommend a model yet"). Runs synchronously (unlike `POST /v1/model/
+    train`, which only publishes an async trigger) -- `EvaluateModel
+    Request`'s own docstring has the reasoning for why that's safe here.
+    """
+    architecture = body.architecture or "lstm"
+    model_name = body.model_name or (
+        settings.mlflow_registry_model_name if architecture == "lstm" else "lstm_demand_tft"
+    )
+    resolved_regions = body.regions or settings.model_default_regions
+    evaluator = evaluate_tft_and_log if architecture == "tft" else evaluate_and_log
+    try:
+        result = await evaluator(
+            model_name,
+            version,
+            resolved_regions,
+            settings=settings,
+            horizon=body.horizon,
+            n_origins=body.n_origins,
+        )
+    except MlflowException as exc:
+        raise _registry_error(
+            exc, not_found_message=f"No version '{version}' of '{model_name}'"
+        ) from exc
+
+    return EvaluationSummaryOut(
+        model_name=model_name,
+        version=version,
+        run_id=result.run_id,
+        evaluated_at=datetime.now(UTC),
+        n_origins=body.n_origins,
+        regions=[
+            RegionEvaluationOut(
+                region=r.region,
+                candidate=r.model_name,
+                mape=r.mape,
+                rmse=r.rmse,
+                coverage=r.empirical_coverage,
+                interval_width=r.mean_interval_width,
+                n_origins=r.n_origins,
+                mae=r.mae,
+                mean_error=r.mean_error,
+            )
+            for r in result.reports
         ],
     )
 

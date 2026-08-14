@@ -44,6 +44,34 @@ RUN uv sync --no-dev --frozen --no-install-project
 COPY services/forecast-api .
 RUN uv sync --no-dev --frozen
 
+# Split the largest site-packages entries out of the venv into their own
+# directories so the runtime stage's COPY below can ship them as
+# separate, smaller layers -- a single ~1GB `COPY` blob (and, it turned
+# out, even torch alone at ~580MB) reliably failed to push through this
+# environment's local Docker Desktop proxy (`write tcp ...:3128: broken
+# pipe` / `use of closed network connection`, reproduced identically
+# across 4 separate push attempts, 2 different push tools, at two
+# different size thresholds). Moved (not copied) so the venv's own
+# directory tree stays the single source of truth -- the runtime
+# stage's later `COPY .../forecast-api` naturally excludes whatever's
+# been moved out here, no manual exclude-list to keep in sync.
+#
+# torch itself gets extra treatment: `torch/test` (90MB) and
+# `torch/include` (63MB) are build-time-only (C++ test fixtures / headers
+# for building extensions against libtorch) -- this service never
+# compiles against torch, only imports it, so they're just dropped
+# rather than shipped at all. `torch/lib/libtorch_cpu.so` (251MB, by far
+# torch's single largest file) gets pulled into its own layer separately
+# from the rest of `torch/` (~176MB after the above) -- two blobs neither
+# near the ~580MB size that failed.
+RUN mkdir -p /big-pkgs \
+    && mv .venv/lib/python3.12/site-packages/torch /big-pkgs/torch \
+    && rm -rf /big-pkgs/torch/test /big-pkgs/torch/include \
+    && mv /big-pkgs/torch/lib/libtorch_cpu.so /big-pkgs/libtorch_cpu.so \
+    && mv .venv/lib/python3.12/site-packages/pyarrow /big-pkgs/pyarrow \
+    && mv .venv/lib/python3.12/site-packages/scipy /big-pkgs/scipy \
+    && mv .venv/lib/python3.12/site-packages/scipy.libs /big-pkgs/scipy.libs
+
 
 FROM python:3.12-slim AS runtime
 
@@ -75,10 +103,21 @@ RUN groupadd --gid 10001 app && useradd --uid 10001 --gid app --no-create-home -
 
 WORKDIR /app/services/forecast-api
 
-# Only the finished venv + source tree from `builder` -- no `uv`/`uvx`
-# binaries, no apt/uv package cache layers, no dependency-resolution
-# intermediates ship in the final image. Owned by the real runtime user,
-# not root, from the moment it lands in this stage.
+# The finished venv + source tree from `builder`, split across several
+# `COPY`s -- see the builder stage's own `mv` comment for why (avoids
+# one ~1GB layer that reliably failed to push through this environment's
+# proxy). Each of these 4 packages lands back at its normal site-packages
+# path; order doesn't matter, they're disjoint directories.
+COPY --from=builder --chown=app:app /big-pkgs/torch /app/services/forecast-api/.venv/lib/python3.12/site-packages/torch
+COPY --from=builder --chown=app:app /big-pkgs/libtorch_cpu.so /app/services/forecast-api/.venv/lib/python3.12/site-packages/torch/lib/libtorch_cpu.so
+COPY --from=builder --chown=app:app /big-pkgs/pyarrow /app/services/forecast-api/.venv/lib/python3.12/site-packages/pyarrow
+COPY --from=builder --chown=app:app /big-pkgs/scipy /app/services/forecast-api/.venv/lib/python3.12/site-packages/scipy
+COPY --from=builder --chown=app:app /big-pkgs/scipy.libs /app/services/forecast-api/.venv/lib/python3.12/site-packages/scipy.libs
+
+# Everything else -- no `uv`/`uvx` binaries, no apt/uv package cache
+# layers, no dependency-resolution intermediates ship in the final
+# image. Owned by the real runtime user, not root, from the moment it
+# lands in this stage.
 COPY --from=builder --chown=app:app /app/services/forecast-api /app/services/forecast-api
 
 ENV PATH="/app/services/forecast-api/.venv/bin:$PATH" \

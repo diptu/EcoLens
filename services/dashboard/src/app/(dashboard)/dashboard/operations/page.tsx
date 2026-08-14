@@ -38,11 +38,16 @@ export default function OperationsDashboardPage() {
         if (!cancelled) setModelInfo(r);
       })
       .catch(() => {});
-    // IAM (services/iam) is no longer building, so it's filtered out of
-    // this page's Service Health grid -- `lib/health.ts`'s
+    // IAM (services/iam) is no longer building, and data-pipeline is a
+    // fully retired service (its ingestion/warehousing halves were
+    // extracted into services/ingestion and services/waerehouse; no
+    // data-pipeline Dockerfile/compose service exists anymore) -- both
+    // filtered out of this page's Service Health grid. `lib/health.ts`'s
     // `fetchAllServicesHealth` is left as-is (still used elsewhere).
     fetchAllServicesHealth().then((r) => {
-      if (!cancelled) setServicesHealth(r.filter((s) => s.service !== "iam"));
+      if (!cancelled) {
+        setServicesHealth(r.filter((s) => s.service !== "iam" && s.service !== "data-pipeline"));
+      }
     });
     fetchPublicDataSources()
       .then((r) => {

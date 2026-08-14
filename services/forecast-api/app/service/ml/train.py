@@ -32,6 +32,7 @@ in-memory), just without the separate artifact-store hop.
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -1028,8 +1029,19 @@ async def train_and_register(
             f"no training data found in {data_source!r} for regions={list(regions)}"
         )
 
-    result = train_model(raw_df, config, holidays=holidays_df)
-    return log_and_register_run(
+    # Both calls below are synchronous, CPU/network-heavy (the full
+    # epoch loop, then MLflow logging + S3 artifact upload) -- run off
+    # the event loop via `asyncio.to_thread` so a long training run
+    # doesn't starve this process's other async work (in particular
+    # `train-worker`'s RabbitMQ connection, which needs the loop free to
+    # send heartbeat frames; a starved loop reads to the broker as a
+    # dead connection, killing the message ack for an otherwise-
+    # successful run right as `log_and_register_run` finishes --
+    # confirmed live 2026-08-14, two real full retrains in a row lost
+    # this way).
+    result = await asyncio.to_thread(train_model, raw_df, config, holidays=holidays_df)
+    return await asyncio.to_thread(
+        log_and_register_run,
         result,
         config,
         regions,

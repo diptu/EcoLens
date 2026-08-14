@@ -28,8 +28,17 @@ FROM python:3.12-slim AS builder
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
+# Pinned to match forecast-api's actual resolved client version (its
+# own `pyproject.toml` constraint is an unbounded `mlflow>=2.17`, so
+# `uv sync` drifted this server's pin out of sync over time -- confirmed
+# live 2026-08-14: client resolved to 3.15.0, this server was still on
+# 2.17.2, and MLflow 3.x's client calls a `/api/2.0/mlflow/logged-models`
+# endpoint the 2.x server doesn't have, 404ing every real training run's
+# final registration step. Re-check this pin against forecast-api's
+# actual resolved `mlflow` version (not its `pyproject.toml` floor)
+# whenever that dependency bumps.
 RUN pip install --no-cache-dir \
-        mlflow==2.17.2 \
+        mlflow==3.15.0 \
         psycopg2-binary==2.9.10 \
         boto3==1.35.99
 

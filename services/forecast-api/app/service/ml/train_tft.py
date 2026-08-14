@@ -34,7 +34,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import ConcatDataset, DataLoader
 
 from app.core.config import Settings, get_settings
 from app.db.session import get_session
@@ -234,36 +234,100 @@ def train_tft_model(
         )
 
     scalers = fit_scalers(split_train)
-    train_scaled = apply_scalers(split_train, scalers)
-    val_scaled = apply_scalers(earlystop_val, scalers)
-    cal_scaled = apply_scalers(cal, scalers)
-    test_scaled = apply_scalers(test, scalers)
+    # `TFTDataset.min_target_ts`'s own docstring has the full rationale
+    # (ported from `ml/train.py`'s identical 2026-08-09 fix, same reason
+    # this module's own per-region split loop above exists): with only
+    # ~14 days of live NEM history, a strictly train-disjoint val/cal
+    # slice doesn't fit even one `lookback+horizon` window. Scalers/
+    # target_scaler are still fit on `split_train` only (no leakage of
+    # distribution statistics into val/test), but *windowing* now runs
+    # against each region's full history so val/cal/test windows' encoder/
+    # decoder context can reach back across the split boundary -- only
+    # each window's *target* is gated to its own split (per-region, via
+    # `min_target_ts`), so no held-out label is ever also a train label.
+    full_scaled = apply_scalers(engineered, scalers)
 
     target_scaler = _fit_target_scaler(split_train)
-    train_scaled = _scale_target(train_scaled, target_scaler)
-    val_scaled = _scale_target(val_scaled, target_scaler)
-    cal_scaled = _scale_target(cal_scaled, target_scaler)
-    test_scaled = _scale_target(test_scaled, target_scaler)
+    full_scaled = _scale_target(full_scaled, target_scaler)
 
-    def _dataset(df):
+    def _dataset(df, min_target_ts=None):
         return TFTDataset(
             df,
             encoder_columns=ENCODER_COLUMNS,
             decoder_columns=DECODER_COLUMNS,
             lookback=config.lookback,
             horizon=config.horizon,
+            min_target_ts=min_target_ts,
         )
 
-    train_ds = _dataset(train_scaled)
-    val_ds = _dataset(val_scaled)
-    cal_ds = _dataset(cal_scaled)
-    test_ds = _dataset(test_scaled)
+    # One `TFTDataset` per region per split, using that region's OWN
+    # cumulative boundaries (same construction as `ml/train.py`'s
+    # identical loop) -- `TFTDataset` already refuses to build a window
+    # spanning two regions, but that guarantee only holds if it's never
+    # handed two regions' rows with two DIFFERENT real boundaries
+    # conflated into one `min_target_ts`.
+    train_parts, val_parts, cal_parts, test_parts = [], [], [], []
+    region_window_counts: dict[str, tuple[int, int, int]] = {}
+    region_cal_datasets: dict[str, TFTDataset] = {}
+    for region, (region_train, region_earlystop_val, region_cal, region_test) in (
+        per_region_split.items()
+    ):
+        if region_train.empty or region_earlystop_val.empty or region_cal.empty:
+            log.warning(
+                "train_tft_model.region_split_empty",
+                region=region,
+                n_train=len(region_train),
+                n_earlystop_val=len(region_earlystop_val),
+                n_cal=len(region_cal),
+            )
+            region_window_counts[region] = (0, 0, 0)
+            continue
+
+        region_full = full_scaled[full_scaled["region"] == region]
+        region_train_end = region_train["ts"].max()
+        region_val_end = pd.concat([region_earlystop_val, region_cal])["ts"].max()
+        region_cal_boundary = region_earlystop_val["ts"].max()
+
+        region_train_ds = _dataset(region_full[region_full["ts"] <= region_train_end])
+        region_val_ds = _dataset(
+            region_full[region_full["ts"] <= region_cal_boundary],
+            min_target_ts=region_train_end,
+        )
+        region_cal_ds = _dataset(
+            region_full[region_full["ts"] <= region_val_end],
+            min_target_ts=region_cal_boundary,
+        )
+        region_test_input = (
+            region_full[region_full["ts"] <= config.test_end]
+            if use_date_split
+            else region_full
+        )
+        region_test_ds = _dataset(region_test_input, min_target_ts=region_val_end)
+
+        region_window_counts[region] = (
+            len(region_train_ds),
+            len(region_val_ds),
+            len(region_cal_ds),
+        )
+        train_parts.append(region_train_ds)
+        val_parts.append(region_val_ds)
+        cal_parts.append(region_cal_ds)
+        test_parts.append(region_test_ds)
+        region_cal_datasets[region] = region_cal_ds
+
+    log.info("train_tft_model.region_window_counts", counts=region_window_counts)
+
+    train_ds: ConcatDataset = ConcatDataset(train_parts)
+    val_ds: ConcatDataset = ConcatDataset(val_parts)
+    cal_ds: ConcatDataset = ConcatDataset(cal_parts)
+    test_ds: ConcatDataset = ConcatDataset(test_parts)
 
     if len(train_ds) == 0 or len(val_ds) == 0 or len(cal_ds) == 0:
         raise ValueError(
             "not enough history to build train/val/calibration windows "
             f"(lookback={config.lookback}, horizon={config.horizon}) -- "
-            f"got {len(train_ds)}/{len(val_ds)}/{len(cal_ds)} windows"
+            f"got {len(train_ds)}/{len(val_ds)}/{len(cal_ds)} windows "
+            f"({region_window_counts})"
         )
 
     train_loader = DataLoader(
@@ -273,9 +337,9 @@ def train_tft_model(
         val_ds, batch_size=config.batch_size, shuffle=False, collate_fn=collate_tft
     )
     # No pooled `cal_loader` -- calibration prediction now runs per
-    # region (below, grouping `cal_scaled`) for the real per-region bias
-    # correction (`TODO.md` Phase 3); `cal_ds` itself is still used just
-    # above for the empty-split check and `n_cal_windows` logging.
+    # region (below, via `region_cal_datasets`) for the real per-region
+    # bias correction (`TODO.md` Phase 3); `cal_ds` itself is still used
+    # just above for the empty-split check and `n_cal_windows` logging.
     test_loader = (
         DataLoader(
             test_ds, batch_size=config.batch_size, shuffle=False, collate_fn=collate_tft
@@ -373,19 +437,17 @@ def train_tft_model(
         model.load_state_dict(best_state)
 
     # Real per-region bias correction (`TODO.md` Phase 3, mirroring
-    # `ml/train.py::train_model`'s identical block -- see its own
-    # comment for the full reasoning). Unlike that function, TFT splits
-    # are built pooled across regions to begin with (this function's own
-    # header comment), so the per-region cal slice is recovered here by
-    # grouping the already-built `cal_scaled` frame instead of a
-    # separately-tracked per-region dataset -- same real cal rows either
-    # way, just grouped after the fact rather than before.
+    # `ml/train.py::train_model`'s identical block -- see its own comment
+    # for the full reasoning). Uses the same `region_cal_datasets` built
+    # above (full-history + `min_target_ts` windowing), not a fresh
+    # cal-only-slice dataset -- a region whose own cal slice is too short
+    # for a bare window still gets real windows here via reached-back
+    # context, same as `train_ds`/`val_ds`/`cal_ds` above.
     bias_by_region: dict[str, np.ndarray] = {}
     y_cal_parts: list[np.ndarray] = []
     p10_cal_parts: list[np.ndarray] = []
     p90_cal_parts: list[np.ndarray] = []
-    for region, region_cal_scaled in cal_scaled.groupby("region"):
-        region_cal_ds = _dataset(region_cal_scaled)
+    for region, region_cal_ds in region_cal_datasets.items():
         if len(region_cal_ds) == 0:
             continue
         region_cal_loader = DataLoader(

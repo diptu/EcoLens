@@ -393,7 +393,19 @@ class TFTDataset(Dataset):
         horizon: int = 48,
         group_col: str = "region",
         ts_col: str = "ts",
+        min_target_ts=None,
     ) -> None:
+        """`min_target_ts` mirrors `DemandDataset`'s own param (2026-08-09
+        rationale in that class's docstring): with only ~14 days of live
+        NEM history, a strictly train-disjoint val/cal slice doesn't fit
+        even one `lookback+horizon` window. Pass the *full* per-region
+        history as `df` and this bound as the split boundary -- a
+        window's encoder/decoder context can then reach back across the
+        boundary, only its *target* (`y`'s first timestep, at
+        `start + lookback`, same position `DemandDataset` gates on) is
+        required to be strictly after `min_target_ts`, so no held-out
+        label is ever also a train label.
+        """
         self.encoder_columns = list(encoder_columns)
         self.decoder_columns = list(decoder_columns)
         self.target_col = target_col
@@ -407,7 +419,10 @@ class TFTDataset(Dataset):
             encoder_features = group[self.encoder_columns].to_numpy(dtype=np.float32)
             decoder_features = group[self.decoder_columns].to_numpy(dtype=np.float32)
             target = group[self.target_col].to_numpy(dtype=np.float32)
+            timestamps = group[ts_col].to_numpy()
             for start in range(len(group) - window_span + 1):
+                if min_target_ts is not None and timestamps[start + lookback] <= min_target_ts:
+                    continue
                 x_enc = encoder_features[start : start + lookback]
                 x_dec = decoder_features[start + lookback : start + window_span]
                 y = target[start + lookback : start + window_span]

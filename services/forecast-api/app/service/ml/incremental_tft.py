@@ -18,6 +18,7 @@ catastrophic-forgetting-guard item).
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
@@ -162,7 +163,11 @@ async def train_and_register_tft_incremental(
             f"since={since} -- the incremental window may be too narrow"
         )
 
-    result = train_tft_model(
+    # `asyncio.to_thread` -- see `ml/train.py`'s `train_and_register` for
+    # why: keeps the event loop free to service `train-worker`'s
+    # RabbitMQ heartbeat during the blocking epoch loop.
+    result = await asyncio.to_thread(
+        train_tft_model,
         raw_df,
         config,
         holidays=holidays_df,
@@ -194,7 +199,8 @@ async def train_and_register_tft_incremental(
         since=str(since),
         n_train_windows=result.n_train_windows,
     )
-    return log_and_register_run(
+    return await asyncio.to_thread(
+        log_and_register_run,
         result,
         config,
         regions,

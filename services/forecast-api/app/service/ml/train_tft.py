@@ -27,6 +27,7 @@ Two entrypoints, matching `ml/train.py`'s split exactly:
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -468,8 +469,14 @@ async def train_and_register_tft(
             f"no training data found in {data_source!r} for regions={list(regions)}"
         )
 
-    result = train_tft_model(raw_df, config, holidays=holidays_df)
-    return log_and_register_run(
+    # `asyncio.to_thread` -- see `ml/train.py`'s `train_and_register` for
+    # why: these are synchronous, CPU/network-heavy calls that otherwise
+    # block the event loop long enough to starve `train-worker`'s
+    # RabbitMQ heartbeat mid-training, killing the message ack for an
+    # otherwise-successful run.
+    result = await asyncio.to_thread(train_tft_model, raw_df, config, holidays=holidays_df)
+    return await asyncio.to_thread(
+        log_and_register_run,
         result,
         config,
         regions,

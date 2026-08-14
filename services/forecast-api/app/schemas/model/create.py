@@ -29,6 +29,38 @@ class PromoteModelRequest(AppBaseModel):
     force: bool = False
 
 
+class EvaluateModelRequest(AppBaseModel):
+    """`POST /v1/model/versions/{version}/evaluate`'s body -- triggers
+    `ecolens-forecast evaluate`'s real walk-forward backtest (`ml/
+    evaluate.py`'s `evaluate_and_log`) over HTTP, the same way `POST
+    /v1/model/train` already does for the CLI's `train` command.
+    Previously CLI-only, so `GET .../evaluation` almost always returned
+    `null` and the dashboard's Model Comparison page had nothing to show
+    beyond a version's easier training-time `test_mape` -- see that
+    endpoint's own docstring for why a real walk-forward run matters.
+
+    Unlike training, a walk-forward backtest is real but comparatively
+    cheap (inference over `n_origins` rolling windows per region, no
+    gradient steps) -- safe to run synchronously in the request/response
+    cycle rather than needing `train-worker`'s async dispatch.
+
+    `regions`/`horizon`/`n_origins` all optional, defaulting to
+    `evaluate_and_log`'s own defaults (`Settings.model_default_regions`,
+    the registered version's own horizon, 10 origins).
+    """
+
+    model_name: str | None = None
+    # `None` defaults to `"lstm"`, same server-side default `TrainRequest.
+    # architecture` uses. `"timesfm_correction"` isn't supported here --
+    # `evaluate_timesfm_and_log` has a fundamentally different signature
+    # (no registered version to load; it downloads a pinned HuggingFace
+    # checkpoint directly), not just a different dispatch target.
+    architecture: Literal["lstm", "tft"] | None = None
+    regions: list[str] | None = None
+    horizon: int | None = None
+    n_origins: int = 10
+
+
 class TrainRequest(AppBaseModel):
     """`POST /v1/model/train`'s body -- `regions`/`window_hours` optional,
     defaulting to `Settings.model_default_regions`/

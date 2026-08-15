@@ -39,7 +39,12 @@ export default function AdminSystemPage() {
   function refresh() {
     setRefreshing(true);
     fetchAllServicesHealth()
-      .then((results) => results.filter((r) => r.service !== "iam"))
+      .then((results) =>
+        // data-pipeline is fully retired (see operations/page.tsx's
+        // identical filter for the full reasoning) -- filtered out here
+        // too, same treatment already applied to iam.
+        results.filter((r) => r.service !== "iam" && r.service !== "data-pipeline"),
+      )
       .then((results) => {
         setHealth(results);
         setCheckedAt(new Date().toISOString());

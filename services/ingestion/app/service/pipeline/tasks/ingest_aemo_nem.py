@@ -106,31 +106,45 @@ async def run(
 
 
 async def _try_live_api(lookback_minutes: int) -> pd.DataFrame | None:
-    """Try AEMO's NEM dispatch endpoint. Returns None if it fails."""
-    import httpx
+    """Real fetch, reusing `_fetch_historical_range`'s already-verified
+    Archive/MMSDM endpoints instead of a dead URL.
 
-    from app.service.pipeline.http_retry import DEFAULT_LIMITS
+    Real bug, same shape as `ingest_aemo_wem.py`'s own (found and fixed
+    there 2026-08-11/12, ported here): the URL this function used to
+    hit (`aemo.com.au/aemo/data/api/REPORT/NEMDispatchData/PUBLISH`)
+    was a guess that returned `None` *unconditionally* even on a
+    successful HTTP response ("Real parsing would go here" -- it never
+    was). `_do_fetch` therefore fell through to `_read_cached`, and
+    since `/data/raw/aemo/nem` doesn't exist outside the docker-compose
+    dev mount (confirmed missing on Railway -- this service runs with
+    no volumes there), that fell through again to `_synthetic_stub` on
+    every scheduled call: `demand_mw` random noise, every fuel-mix
+    column hardcoded to `0.0`. Every "schedule"-triggered NEM row this
+    deployment has ever produced was that fake constant, not real
+    market data -- silently, since `_synthetic_stub`'s fallback was
+    only ever a `log.warning`, never a real failure signal.
 
-    settings = get_settings()
-    # AEMO's current data API surface. Real endpoint may differ; this
-    # is a placeholder that returns None on failure so the cached
-    # fallback path kicks in. No retry here -- any failure should fall
-    # through to the cache immediately, not delay it with backoff.
-    url = "https://www.aemo.com.au/aemo/data/api/REPORT/NEMDispatchData/PUBLISH"
+    NEM's DispatchIS Archive/MMSDM lag is smaller than WEM's ~2 real
+    days (same-day-to-next-day in practice), but there's no cost to
+    using the same 4-day margin WEM settled on: `_fetch_historical_range`
+    just returns whatever the Archive/MMSDM fallback actually has
+    published within that window, and `load_to_postgres`'s `ON CONFLICT
+    DO NOTHING` makes re-fetching already-ingested days harmless
+    (same tolerance `backfill.py`'s own docstring establishes for a
+    "genuine double-fetch") -- so there's no need to track exactly
+    which day just became available; it just starts showing up.
+    """
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=4)
     try:
-        async with httpx.AsyncClient(
-            timeout=settings.aemo_request_timeout_seconds, limits=DEFAULT_LIMITS
-        ) as client:
-            r = await client.get(
-                url, params={"interval": "5min", "lookback": lookback_minutes}
-            )
-            r.raise_for_status()
-            # Real parsing would go here; we just log success.
-            log.info("aemo_nem.live_fetch_ok", bytes=len(r.content))
-            return None
+        df = await _fetch_historical_range(start, end)
     except Exception as e:
         log.warning("aemo_nem.live_fetch_failed", error=str(e))
         return None
+    if df.empty:
+        return None
+    log.info("aemo_nem.live_fetch_ok", rows=len(df))
+    return df
 
 
 def _read_cached(lookback_minutes: int) -> pd.DataFrame:

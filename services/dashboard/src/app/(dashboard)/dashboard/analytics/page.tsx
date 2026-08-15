@@ -88,13 +88,18 @@ const STATE_LABELS: Record<EmissionRegion, string> = {
 };
 const STATE_ORDER: EmissionRegion[] = ["NSW1", "VIC1", "QLD1", "SA1", "WEM", "TAS1"];
 
-function monthRange(monthsAgo: number): { since: string; until: string; label: string } {
+function monthRange(
+  monthsAgo: number,
+  elapsedMs?: number,
+): { since: string; until: string; label: string } {
   const now = new Date();
   const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - monthsAgo, 1));
   const end =
     monthsAgo === 0
       ? now
-      : new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - monthsAgo + 1, 1));
+      : elapsedMs != null
+        ? new Date(start.getTime() + elapsedMs)
+        : new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - monthsAgo + 1, 1));
   return {
     since: start.toISOString(),
     until: end.toISOString(),
@@ -136,7 +141,12 @@ type LoadedAnalytics = {
 
 async function loadAnalytics(): Promise<LoadedAnalytics> {
   const mtdRange = monthRange(0);
-  const prevRange = monthRange(1);
+  // Compare like-for-like: prevRange covers the same elapsed duration as
+  // MTD (e.g. Aug 1-15 vs Jul 1-15), not the full prior calendar month --
+  // otherwise a 15-day MTD is diffed against a full 31-day prior month,
+  // mechanically producing a misleading swing in the KPI/Key Insights deltas.
+  const elapsedMs = Date.now() - new Date(mtdRange.since).getTime();
+  const prevRange = monthRange(1, elapsedMs);
 
   const [mtd, prevMonth, demandSummary, prevDemandSummary, forecast, dailySeries] =
     await Promise.all([

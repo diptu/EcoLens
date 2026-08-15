@@ -47,15 +47,29 @@ import {
 } from "@/lib/emissions";
 import { fetchTrainingRuns, formatRelativeTime, type TrainingRunLog } from "@/lib/ingestion";
 
+type ModelVersionWithArchitecture = ModelVersion & { architecture: string };
+
+/** Was hardcoded to `MODEL_ARCHITECTURES[0]` (LSTM only) -- the "Model
+ * Versions" KPI tile and Model Registry table below both looked like
+ * platform-wide totals (no architecture qualifier in either label) but
+ * silently never counted TFT/Energy-Forecast versions, while this same
+ * page's `useDeployments` below already fetches every architecture
+ * correctly. Mirrors that same `Promise.all(MODEL_ARCHITECTURES.map(...))`
+ * pattern so both stay consistent with each other. */
 function useModelVersions() {
-  const [versions, setVersions] = useState<ModelVersion[] | null>(null);
+  const [versions, setVersions] = useState<ModelVersionWithArchitecture[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    fetchModelVersions(MODEL_ARCHITECTURES[0].modelName)
-      .then((res) => {
-        if (!cancelled) setVersions(res.data);
+    Promise.all(MODEL_ARCHITECTURES.map((a) => fetchModelVersions(a.modelName)))
+      .then((results) => {
+        if (cancelled) return;
+        setVersions(
+          results.flatMap((res, i) =>
+            res.data.map((v) => ({ ...v, architecture: MODEL_ARCHITECTURES[i].label })),
+          ),
+        );
       })
       .catch((err) => {
         if (!cancelled) setError(err instanceof Error ? err.message : "failed to load");
@@ -314,7 +328,7 @@ export default function TrainingPage() {
           <Card>
             <div className="mb-3 flex items-center justify-between">
               <h2 className="text-base font-semibold text-white">Model Registry</h2>
-              <span className="text-[11px] text-white/40">GET /v1/model/versions (forecast-api)</span>
+              <span className="text-[11px] text-white/40">GET /v1/model/versions × {MODEL_ARCHITECTURES.length} architectures</span>
             </div>
             {versionsError ? (
               <p className="py-6 text-center text-sm text-white/40">Couldn&apos;t load model versions ({versionsError}).</p>
@@ -325,11 +339,12 @@ export default function TrainingPage() {
             ) : (
               <table className="w-full text-left text-sm">
                 <thead className="border-b border-white/5 text-[11px] uppercase tracking-wide text-white/40">
-                  <tr><th className="py-2">Version</th><th className="py-2">Stage</th><th className="py-2">Created</th><th className="py-2">Metrics</th></tr>
+                  <tr><th className="py-2">Architecture</th><th className="py-2">Version</th><th className="py-2">Stage</th><th className="py-2">Created</th><th className="py-2">Metrics</th></tr>
                 </thead>
                 <tbody className="divide-y divide-white/5">
                   {versions.map((v) => (
-                    <tr key={v.version} className="text-white/85">
+                    <tr key={`${v.architecture}-${v.version}`} className="text-white/85">
+                      <td className="py-2 text-white/60">{v.architecture}</td>
                       <td className="py-2"><span className="rounded bg-purple-300/15 px-1.5 py-0.5 font-mono text-[11px] text-purple-200">v{v.version}</span></td>
                       <td className="py-2">
                         <span className={cn("rounded-md border px-2 py-0.5 text-[11px] font-medium",

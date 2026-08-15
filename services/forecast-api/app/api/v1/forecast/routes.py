@@ -102,7 +102,16 @@ _FEATURE_WARMUP_ROWS = 24
 forecast_local_cache: TTLCache[ForecastResponse] = TTLCache(maxsize=64)
 
 
-def _inverse_target(scaler, values: np.ndarray) -> np.ndarray:
+def _inverse_target(scaler, values: np.ndarray, region: str | None = None) -> np.ndarray:
+    """`scaler` is a per-region `dict[str, StandardScaler]` for any
+    version trained after `ml/train.py`'s per-region target-scaling fix
+    (2026-08-15) -- `region` picks that region's own scaler. Still
+    accepts a bare `StandardScaler` (the pre-fix shape) so an
+    already-registered older version keeps serving correctly."""
+    if isinstance(scaler, dict):
+        if region is None:
+            raise ValueError("per-region target_scaler requires `region`")
+        scaler = scaler[region]
     shape = values.shape
     return scaler.inverse_transform(values.reshape(-1, 1)).reshape(shape)
 
@@ -236,9 +245,9 @@ async def _forecast_arrays_single_region(
 ) -> ForecastArrays:
     out, window_ts = await _run_inference(db, bundle, region)
 
-    p10 = _inverse_target(bundle.target_scaler, out.p10.numpy())
-    p50 = _inverse_target(bundle.target_scaler, out.p50.numpy())
-    p90 = _inverse_target(bundle.target_scaler, out.p90.numpy())
+    p10 = _inverse_target(bundle.target_scaler, out.p10.numpy(), region=region)
+    p50 = _inverse_target(bundle.target_scaler, out.p50.numpy(), region=region)
+    p90 = _inverse_target(bundle.target_scaler, out.p90.numpy(), region=region)
     # Real per-region P50 bias correction (`TODO.md` Phase 3), applied
     # before conformal calibration widens the band -- same bias-then-
     # conformal ordering `ml/train.py::train_model` fit the calibration

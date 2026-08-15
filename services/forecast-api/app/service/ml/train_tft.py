@@ -34,6 +34,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 import torch
+from sklearn.preprocessing import StandardScaler
 from torch.utils.data import ConcatDataset, DataLoader
 
 from app.core.config import Settings, get_settings
@@ -128,6 +129,38 @@ def _predict_tft(
             p10s.append(out.p10.cpu().numpy())
             p50s.append(out.p50.cpu().numpy())
             p90s.append(out.p90.cpu().numpy())
+    return (
+        np.concatenate(ys),
+        np.concatenate(p10s),
+        np.concatenate(p50s),
+        np.concatenate(p90s),
+    )
+
+
+def _predict_regions_mw_tft(
+    model: DemandTFT,
+    region_datasets: dict[str, TFTDataset],
+    target_scalers: dict[str, StandardScaler],
+    config: TFTTrainConfig,
+    device: torch.device,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """`ml/train.py`'s `_predict_regions_mw`, adapted for `_predict_tft`'s
+    two-input signature -- see that function's own docstring for why a
+    pooled multi-region loader can no longer be inverse-transformed
+    correctly now that `target_scaler` is per-region."""
+    ys, p10s, p50s, p90s = [], [], [], []
+    for region, ds in region_datasets.items():
+        scaler = target_scalers.get(region)
+        if len(ds) == 0 or scaler is None:
+            continue
+        loader = DataLoader(
+            ds, batch_size=config.batch_size, shuffle=False, collate_fn=collate_tft
+        )
+        y, p10, p50, p90 = _predict_tft(model, loader, device)
+        ys.append(_inverse_target(scaler, y))
+        p10s.append(_inverse_target(scaler, p10))
+        p50s.append(_inverse_target(scaler, p50))
+        p90s.append(_inverse_target(scaler, p90))
     return (
         np.concatenate(ys),
         np.concatenate(p10s),
@@ -269,6 +302,12 @@ def train_tft_model(
     train_parts, val_parts, cal_parts, test_parts = [], [], [], []
     region_window_counts: dict[str, tuple[int, int, int]] = {}
     region_cal_datasets: dict[str, TFTDataset] = {}
+    # Kept per-region too, same reason as `ml/train.py`'s identical
+    # addition: `target_scaler` is per-region now, so val/test prediction
+    # below runs per region and pools the already-MW-space results
+    # instead of inverse-transforming one pooled multi-region batch.
+    region_val_datasets: dict[str, TFTDataset] = {}
+    region_test_datasets: dict[str, TFTDataset] = {}
     for region, (region_train, region_earlystop_val, region_cal, region_test) in (
         per_region_split.items()
     ):
@@ -314,6 +353,8 @@ def train_tft_model(
         cal_parts.append(region_cal_ds)
         test_parts.append(region_test_ds)
         region_cal_datasets[region] = region_cal_ds
+        region_val_datasets[region] = region_val_ds
+        region_test_datasets[region] = region_test_ds
 
     log.info("train_tft_model.region_window_counts", counts=region_window_counts)
 
@@ -385,9 +426,9 @@ def train_tft_model(
             optimizer.step()
             train_losses.append(loss.item())
 
-        y_val, _, p50_val, _ = _predict_tft(model, val_loader, device)
-        y_val_mw = _inverse_target(target_scaler, y_val)
-        p50_val_mw = _inverse_target(target_scaler, p50_val)
+        y_val_mw, _, p50_val_mw, _ = _predict_regions_mw_tft(
+            model, region_val_datasets, target_scaler, config, device
+        )
         val_mape = mape(p50_val_mw, y_val_mw)
         # Real MW-unit error metrics (2026-08-05, Performance page's
         # "validation RMSE & MAE" chart) -- see `ml/train.py`'s own
@@ -448,7 +489,8 @@ def train_tft_model(
     p10_cal_parts: list[np.ndarray] = []
     p90_cal_parts: list[np.ndarray] = []
     for region, region_cal_ds in region_cal_datasets.items():
-        if len(region_cal_ds) == 0:
+        region_scaler = target_scaler.get(region)
+        if len(region_cal_ds) == 0 or region_scaler is None:
             continue
         region_cal_loader = DataLoader(
             region_cal_ds, batch_size=config.batch_size, shuffle=False, collate_fn=collate_tft
@@ -456,10 +498,10 @@ def train_tft_model(
         y_region, p10_region, p50_region, p90_region = _predict_tft(
             model, region_cal_loader, device
         )
-        y_region = _inverse_target(target_scaler, y_region)
-        p10_region = _inverse_target(target_scaler, p10_region)
-        p50_region = _inverse_target(target_scaler, p50_region)
-        p90_region = _inverse_target(target_scaler, p90_region)
+        y_region = _inverse_target(region_scaler, y_region)
+        p10_region = _inverse_target(region_scaler, p10_region)
+        p50_region = _inverse_target(region_scaler, p50_region)
+        p90_region = _inverse_target(region_scaler, p90_region)
 
         region_bias = np.mean(y_region - p50_region, axis=0)
         bias_by_region[region] = region_bias
@@ -476,11 +518,9 @@ def train_tft_model(
 
     test_metrics: dict[str, float] = {}
     if test_loader is not None:
-        y_test, p10_test, p50_test, p90_test = _predict_tft(model, test_loader, device)
-        y_test = _inverse_target(target_scaler, y_test)
-        p10_test = _inverse_target(target_scaler, p10_test)
-        p50_test = _inverse_target(target_scaler, p50_test)
-        p90_test = _inverse_target(target_scaler, p90_test)
+        y_test, p10_test, p50_test, p90_test = _predict_regions_mw_tft(
+            model, region_test_datasets, target_scaler, config, device
+        )
         lo_calibrated, hi_calibrated = calibration.apply(p10_test, p90_test)
         test_metrics = {
             "test_mape": mape(p50_test, y_test),

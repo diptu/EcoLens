@@ -132,6 +132,7 @@ type LoadedAnalytics = {
   forecastSparkline: number[];
   dailyEmissionsTco2e: number[];
   dailyIntensity: { label: string; value: number }[];
+  dailyIntensityMtd: number[];
   dailyEmissionsLabels: string[];
   states: { region: EmissionRegion; label: string; kgPerMwh: number }[];
   heatmapMonths: string[];
@@ -179,6 +180,15 @@ async function loadAnalytics(): Promise<LoadedAnalytics> {
     label: new Date(p.bucket).toLocaleDateString([], { month: "short", day: "numeric" }),
     value: Math.round(p.intensity_kgco2e_per_mwh ?? 0),
   }));
+  // MTD-only slice for the "Grid intensity" KPI tile's sparkline, so it
+  // matches the same MTD window its sibling "Total Emissions" tile's
+  // sparkline (`dailyEmissionsTco2e`, filtered via `dailyThisMonth`
+  // above) uses -- `dailyIntensity` itself stays full-history for the
+  // separate "Emission Intensity Over Time" trend chart below, which
+  // deliberately wants more than just this month.
+  const dailyIntensityMtd = dailyThisMonth.map((p) =>
+    Math.round(p.intensity_kgco2e_per_mwh ?? 0),
+  );
 
   const forecastPoints = forecast?.points ?? [];
   const forecastTotalTco2e = forecast
@@ -251,6 +261,7 @@ async function loadAnalytics(): Promise<LoadedAnalytics> {
     forecastSparkline,
     dailyEmissionsTco2e,
     dailyIntensity,
+    dailyIntensityMtd,
     dailyEmissionsLabels,
     states,
     heatmapMonths,
@@ -354,7 +365,7 @@ export default function AnalyticsPage() {
           deltaPct={intensityDeltaPct}
           goodWhen="down"
           compareLabel={data?.prevMonthLabel}
-          sparkline={data?.dailyIntensity.map((d) => d.value)}
+          sparkline={data?.dailyIntensityMtd}
           sparkColor="rgba(56,189,248,0.9)"
         />
         <AnalyticsKpi

@@ -1205,7 +1205,7 @@ export default function PerformancePage() {
                         <td className="py-2 pr-3 font-mono">{row.mape != null ? `${row.mape.toFixed(2)}%` : "—"}</td>
                         <td className="py-2 pr-3 font-mono">{row.rmse != null ? Math.round(row.rmse).toLocaleString() : "—"}</td>
                         <td className="py-2 pr-3 font-mono">{row.mae != null ? Math.round(row.mae).toLocaleString() : "—"}</td>
-                        <td className="py-2 pr-3 font-mono">{row.bias != null ? `${row.bias >= 0 ? "+" : ""}${row.bias.toFixed(0)}%`.replace("%", "") : "—"}</td>
+                        <td className="py-2 pr-3 font-mono">{row.bias != null ? `${row.bias >= 0 ? "+" : ""}${row.bias.toFixed(0)} MW` : "—"}</td>
                         <td className="py-2 pr-3 font-mono">{row.coverage != null ? `${(row.coverage * 100).toFixed(1)}%` : "—"}</td>
                         <td className="py-2">
                           {row.score != null ? (
@@ -1227,7 +1227,7 @@ export default function PerformancePage() {
                         <td className="py-2 pr-3 font-mono">{naiveBenchmarkRow.mape != null ? `${naiveBenchmarkRow.mape.toFixed(2)}%` : "—"}</td>
                         <td className="py-2 pr-3 font-mono">{naiveBenchmarkRow.rmse != null ? Math.round(naiveBenchmarkRow.rmse).toLocaleString() : "—"}</td>
                         <td className="py-2 pr-3 font-mono">{naiveBenchmarkRow.mae != null ? Math.round(naiveBenchmarkRow.mae).toLocaleString() : "—"}</td>
-                        <td className="py-2 pr-3 font-mono">{naiveBenchmarkRow.bias != null ? `${naiveBenchmarkRow.bias >= 0 ? "+" : ""}${naiveBenchmarkRow.bias.toFixed(0)}%`.replace("%", "") : "—"}</td>
+                        <td className="py-2 pr-3 font-mono">{naiveBenchmarkRow.bias != null ? `${naiveBenchmarkRow.bias >= 0 ? "+" : ""}${naiveBenchmarkRow.bias.toFixed(0)} MW` : "—"}</td>
                         <td className="py-2 pr-3 font-mono">{naiveBenchmarkRow.coverage != null ? `${(naiveBenchmarkRow.coverage * 100).toFixed(1)}%` : "—"}</td>
                         <td className="py-2" title="A baseline scored against itself has no real 'vs benchmark' score to show.">—</td>
                       </tr>

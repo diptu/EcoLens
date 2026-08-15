@@ -51,7 +51,12 @@ log = get_logger(__name__)
 class ModelBundle:
     model: DemandLSTM
     feature_scalers: dict[str, StandardScaler]
-    target_scaler: StandardScaler
+    # `dict[str, StandardScaler]` for any version trained after
+    # `ml/train.py`'s per-region target-scaling fix (2026-08-15); a bare
+    # `StandardScaler` for versions registered before it (backward
+    # compatibility, not a live code path going forward as those age out
+    # of Production).
+    target_scaler: StandardScaler | dict[str, StandardScaler]
     calibration: ConformalCalibration
     bias_correction: DemandBiasCorrection
     run_id: str

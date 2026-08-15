@@ -234,7 +234,7 @@ class TrainResult:
     calibration: ConformalCalibration
     bias_correction: DemandBiasCorrection
     feature_scalers: dict[str, StandardScaler]
-    target_scaler: StandardScaler
+    target_scaler: dict[str, StandardScaler]
     history: list[dict[str, float]] = field(default_factory=list)
     test_metrics: dict[str, float] = field(default_factory=dict)
     n_train_windows: int = 0
@@ -283,32 +283,62 @@ def mae(pred: np.ndarray, target: np.ndarray) -> float:
 
 
 def _fit_target_scaler(
-    train: pd.DataFrame, target_col: str = TARGET_COLUMN
-) -> StandardScaler:
-    """One scaler across every region combined (not `ml.data.fit_scalers`'
-    per-region scalers) — simpler, and avoids needing to track which
-    region each `DemandDataset` window came from just to pick the right
-    inverse-transform later. A documented simplification for `TODO.md`'s
-    v0 (single-region training, per `README.md`'s Roadmap) — precise
-    enough there; a genuinely multi-region model would want this
-    per-region like the feature scalers."""
-    scaler = StandardScaler()
-    scaler.fit(train[[target_col]].dropna().to_numpy())
-    return scaler
+    train: pd.DataFrame, target_col: str = TARGET_COLUMN, group_col: str = "region"
+) -> dict[str, StandardScaler]:
+    """One scaler per region (mirrors `ml.data.fit_scalers`' per-region
+    feature scalers).
+
+    Real bug, confirmed live 2026-08-15: this used to fit one scaler
+    across every region combined -- a documented "v0, single-region
+    training" simplification that was never revisited once the pipeline
+    went genuinely multi-region. Regional demand magnitudes differ by
+    close to an order of magnitude (NSW1 ~8,700 MW vs TAS1 ~1,100 MW,
+    SA1 ~1,800 MW) -- a global scaler is dominated by the large regions,
+    so a small region's real values sit in a narrow, off-center band of
+    the shared scaled space. The model (trained and loss-computed in
+    that shared space) allocates it correspondingly little precision,
+    and any resulting MW-space imprecision is then measured as *relative*
+    MAPE against that region's own small denominator -- reproduced live:
+    three consecutive full retrains each had one region (SA1, SA1, then
+    TAS1 -- the two smallest-magnitude regions, whichever came off worst
+    that run) blow out to 100-200% real walk-forward MAPE while every
+    region trailed the naive baseline. Per-region scaling gives every
+    region the same well-conditioned unit-variance treatment the feature
+    scalers already get."""
+    scalers: dict[str, StandardScaler] = {}
+    for region, group in train.groupby(group_col):
+        clean = group[[target_col]].dropna()
+        if clean.empty:
+            continue
+        scaler = StandardScaler()
+        scaler.fit(clean.to_numpy())
+        scalers[region] = scaler
+    return scalers
 
 
 def _scale_target(
-    df: pd.DataFrame, scaler: StandardScaler, target_col: str = TARGET_COLUMN
+    df: pd.DataFrame,
+    scalers: dict[str, StandardScaler],
+    target_col: str = TARGET_COLUMN,
+    group_col: str = "region",
 ) -> pd.DataFrame:
     out = df.copy()
-    mask = out[target_col].notna()
-    out.loc[mask, target_col] = scaler.transform(
-        out.loc[mask, [target_col]].to_numpy()
-    ).ravel()
+    for region, scaler in scalers.items():
+        mask = (out[group_col] == region) & out[target_col].notna()
+        if not mask.any():
+            continue
+        out.loc[mask, target_col] = scaler.transform(
+            out.loc[mask, [target_col]].to_numpy()
+        ).ravel()
     return out
 
 
 def _inverse_target(scaler: StandardScaler, values: np.ndarray) -> np.ndarray:
+    """Inverse-transforms a *single region's* values with that region's
+    own scaler -- callers with a pooled multi-region batch must invert
+    per region before pooling (see the per-region val/test prediction
+    loops below), same convention the per-region cal-split loop already
+    used before this scaler itself went per-region."""
     shape = values.shape
     return scaler.inverse_transform(values.reshape(-1, 1)).reshape(shape)
 
@@ -344,6 +374,41 @@ def _predict(
             p10s.append(out.p10.cpu().numpy())
             p50s.append(out.p50.cpu().numpy())
             p90s.append(out.p90.cpu().numpy())
+    return (
+        np.concatenate(ys),
+        np.concatenate(p10s),
+        np.concatenate(p50s),
+        np.concatenate(p90s),
+    )
+
+
+def _predict_regions_mw(
+    model: DemandLSTM,
+    region_datasets: dict[str, DemandDataset],
+    target_scalers: dict[str, StandardScaler],
+    config: TrainConfig,
+    device: torch.device,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """`_predict` run separately per region (each with its own fitted
+    `DataLoader` and target scaler), then pooled -- required now that
+    `target_scaler` is per-region: a single pooled loader mixes regions
+    into one batch with no single correct inverse-transform. Regions
+    with no windows (empty dataset) or no fitted scaler are skipped, same
+    "absent signal doesn't block" convention the per-region cal loop
+    below already uses. Returns pooled `(y_mw, p10_mw, p50_mw, p90_mw)`."""
+    ys, p10s, p50s, p90s = [], [], [], []
+    for region, ds in region_datasets.items():
+        scaler = target_scalers.get(region)
+        if len(ds) == 0 or scaler is None:
+            continue
+        loader = DataLoader(
+            ds, batch_size=config.batch_size, shuffle=False, collate_fn=collate
+        )
+        y, p10, p50, p90 = _predict(model, loader, device)
+        ys.append(_inverse_target(scaler, y))
+        p10s.append(_inverse_target(scaler, p10))
+        p50s.append(_inverse_target(scaler, p50))
+        p90s.append(_inverse_target(scaler, p90))
     return (
         np.concatenate(ys),
         np.concatenate(p10s),
@@ -500,6 +565,14 @@ def train_model(
     # on each region's own calibration split separately, instead of a
     # pooled mean that would conflate regions with opposite-signed bias.
     region_cal_datasets: dict[str, DemandDataset] = {}
+    # Kept per-region too (not just folded into `val_parts`/`test_parts`)
+    # for the same reason as `region_cal_datasets` above, now that
+    # `target_scaler` is per-region: a pooled loader can't be inverse-
+    # transformed correctly (there's no single right scaler for a mixed-
+    # region batch), so val/test prediction below runs per region and
+    # pools the already-MW-space results instead.
+    region_val_datasets: dict[str, DemandDataset] = {}
+    region_test_datasets: dict[str, DemandDataset] = {}
     for region, (region_train, region_earlystop_val, region_cal) in per_region_split.items():
         if region_train.empty or region_earlystop_val.empty or region_cal.empty:
             log.warning(
@@ -555,6 +628,8 @@ def train_model(
         cal_parts.append(region_cal_ds)
         test_parts.append(region_test_ds)
         region_cal_datasets[region] = region_cal_ds
+        region_val_datasets[region] = region_val_ds
+        region_test_datasets[region] = region_test_ds
 
     log.info("train_model.region_window_counts", counts=region_window_counts)
 
@@ -625,9 +700,9 @@ def train_model(
             optimizer.step()
             train_losses.append(loss.item())
 
-        y_val, _, p50_val, _ = _predict(model, val_loader, device)
-        y_val_mw = _inverse_target(target_scaler, y_val)
-        p50_val_mw = _inverse_target(target_scaler, p50_val)
+        y_val_mw, _, p50_val_mw, _ = _predict_regions_mw(
+            model, region_val_datasets, target_scaler, config, device
+        )
         val_mape = mape(p50_val_mw, y_val_mw)
         # Real MW-unit error metrics (2026-08-05, Performance page's
         # "validation RMSE & MAE" chart) -- computed on the same
@@ -707,16 +782,17 @@ def train_model(
         # skip silently if `lookback+horizon` doesn't fit, same "absent
         # signal doesn't block" convention used elsewhere in this
         # codebase, rather than erroring on an empty prediction.
-        if len(region_cal_ds) == 0:
+        region_scaler = target_scaler.get(region)
+        if len(region_cal_ds) == 0 or region_scaler is None:
             continue
         region_cal_loader = DataLoader(
             region_cal_ds, batch_size=config.batch_size, shuffle=False, collate_fn=collate
         )
         y_region, p10_region, p50_region, p90_region = _predict(model, region_cal_loader, device)
-        y_region = _inverse_target(target_scaler, y_region)
-        p10_region = _inverse_target(target_scaler, p10_region)
-        p50_region = _inverse_target(target_scaler, p50_region)
-        p90_region = _inverse_target(target_scaler, p90_region)
+        y_region = _inverse_target(region_scaler, y_region)
+        p10_region = _inverse_target(region_scaler, p10_region)
+        p50_region = _inverse_target(region_scaler, p50_region)
+        p90_region = _inverse_target(region_scaler, p90_region)
 
         region_bias = np.mean(y_region - p50_region, axis=0)
         bias_by_region[region] = region_bias
@@ -733,11 +809,9 @@ def train_model(
 
     test_metrics: dict[str, float] = {}
     if test_loader is not None:
-        y_test, p10_test, p50_test, p90_test = _predict(model, test_loader, device)
-        y_test = _inverse_target(target_scaler, y_test)
-        p10_test = _inverse_target(target_scaler, p10_test)
-        p50_test = _inverse_target(target_scaler, p50_test)
-        p90_test = _inverse_target(target_scaler, p90_test)
+        y_test, p10_test, p50_test, p90_test = _predict_regions_mw(
+            model, region_test_datasets, target_scaler, config, device
+        )
         lo_calibrated, hi_calibrated = calibration.apply(p10_test, p90_test)
         test_metrics = {
             "test_mape": mape(p50_test, y_test),

@@ -123,7 +123,21 @@ class BaselineForecaster:
         )
 
 
-def _inverse(scaler: object, values: np.ndarray) -> np.ndarray:
+def _inverse(scaler: object, values: np.ndarray, region: str | None = None) -> np.ndarray:
+    """`scaler` is a per-region `dict[str, StandardScaler]` for any model
+    trained after `ml/train.py`'s per-region target-scaling fix
+    (2026-08-15) -- `region` picks that region's own scaler. Still
+    accepts a bare `StandardScaler` (the pre-fix global-scaler shape)
+    for backward compatibility with already-registered versions, so
+    evaluating an old version doesn't break just because new ones train
+    differently."""
+    if isinstance(scaler, dict):
+        if region is None:
+            raise ValueError("per-region target_scaler requires `region`")
+        region_scaler = scaler.get(region)
+        if region_scaler is None:
+            return np.full(values.shape, np.nan)
+        scaler = region_scaler
     return scaler.inverse_transform(values.reshape(-1, 1)).reshape(-1)  # type: ignore[attr-defined]
 
 
@@ -177,9 +191,9 @@ class LSTMForecaster:
         with torch.no_grad():
             out = self.model(torch.from_numpy(x).unsqueeze(0))
 
-        p10 = _inverse(self.target_scaler, out.p10[0].numpy())
-        p50 = _inverse(self.target_scaler, out.p50[0].numpy())
-        p90 = _inverse(self.target_scaler, out.p90[0].numpy())
+        p10 = _inverse(self.target_scaler, out.p10[0].numpy(), region=region)
+        p50 = _inverse(self.target_scaler, out.p50[0].numpy(), region=region)
+        p90 = _inverse(self.target_scaler, out.p90[0].numpy(), region=region)
         if self.bias_correction is not None:
             p10, p50, p90 = self.bias_correction.apply(region, p10, p50, p90)
         if self.calibration is not None:
@@ -261,9 +275,9 @@ class TFTForecaster:
                 torch.from_numpy(x_dec).unsqueeze(0),
             )
 
-        p10 = _inverse(self.target_scaler, out.p10[0].numpy())
-        p50 = _inverse(self.target_scaler, out.p50[0].numpy())
-        p90 = _inverse(self.target_scaler, out.p90[0].numpy())
+        p10 = _inverse(self.target_scaler, out.p10[0].numpy(), region=region)
+        p50 = _inverse(self.target_scaler, out.p50[0].numpy(), region=region)
+        p90 = _inverse(self.target_scaler, out.p90[0].numpy(), region=region)
         if self.bias_correction is not None:
             p10, p50, p90 = self.bias_correction.apply(region, p10, p50, p90)
         if self.calibration is not None:

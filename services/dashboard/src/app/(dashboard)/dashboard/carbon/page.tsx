@@ -14,7 +14,7 @@
  * Layout:
  *   ┌─ Header (title) ────────────────────────────────────────┐
  *   ├─ Period selector (24h / 7d / 30d / 90d / 365d) ─────────┤
- *   ├─ Region selector (NEM (all) / 6 NEM+WEM regions) ───────┤
+ *   ├─ Region selector (Australia (all) / 6 NEM+WEM regions) ─┤
  *   ├─ KPI row: Total tCO₂e · Intensity · Renewables · Δ ─────┤
  *   ├─ Two-col: Timeseries line chart (left) + Fuel donut (right) ─┤
  *   ├─ Region table (6 NEM regions, vs-NEM-average column) ───┤
@@ -326,7 +326,7 @@ export default function EmissionsPage() {
                     : "border border-white/10 bg-white/[0.04] text-white/70 hover:bg-white/10 hover:text-white",
                 )}
               >
-                NEM (all)
+                Australia (all)
               </button>
               {ALL_EMISSION_REGIONS.map((r) => {
                 const active = r === region;
@@ -524,7 +524,7 @@ export default function EmissionsPage() {
             {nemMix && (
               <tfoot>
                 <tr className="border-t-2 border-white/10 bg-white/[0.02] font-sans text-sm font-semibold">
-                  <td className="px-3 py-3 text-white">NEM (total)</td>
+                  <td className="px-3 py-3 text-white">Australia (total)</td>
                   <td className="px-3 py-3 text-right text-white">
                     {Math.round(nemMix.total_generation_mwh).toLocaleString()}
                   </td>

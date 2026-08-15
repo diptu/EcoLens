@@ -65,6 +65,7 @@ from app.service.ml.registry import (
     promote_version,
 )
 from app.service.ml.evaluate import evaluate_and_log, evaluate_tft_and_log
+from app.service.ml.timesfm_correction import evaluate_timesfm_correction_and_log
 
 router = APIRouter(prefix="/v1", tags=["model"])
 
@@ -416,11 +417,19 @@ async def evaluate_model_version(
     Request`'s own docstring has the reasoning for why that's safe here.
     """
     architecture = body.architecture or "lstm"
-    model_name = body.model_name or (
-        settings.mlflow_registry_model_name if architecture == "lstm" else "lstm_demand_tft"
-    )
+    model_name = body.model_name or {
+        "lstm": settings.mlflow_registry_model_name,
+        "tft": "lstm_demand_tft",
+        "timesfm_correction": "timesfm_demand_correction",
+    }[architecture]
     resolved_regions = body.regions or settings.model_default_regions
-    evaluator = evaluate_tft_and_log if architecture == "tft" else evaluate_and_log
+    evaluator = (
+        evaluate_timesfm_correction_and_log
+        if architecture == "timesfm_correction"
+        else evaluate_tft_and_log
+        if architecture == "tft"
+        else evaluate_and_log
+    )
     try:
         result = await evaluator(
             model_name,

@@ -179,7 +179,7 @@ export default function DataSourcesPage() {
       {loadError && (
         <Card>
           <p className="py-8 text-center text-sm text-rose-200">
-            Couldn&apos;t reach data-pipeline&apos;s data-sources catalog. Is it running?
+            Couldn&apos;t reach ingestion&apos;s data-sources catalog. Is it running?
           </p>
         </Card>
       )}

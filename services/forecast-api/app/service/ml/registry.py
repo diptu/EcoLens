@@ -42,6 +42,7 @@ from app.service.ml.bias_correction import DemandBiasCorrection
 from app.service.ml.conformal import ConformalCalibration
 from app.service.ml.features import ALL_MODEL_REGIONS
 from app.models.ml import DemandLSTM
+from app.models.tft import DemandTFT
 from app.core.logging import get_logger
 
 log = get_logger(__name__)
@@ -49,7 +50,14 @@ log = get_logger(__name__)
 
 @dataclass
 class ModelBundle:
-    model: DemandLSTM
+    # "lstm" | "tft" -- which `nn.Module` `model` actually is and which
+    # `ml/evaluate.py` `Forecaster` implementation (`LSTMForecaster`/
+    # `TFTForecaster`) can wrap it. Set by `load_bundle` from the
+    # `architecture` it was asked to load, not introspected from `model`
+    # itself -- keeps that decision in one place (this module) rather
+    # than every caller re-deriving it via `isinstance`.
+    architecture: str
+    model: DemandLSTM | DemandTFT
     feature_scalers: dict[str, StandardScaler]
     # `dict[str, StandardScaler]` for any version trained after
     # `ml/train.py`'s per-region target-scaling fix (2026-08-15); a bare
@@ -69,14 +77,27 @@ class ModelBundle:
     git_sha: str | None
 
 
-async def load_bundle(model_name: str, stage: str = "Production") -> ModelBundle | None:
+async def load_bundle(
+    model_name: str, stage: str = "Production", architecture: str = "lstm"
+) -> ModelBundle | None:
     """`None` if `model_name` has no version in `stage` yet — a real,
     expected state before the first model is ever trained+promoted, not
     an error. Runs MLflow's (blocking) client calls in a worker thread
     (`asyncio.to_thread`) so this never blocks the event loop other
     requests are being served on, even though it's only ever called from
     the background watch loop / app startup, not from a request handler
-    directly."""
+    directly.
+
+    `architecture` ("lstm" | "tft") picks which `nn.Module` to
+    reconstruct from the run's logged params -- `DemandLSTM`'s
+    `n_features`/`num_layers` vs `DemandTFT`'s `n_encoder_features`/
+    `n_decoder_features`/`n_heads` (`train_tft.py`'s `extra_params`,
+    logged alongside the base `TrainConfig` params every architecture
+    shares). Everything else below this branch (state_dict/scalers/
+    calibration/bias-correction loading) is identical regardless of
+    architecture -- both `train.py`'s and `train_tft.py`'s own
+    `log_and_register_run` write the exact same `serving/` artifact
+    layout."""
 
     def _load() -> ModelBundle | None:
         tracking_uri = get_settings().mlflow_tracking_uri
@@ -96,13 +117,24 @@ async def load_bundle(model_name: str, stage: str = "Production") -> ModelBundle
         params = run.data.params
         metrics = run.data.metrics
 
-        model = DemandLSTM(
-            n_features=int(params["n_features"]),
-            horizon=int(params["horizon"]),
-            hidden_size=int(params["hidden_size"]),
-            num_layers=int(params["num_layers"]),
-            dropout=float(params["dropout"]),
-        )
+        model: DemandLSTM | DemandTFT
+        if architecture == "tft":
+            model = DemandTFT(
+                n_encoder_features=int(params["n_encoder_features"]),
+                n_decoder_features=int(params["n_decoder_features"]),
+                horizon=int(params["horizon"]),
+                hidden_size=int(params["hidden_size"]),
+                n_heads=int(params["n_heads"]),
+                dropout=float(params["dropout"]),
+            )
+        else:
+            model = DemandLSTM(
+                n_features=int(params["n_features"]),
+                horizon=int(params["horizon"]),
+                hidden_size=int(params["hidden_size"]),
+                num_layers=int(params["num_layers"]),
+                dropout=float(params["dropout"]),
+            )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             local_dir = mlflow.artifacts.download_artifacts(
@@ -147,6 +179,7 @@ async def load_bundle(model_name: str, stage: str = "Production") -> ModelBundle
             bias_correction = DemandBiasCorrection()
 
         return ModelBundle(
+            architecture=architecture,
             model=model,
             feature_scalers=feature_scalers,
             target_scaler=target_scaler,
@@ -693,8 +726,9 @@ async def delete_model_version(model_name: str, version: str) -> None:
 
 
 class ModelRegistry:
-    def __init__(self, model_name: str) -> None:
+    def __init__(self, model_name: str, architecture: str = "lstm") -> None:
         self.model_name = model_name
+        self.architecture = architecture
         self._bundle: ModelBundle | None = None
 
     @property
@@ -706,7 +740,7 @@ class ModelRegistry:
         it's a different version than what's currently held. Returns
         whether a swap happened (used by `/v1/readyz` to report "model
         loaded" and by tests)."""
-        new_bundle = await load_bundle(self.model_name)
+        new_bundle = await load_bundle(self.model_name, architecture=self.architecture)
         if new_bundle is None:
             return False
         if self._bundle is not None and self._bundle.version == new_bundle.version:

@@ -33,6 +33,7 @@ from app.service.cache_warmer import (
 from app.service.ml.energy_registry import EnergyModelRegistry
 from app.service.ml.forecast_reconciliation import watch_and_reconcile
 from app.service.ml.registry import ModelRegistry
+from app.service.ml.train_tft import TFT_MODEL_NAME
 
 logger = get_logger(__name__)
 
@@ -56,6 +57,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # (see `energy_registry.py`'s own module docstring).
     energy_registry = EnergyModelRegistry(settings.energy_forecast_model_name)
     app.state.energy_model_registry = energy_registry
+
+    # Third registry, same pattern as `energy_registry` above -- serves
+    # `lstm_demand_tft`'s own `Production` version alongside the LSTM one,
+    # not instead of it (`GET /v1/forecast?architecture=tft` selects it).
+    # Deliberately its own `ModelRegistry` instance rather than a change
+    # to `registry` above -- `ModelRegistry` is already generic over
+    # architecture (`ModelBundle.architecture`/`load_bundle`'s branch),
+    # this just needs its own independently-polled `model_name`/bundle,
+    # same reasoning `energy_registry.py`'s own docstring gives for not
+    # merging into one multi-bundle registry.
+    tft_registry = ModelRegistry(TFT_MODEL_NAME, architecture="tft")
+    app.state.tft_model_registry = tft_registry
 
     # Loads whatever's in Production *before* accepting traffic (so the
     # very first request doesn't 503 with "model not loaded" just because
@@ -84,11 +97,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception as exc:
         logger.error("startup.initial_energy_model_load_failed", error=str(exc))
 
+    try:
+        await asyncio.wait_for(tft_registry.refresh(), timeout=10.0)
+    except TimeoutError:
+        logger.error("startup.initial_tft_model_load_timed_out")
+    except Exception as exc:
+        logger.error("startup.initial_tft_model_load_failed", error=str(exc))
+
     watch_task = asyncio.create_task(
         registry.watch(settings.model_reload_interval_seconds)
     )
     energy_watch_task = asyncio.create_task(
         energy_registry.watch(settings.model_reload_interval_seconds)
+    )
+    tft_watch_task = asyncio.create_task(
+        tft_registry.watch(settings.model_reload_interval_seconds)
     )
 
     # `TODO.md` Forecasting Phase 4's fallback mechanism -- reconciles
@@ -168,12 +191,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         "forecast_api_startup",
         model_loaded=registry.bundle is not None,
         energy_model_loaded=energy_registry.bundle is not None,
+        tft_model_loaded=tft_registry.bundle is not None,
     )
     try:
         yield
     finally:
         watch_task.cancel()
         energy_watch_task.cancel()
+        tft_watch_task.cancel()
         reconcile_task.cancel()
         emissions_warmer_task.cancel()
         drift_warmer_task.cancel()

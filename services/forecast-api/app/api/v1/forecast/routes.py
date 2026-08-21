@@ -1,5 +1,14 @@
-"""`GET /v1/forecast` (`README.md` § API reference) — the actual
-DemandLSTM inference path.
+"""`GET /v1/forecast` (`README.md` § API reference) — live serving.
+
+**`architecture` query param** (`"lstm"` default | `"tft"`) selects which
+independently-polled `ModelRegistry` (`app.state.model_registry` /
+`.tft_model_registry`, `app/main.py`'s lifespan) and real MLflow
+registered-model name serves the request -- see `_resolve_registry`.
+Both share every mechanism below (NEM aggregation, circuit-breaker
+fallback, adaptive calibration, caching, forecast reconciliation) via the
+same `Forecaster` protocol (`ml/evaluate.py`) TimesFM-correction doesn't
+implement yet (`docs/onnx-model-import.md`'s Phase 0 note) -- it isn't
+reachable from this route.
 
 **v0 doesn't resample to an arbitrary requested `horizon`/`interval`.**
 The model was trained on, and only ever predicts, its source region's
@@ -25,10 +34,10 @@ from __future__ import annotations
 
 import time
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
 import numpy as np
 import pandas as pd
-import torch
 from fastapi import APIRouter, Depends, Query
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,6 +47,7 @@ from app.api.v1.deps import (
     get_db,
     get_model_registry,
     get_redis_client,
+    get_tft_model_registry,
 )
 from app.core.errors import ApiError
 from app.core.local_cache import TTLCache
@@ -55,20 +65,23 @@ from app.service.ml.adaptive_calibration import get_calibration_scale
 from app.service.ml.data import load_holidays, load_latest_window
 from app.service.ml.evaluate import (
     BaselineForecaster,
+    Forecaster,
     LSTMForecaster,
     RecentBacktestPoint,
+    TFTForecaster,
     _infer_period_steps,
     evaluate_recent_actual_vs_predicted,
 )
 from app.service.ml.features import (
     FEATURE_COLUMNS,
-    NUMERIC_COLUMNS,
     build_features,
 )
-from app.models.ml import DemandForecast
+from app.models.ml import DemandLSTM
+from app.models.tft import DemandTFT
 from app.service.ml.forecast_breaker import OPEN, ForecastCircuitBreaker
 from app.service.ml.forecast_reconciliation import breaker_name, record_served_forecast
 from app.service.ml.registry import ModelBundle, ModelRegistry
+from app.service.ml.train_tft import TFT_MODEL_NAME
 
 router = APIRouter(prefix="/v1", tags=["forecast"])
 log = get_logger(__name__)
@@ -102,18 +115,65 @@ _FEATURE_WARMUP_ROWS = 24
 forecast_local_cache: TTLCache[ForecastResponse] = TTLCache(maxsize=64)
 
 
-def _inverse_target(scaler, values: np.ndarray, region: str | None = None) -> np.ndarray:
-    """`scaler` is a per-region `dict[str, StandardScaler]` for any
-    version trained after `ml/train.py`'s per-region target-scaling fix
-    (2026-08-15) -- `region` picks that region's own scaler. Still
-    accepts a bare `StandardScaler` (the pre-fix shape) so an
-    already-registered older version keeps serving correctly."""
-    if isinstance(scaler, dict):
-        if region is None:
-            raise ValueError("per-region target_scaler requires `region`")
-        scaler = scaler[region]
-    shape = values.shape
-    return scaler.inverse_transform(values.reshape(-1, 1)).reshape(shape)
+#: `architecture` query param -> which `app.state` registry to read and
+#: which real MLflow registered-model name it serves. "lstm" (the
+#: default, unchanged behavior) uses `settings.mlflow_registry_model_name`
+#: directly since that's user-configurable; "tft" is fixed to
+#: `TFT_MODEL_NAME` the same way `training_worker.py`'s own architecture
+#: dispatch already resolves it -- not user-configurable, there's only
+#: ever one TFT registry name in this codebase today.
+def _resolve_registry(
+    architecture: str,
+    settings: Settings,
+    registry: ModelRegistry,
+    tft_registry: ModelRegistry,
+) -> tuple[ModelRegistry, str]:
+    if architecture == "tft":
+        return tft_registry, TFT_MODEL_NAME
+    if architecture == "lstm":
+        return registry, settings.mlflow_registry_model_name
+    raise ApiError(
+        422,
+        "unknown_architecture",
+        f"architecture must be 'lstm' or 'tft', got {architecture!r}",
+    )
+
+
+def _build_forecaster(bundle: ModelBundle, holidays: pd.DataFrame) -> Forecaster:
+    """One `Forecaster` per `bundle.architecture` -- the same real
+    `LSTMForecaster`/`TFTForecaster` classes `ml/evaluate.py`'s
+    walk-forward backtest harness already uses, not a separate live-
+    serving-only implementation. `holidays` is only actually consumed by
+    `TFTForecaster` (to synthesize `DECODER_COLUMNS` calendar features
+    for the horizon steps ahead -- see that class's own docstring); passed
+    unconditionally so callers don't need to know which architectures
+    care about it."""
+    if bundle.architecture == "tft":
+        return TFTForecaster(
+            # `bundle.model`'s static type is `DemandLSTM | DemandTFT` --
+            # `load_bundle` (`ml/registry.py`) guarantees it's a real
+            # `DemandTFT` whenever `bundle.architecture == "tft"` (it's
+            # the one place that constructs `model` from `architecture`
+            # in the first place), a correlation mypy can't see across
+            # two separate dataclass fields. `cast`, not `isinstance`,
+            # since this is a real, already-enforced invariant, not a
+            # runtime check worth repeating on every request.
+            model=cast(DemandTFT, bundle.model),
+            feature_scalers=bundle.feature_scalers,
+            target_scaler=bundle.target_scaler,
+            lookback=bundle.lookback,
+            calibration=bundle.calibration,
+            bias_correction=bundle.bias_correction,
+            holidays=holidays,
+        )
+    return LSTMForecaster(
+        model=cast(DemandLSTM, bundle.model),
+        feature_scalers=bundle.feature_scalers,
+        target_scaler=bundle.target_scaler,
+        lookback=bundle.lookback,
+        calibration=bundle.calibration,
+        bias_correction=bundle.bias_correction,
+    )
 
 
 def _infer_step(ts: pd.Series) -> timedelta:
@@ -136,7 +196,23 @@ def _format_timedelta(delta: timedelta) -> str:
 
 async def _run_inference(
     db: AsyncSession, bundle: ModelBundle, region: str
-) -> tuple[DemandForecast, pd.Series]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, pd.Series]:
+    """Returns `(p10, p50, p90, window_ts)` in real MW units -- already
+    inverse-scaled, bias-corrected, and conformal-calibrated (all inside
+    `forecaster.predict`, the same `Forecaster` implementation `ml/
+    evaluate.py`'s walk-forward harness scores every architecture
+    against), not the model's raw scaled-space output. The pre-flight
+    checks below (row count / feature gaps / missing scaler) still run
+    first and still raise the same specific `ApiError`s as before this
+    was generalized past LSTM -- `Forecaster.predict` itself would only
+    ever respond to any of these with a silent all-NaN result (its own
+    contract: "can't produce a prediction... returns all-NaN rather than
+    raising"), which is the right behavior for a bulk backtest scoring
+    many origins, but would turn a real, diagnosable live-serving failure
+    into an opaque NaN response instead of a clear 503 -- so these checks
+    stay live-serving's own responsibility, not delegated to the shared
+    protocol.
+    """
     n_rows = bundle.lookback + _FEATURE_WARMUP_ROWS
     # Every other region this bundle was trained on, fetched alongside
     # `region` -- so `build_features`'s cross-region-context features
@@ -175,31 +251,17 @@ async def _run_inference(
             "(it wasn't trained on this region)",
         )
 
-    # The scaler was only ever fit on `NUMERIC_COLUMNS` (data-pipeline's
-    # `service/ml/data.py`'s `fit_scalers`) -- cyclical/flag columns in
-    # `FEATURE_COLUMNS` were never scaled at training time either, so
-    # transforming the *full* feature matrix through it would both raise
-    # (wrong column count) and be wrong even if it didn't. Scale just the
-    # numeric subset, in place, then take the full `FEATURE_COLUMNS`-
-    # ordered matrix the model actually expects as input.
-    scaled_window = window.copy()
-    scaled_window[list(NUMERIC_COLUMNS)] = feature_scaler.transform(
-        window[list(NUMERIC_COLUMNS)].to_numpy()
-    )
-    # `FEATURE_COLUMNS` spans both float (scaled numeric + cyclical) and
-    # bool (`is_weekend`/`is_holiday`) columns -- `.to_numpy()` without an
-    # explicit dtype can come back `object`-dtype for a mixed selection
-    # like this, which `torch.tensor` then refuses outright. Force a
-    # uniform float dtype explicitly rather than relying on pandas'
-    # column-mix type inference.
-    scaled = scaled_window[list(FEATURE_COLUMNS)].to_numpy(dtype=np.float64)
-    x = torch.tensor(scaled, dtype=torch.float32).unsqueeze(0)
+    # `feature_scaler` above only exists to produce this specific
+    # `model_not_trained_for_region` error with a clear message before
+    # any real work runs -- the actual scaling happens inside
+    # `forecaster.predict` below (it re-derives the same per-region
+    # scaler from `bundle.feature_scalers` itself, on the full engineered
+    # history it slices its own `lookback` window from).
+    forecaster = _build_forecaster(bundle, holidays)
+    region_history = engineered[engineered["region"] == region].reset_index(drop=True)
+    p10, p50, p90 = forecaster.predict(region_history, horizon=bundle.horizon)
 
-    bundle.model.eval()
-    with torch.no_grad():
-        out = bundle.model(x)
-
-    return out, window["ts"]
+    return p10, p50, p90, window["ts"]
 
 
 #: `(p10, p50, p90, step, last_ts)` -- the raw demand-forecast arrays
@@ -213,7 +275,7 @@ ForecastArrays = tuple[np.ndarray, np.ndarray, np.ndarray, timedelta, datetime]
 
 def _build_response(
     region: str,
-    settings: Settings,
+    model_name: str,
     bundle: ModelBundle,
     lo: np.ndarray,
     p50: np.ndarray,
@@ -232,7 +294,7 @@ def _build_response(
     ]
     return ForecastResponse(
         region=region,
-        model=f"{settings.mlflow_registry_model_name}@{bundle.stage.lower()}",
+        model=f"{model_name}@{bundle.stage.lower()}",
         generated_at=datetime.now(UTC),
         horizon=_format_timedelta(step * bundle.horizon),
         interval=_format_timedelta(step),
@@ -243,28 +305,28 @@ def _build_response(
 async def _forecast_arrays_single_region(
     db: AsyncSession, bundle: ModelBundle, region: str
 ) -> ForecastArrays:
-    out, window_ts = await _run_inference(db, bundle, region)
-
-    p10 = _inverse_target(bundle.target_scaler, out.p10.numpy(), region=region)
-    p50 = _inverse_target(bundle.target_scaler, out.p50.numpy(), region=region)
-    p90 = _inverse_target(bundle.target_scaler, out.p90.numpy(), region=region)
-    # Real per-region P50 bias correction (`TODO.md` Phase 3), applied
-    # before conformal calibration widens the band -- same bias-then-
-    # conformal ordering `ml/train.py::train_model` fit the calibration
-    # against, so serving matches how it was actually calibrated.
-    # `region == "NEM"` gets no correction (no `"NEM"` key in
-    # `bias_by_region` -- `.apply` is then a no-op), same as the
-    # adaptive-scale exclusion below: an aggregate of 5 regions summed
-    # together isn't what any single region's bias offset was fit for.
-    p10, p50, p90 = bundle.bias_correction.apply(region, p10, p50, p90)
-    lo, hi = bundle.calibration.apply(p10, p90)
+    # `_run_inference` returns already inverse-scaled, bias-corrected,
+    # conformal-calibrated real-MW arrays now (`Forecaster.predict`'s own
+    # contract -- see that function's docstring) -- bias correction and
+    # calibration used to be applied here by hand for LSTM specifically;
+    # both now live inside `_build_forecaster`'s chosen `Forecaster`,
+    # architecture-agnostic, exactly the ordering (bias-then-conformal)
+    # `ml/train.py::train_model` fit the calibration against either way.
+    p10, p50, p90, window_ts = await _run_inference(db, bundle, region)
+    lo, hi = p10, p90
 
     step = _infer_step(window_ts)
     last_ts = window_ts.iloc[-1].to_pydatetime()
     if last_ts.tzinfo is None:
         last_ts = last_ts.replace(tzinfo=UTC)
 
-    return lo, p50, hi, step, last_ts
+    return (
+        lo.reshape(1, -1),
+        p50.reshape(1, -1),
+        hi.reshape(1, -1),
+        step,
+        last_ts,
+    )
 
 
 async def _forecast_arrays_nem(db: AsyncSession, bundle: ModelBundle) -> ForecastArrays:
@@ -294,7 +356,7 @@ async def _forecast_arrays_nem(db: AsyncSession, bundle: ModelBundle) -> Forecas
 
 
 async def _run_single_region_forecast(
-    db: AsyncSession, bundle: ModelBundle, settings: Settings, region: str, redis: Redis
+    db: AsyncSession, bundle: ModelBundle, model_name: str, region: str, redis: Redis
 ) -> ForecastResponse:
     lo, p50, hi, step, last_ts = await _forecast_arrays_single_region(
         db, bundle, region
@@ -307,18 +369,18 @@ async def _run_single_region_forecast(
     # `region == "NEM"` is excluded the same way the circuit
     # breaker/fallback above is: an aggregate of 5 independently-scaled
     # regions summed together isn't what this scale was fit against.
-    scale = await get_calibration_scale(redis, settings.mlflow_registry_model_name, region)
+    scale = await get_calibration_scale(redis, model_name, region)
     if scale != 1.0:
         lo = p50 - (p50 - lo) * scale
         hi = p50 + (hi - p50) * scale
-    return _build_response(region, settings, bundle, lo, p50, hi, step, last_ts)
+    return _build_response(region, model_name, bundle, lo, p50, hi, step, last_ts)
 
 
 async def _run_nem_aggregate_forecast(
-    db: AsyncSession, bundle: ModelBundle, settings: Settings
+    db: AsyncSession, bundle: ModelBundle, model_name: str
 ) -> ForecastResponse:
     lo, p50, hi, step, last_ts = await _forecast_arrays_nem(db, bundle)
-    return _build_response("NEM", settings, bundle, lo, p50, hi, step, last_ts)
+    return _build_response("NEM", model_name, bundle, lo, p50, hi, step, last_ts)
 
 
 #: Rows fetched for the seasonal-naive fallback's own history pool --
@@ -330,7 +392,7 @@ _BASELINE_FALLBACK_HISTORY_ROWS = 2500
 
 
 async def _run_baseline_fallback_forecast(
-    db: AsyncSession, settings: Settings, bundle: ModelBundle, region: str
+    db: AsyncSession, model_name: str, bundle: ModelBundle, region: str
 ) -> ForecastResponse:
     """Served instead of the real model when `region`'s forecast-quality
     circuit breaker (`service/ml/forecast_breaker.py`) is open --
@@ -360,7 +422,7 @@ async def _run_baseline_fallback_forecast(
 
     response = _build_response(
         region,
-        settings,
+        model_name,
         bundle,
         p10.reshape(1, -1),
         p50.reshape(1, -1),
@@ -406,14 +468,7 @@ async def _run_recent_backtest_single_region(
     engineered = build_features(raw_df, holidays=holidays)
     region_df = engineered[engineered["region"] == region].reset_index(drop=True)
 
-    forecaster = LSTMForecaster(
-        model=bundle.model,
-        feature_scalers=bundle.feature_scalers,
-        target_scaler=bundle.target_scaler,
-        lookback=bundle.lookback,
-        calibration=bundle.calibration,
-        bias_correction=bundle.bias_correction,
-    )
+    forecaster = _build_forecaster(bundle, holidays)
     return evaluate_recent_actual_vs_predicted(
         forecaster, region_df, bundle.horizon, days_back=days_back
     )
@@ -465,11 +520,18 @@ async def _run_recent_backtest_nem(
     return merged
 
 
-def recent_backtest_cache_key(region: str, days: int, model_version: str) -> str:
+def recent_backtest_cache_key(
+    region: str, days: int, model_version: str, model_name: str
+) -> str:
     """Shared with `app.service.cache_warmer` so the warmer writes to the
     exact key this route reads from -- same convention `model_drift_
-    cache_key` (`app/api/v1/model/routes.py`) already establishes."""
-    return f"forecast:recent_backtest:v1:{region}:{days}:{model_version}"
+    cache_key` (`app/api/v1/model/routes.py`) already establishes.
+
+    `model_name` (added alongside `architecture` dispatch) keeps LSTM's
+    and TFT's own cache entries from colliding on the same `(region,
+    days)` -- both are independently-versioned MLflow models, so
+    `model_version="1"` means two different things for each."""
+    return f"forecast:recent_backtest:v1:{model_name}:{region}:{days}:{model_version}"
 
 
 @router.get(
@@ -478,9 +540,11 @@ def recent_backtest_cache_key(region: str, days: int, model_version: str) -> str
 async def get_recent_actual_vs_predicted(
     region: str,
     days: int = Query(default=7, ge=1, le=_RECENT_BACKTEST_MAX_DAYS),
+    architecture: str = Query(default="lstm"),
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis_client),
     registry: ModelRegistry = Depends(get_model_registry),
+    tft_registry: ModelRegistry = Depends(get_tft_model_registry),
     settings: Settings = Depends(get_app_settings),
 ) -> RecentBacktestResponse:
     """Real walk-forward re-forecast of the currently-served Production
@@ -508,13 +572,16 @@ async def get_recent_actual_vs_predicted(
     depends on this staying warm to honestly cover its full real 30-day
     period, not just a narrower recent slice.
     """
-    bundle = registry.bundle
+    resolved_registry, model_name = _resolve_registry(
+        architecture, settings, registry, tft_registry
+    )
+    bundle = resolved_registry.bundle
     if bundle is None:
         raise ApiError(
             503, "model_not_loaded", "No Production model version is loaded yet"
         )
 
-    cache_key = recent_backtest_cache_key(region, days, bundle.version)
+    cache_key = recent_backtest_cache_key(region, days, bundle.version, model_name)
     cached = await redis.get(cache_key)
     if cached is not None:
         return RecentBacktestResponse.model_validate_json(cached)
@@ -533,7 +600,7 @@ async def get_recent_actual_vs_predicted(
 
     response = RecentBacktestResponse(
         region=region,
-        model=f"{settings.mlflow_registry_model_name}@{bundle.stage.lower()}",
+        model=f"{model_name}@{bundle.stage.lower()}",
         generated_at=datetime.now(UTC),
         horizon_hours=bundle.horizon,
         interval="1h",
@@ -563,12 +630,17 @@ async def get_forecast(
     region: str,
     horizon: str | None = None,
     interval: str | None = None,
+    architecture: str = Query(default="lstm"),
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis_client),
     registry: ModelRegistry = Depends(get_model_registry),
+    tft_registry: ModelRegistry = Depends(get_tft_model_registry),
     settings: Settings = Depends(get_app_settings),
 ) -> ForecastResponse:
-    bundle = registry.bundle
+    resolved_registry, model_name = _resolve_registry(
+        architecture, settings, registry, tft_registry
+    )
+    bundle = resolved_registry.bundle
     if bundle is None:
         raise ApiError(
             503, "model_not_loaded", "No Production model version is loaded yet"
@@ -584,9 +656,7 @@ async def get_forecast(
     # this pass doesn't cover; NEM always uses the real model.
     is_fallback = False
     if region != "NEM":
-        breaker = ForecastCircuitBreaker(
-            breaker_name(settings.mlflow_registry_model_name, region), redis
-        )
+        breaker = ForecastCircuitBreaker(breaker_name(model_name, region), redis)
         is_fallback = await breaker.state == OPEN
 
     # Times the whole handler (cache hit or miss alike) rather than just
@@ -596,9 +666,9 @@ async def get_forecast(
     # is how a Grafana panel tells hits from misses apart if it needs to.
     with forecast_prediction_latency_seconds.labels(region=region).time():
         cache_key = (
-            f"forecast:v1:{region}:baseline_fallback"
+            f"forecast:v1:{model_name}:{region}:baseline_fallback"
             if is_fallback
-            else f"forecast:v1:{region}:{bundle.version}"
+            else f"forecast:v1:{model_name}:{region}:{bundle.version}"
         )
         local_hit = forecast_local_cache.get(cache_key)
         if local_hit is not None:
@@ -627,13 +697,13 @@ async def get_forecast(
             inference_started = time.perf_counter()
             if is_fallback:
                 response = await _run_baseline_fallback_forecast(
-                    db, settings, bundle, region
+                    db, model_name, bundle, region
                 )
             elif region == "NEM":
-                response = await _run_nem_aggregate_forecast(db, bundle, settings)
+                response = await _run_nem_aggregate_forecast(db, bundle, model_name)
             else:
                 response = await _run_single_region_forecast(
-                    db, bundle, settings, region, redis
+                    db, bundle, model_name, region, redis
                 )
                 # Logs the shortest-horizon point for later reconciliation
                 # against real demand (`service/ml/forecast_reconciliation.py`'s
@@ -647,7 +717,7 @@ async def get_forecast(
                 if response.points:
                     await record_served_forecast(
                         redis,
-                        model_name=settings.mlflow_registry_model_name,
+                        model_name=model_name,
                         region=region,
                         target_ts=response.points[0].ts,
                         p50_mw=response.points[0].p50,

@@ -40,6 +40,11 @@ def get_model_registry(request: Request) -> ModelRegistry:
     return registry
 
 
+def get_tft_model_registry(request: Request) -> ModelRegistry:
+    registry: ModelRegistry = request.app.state.tft_model_registry
+    return registry
+
+
 def get_energy_model_registry(request: Request) -> EnergyModelRegistry:
     registry: EnergyModelRegistry = request.app.state.energy_model_registry
     return registry

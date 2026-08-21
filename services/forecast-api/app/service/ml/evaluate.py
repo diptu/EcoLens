@@ -35,6 +35,7 @@ import joblib
 import mlflow
 import mlflow.artifacts
 import numpy as np
+import onnxruntime
 import pandas as pd
 import torch
 from mlflow.tracking import MlflowClient
@@ -278,6 +279,88 @@ class TFTForecaster:
         p10 = _inverse(self.target_scaler, out.p10[0].numpy(), region=region)
         p50 = _inverse(self.target_scaler, out.p50[0].numpy(), region=region)
         p90 = _inverse(self.target_scaler, out.p90[0].numpy(), region=region)
+        if self.bias_correction is not None:
+            p10, p50, p90 = self.bias_correction.apply(region, p10, p50, p90)
+        if self.calibration is not None:
+            p10, p90 = self.calibration.apply(p10, p90)
+        return p10, p50, p90
+
+
+@dataclass
+class ONNXForecaster:
+    """Wraps a user-uploaded ONNX model behind the `Forecaster` protocol
+    -- `app/service/ml/onnx_import.py`'s validation pipeline is what
+    actually constructs one of these (never built from an untrusted
+    `.onnx` file without going through that validation first). Unlike
+    `LSTMForecaster`/`TFTForecaster`, the model itself is opaque (an
+    `onnxruntime.InferenceSession`, not a known `nn.Module`) -- every
+    other piece of information `predict` needs (which of this system's
+    own `FEATURE_COLUMNS` it consumes, in what order, which output
+    tensor is which quantile) comes from the manifest the upload
+    declared and `onnx_import.py` already cross-checked against the
+    graph's own real I/O shapes at import time, not re-derived here.
+
+    `feature_columns` is a real, possibly-proper subset of the global
+    `FEATURE_COLUMNS` `LSTMForecaster`/`TFTForecaster` always use in
+    full -- see `docs/onnx-model-import.md`'s manifest schema: an
+    uploaded model only has to consume *some* of this system's own
+    engineered features, in its own declared order, not all of them.
+
+    `output_type="point"` models have no real p10/p90 of their own --
+    `predict` feeds the same `p50` in for both before calibration, so
+    `self.calibration.apply` (if a calibration was shipped/fit) produces
+    a real symmetric band (`ConformalCalibration.apply(lo, hi) = (lo -
+    q, hi + q)`); with no calibration, bounds stay honestly zero-width
+    rather than a fabricated interval (`docs/onnx-model-import.md`'s own
+    noted scope cut: this codebase does not yet auto-fit calibration for
+    a point-only upload that ships none).
+    """
+
+    session: onnxruntime.InferenceSession
+    feature_columns: tuple[str, ...]
+    input_name: str
+    output_type: str  # "point" | "quantile3"
+    output_names: dict[str, str]  # {"p10","p50","p90"} or {"point"}
+    feature_scalers: dict[str, object]
+    target_scaler: object
+    lookback: int
+    calibration: ConformalCalibration | None = None
+    bias_correction: DemandBiasCorrection | None = None
+    name: str = "onnx_custom"
+
+    def predict(
+        self, history: pd.DataFrame, horizon: int
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        nan_result = (np.full(horizon, np.nan),) * 3
+        if len(history) < self.lookback:
+            return nan_result
+
+        window = history.iloc[-self.lookback :]
+        region = window["region"].iloc[-1]
+        scaler = self.feature_scalers.get(region)
+        if scaler is None:
+            return nan_result
+        scaled = apply_scalers(window, {region: scaler})
+
+        x = scaled[list(self.feature_columns)].to_numpy(dtype=np.float32)
+        if np.isnan(x).any():
+            return nan_result
+
+        outputs = self.session.run(None, {self.input_name: x[None, :, :]})
+        by_name = dict(zip((o.name for o in self.session.get_outputs()), outputs, strict=True))
+
+        if self.output_type == "quantile3":
+            p10_raw = by_name[self.output_names["p10"]][0]
+            p50_raw = by_name[self.output_names["p50"]][0]
+            p90_raw = by_name[self.output_names["p90"]][0]
+        else:
+            p50_raw = by_name[self.output_names["point"]][0]
+            p10_raw = p50_raw
+            p90_raw = p50_raw
+
+        p10 = _inverse(self.target_scaler, p10_raw, region=region)
+        p50 = _inverse(self.target_scaler, p50_raw, region=region)
+        p90 = _inverse(self.target_scaler, p90_raw, region=region)
         if self.bias_correction is not None:
             p10, p50, p90 = self.bias_correction.apply(region, p10, p50, p90)
         if self.calibration is not None:
@@ -695,6 +778,76 @@ def load_registered_tft_model(
         calibration=artifacts.calibration,
         bias_correction=artifacts.bias_correction,
         holidays=holidays,
+        name=f"{model_name}_v{version}",
+    )
+
+
+def load_registered_onnx_model(model_name: str, version: str | int) -> ONNXForecaster:
+    """`load_registered_model`'s ONNX counterpart. Doesn't reuse
+    `_load_registered_run_artifacts` (that helper's `state_dict:
+    dict[str, torch.Tensor]` is specific to the `.pt` path) -- downloads
+    the same `serving/` artifact directory, just reads `model.onnx`
+    bytes instead of `model_state_dict.pt`. `feature_columns`/
+    `input_name`/`output_type`/`output_names` come from the run's own
+    logged params (`onnx_import.py`'s `_register_onnx` writes them,
+    already validated against the graph's real I/O at import time --
+    nothing here re-validates, this is a trusted read of an already-
+    registered version)."""
+    client = MlflowClient()
+    model_version = client.get_model_version(model_name, str(version))
+    run_id = model_version.run_id
+    assert run_id is not None, (  # nosec B101 -- internal invariant for type-narrowing; every version `mlflow.register_model` creates has a run_id
+        f"{model_name!r} v{version} has no run_id"
+    )
+    run = client.get_run(run_id)
+    params = run.data.params
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        local_dir = mlflow.artifacts.download_artifacts(
+            run_id=run_id, artifact_path="serving", dst_path=tmpdir
+        )
+        onnx_bytes = (Path(local_dir) / "model.onnx").read_bytes()
+        feature_scalers = joblib.load(Path(local_dir) / "feature_scalers.joblib")
+        target_scaler = joblib.load(Path(local_dir) / "target_scaler.joblib")
+
+    session = onnxruntime.InferenceSession(onnx_bytes, providers=["CPUExecutionProvider"])
+
+    try:
+        cal_dict = mlflow.artifacts.load_dict(f"runs:/{run_id}/conformal_calibration.json")
+        calibration = ConformalCalibration.from_dict(cal_dict)
+    except Exception:
+        # Real, common state for an upload that shipped none -- see
+        # `ONNXForecaster`'s own docstring for what this means at serve/
+        # eval time (honestly zero-width bounds, not a fabricated band).
+        calibration = None
+
+    try:
+        bias_dict = mlflow.artifacts.load_dict(f"runs:/{run_id}/demand_bias_correction.json")
+        bias_correction = DemandBiasCorrection.from_dict(bias_dict)
+    except Exception:
+        bias_correction = None
+
+    output_type = params["output_type"]
+    if output_type == "quantile3":
+        output_names = {
+            "p10": params["output_name_p10"],
+            "p50": params["output_name_p50"],
+            "p90": params["output_name_p90"],
+        }
+    else:
+        output_names = {"point": params["output_name_point"]}
+
+    return ONNXForecaster(
+        session=session,
+        feature_columns=tuple(params["feature_columns"].split(",")),
+        input_name=params["input_name"],
+        output_type=output_type,
+        output_names=output_names,
+        feature_scalers=feature_scalers,
+        target_scaler=target_scaler,
+        lookback=int(params["lookback"]),
+        calibration=calibration,
+        bias_correction=bias_correction,
         name=f"{model_name}_v{version}",
     )
 

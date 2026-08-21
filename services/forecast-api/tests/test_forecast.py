@@ -138,6 +138,7 @@ def _build_bundle(lookback: int = 8, horizon: int = 4) -> tuple:
         pass
 
     bundle = _Bundle()
+    bundle.architecture = "lstm"
     bundle.model = model
     bundle.feature_scalers = {"NSW1": feature_scaler}
     bundle.target_scaler = target_scaler

@@ -9,14 +9,27 @@ removal (2026-08-05); refuses the current Production version.
 data-pipeline as part of the training-code migration (deliberately open,
 no auth required, same reasoning as `/v1/data-sources/{id}/run`/
 `/backfill` had in that service: triggering work isn't a privileged
-action in this platform's current scope)."""
+action in this platform's current scope).
+
+`POST /v1/model/versions/import` — registers an already-trained model
+bundle (uploaded from anywhere: a notebook, a different machine) as a
+new registry version, without going through this service's own training
+loop (`service/ml/model_import.py` has the bundle format and validation
+pipeline). Same "deliberately open, no auth" reasoning as `/model/train`
+above.
+
+`POST /v1/model/versions/import-onnx` — the same idea for a
+framework-agnostic ONNX export instead of a `.pt` state_dict (`service/
+ml/onnx_import.py`, `docs/onnx-model-import.md`'s full design) --
+registered and evaluable, not yet reachable from live `/v1/forecast`
+serving (a separate, still-open phase of that same design)."""
 
 from __future__ import annotations
 
 import math
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from mlflow.exceptions import MlflowException
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,6 +48,7 @@ from app.schemas.model import (
     LossCurvePointOut,
     MlflowRunOut,
     MlflowRunsListResponse,
+    ModelImportResponse,
     ModelInfo,
     ModelVersionOut,
     ModelVersionsListResponse,
@@ -65,6 +79,8 @@ from app.service.ml.registry import (
     promote_version,
 )
 from app.service.ml.evaluate import evaluate_and_log, evaluate_tft_and_log
+from app.service.ml.model_import import BundleValidationError, import_model_bundle
+from app.service.ml.onnx_import import import_onnx_bundle
 from app.service.ml.timesfm_correction import evaluate_timesfm_correction_and_log
 
 router = APIRouter(prefix="/v1", tags=["model"])
@@ -358,6 +374,119 @@ async def get_model_versions(
             )
             for v in versions
         ],
+    )
+
+
+@router.post("/model/versions/import", response_model=ModelImportResponse, status_code=201)
+async def import_model_version(
+    file: UploadFile = File(...),
+    uploaded_by: str | None = Form(default=None),
+) -> ModelImportResponse:
+    """Registers an already-trained model bundle (a zip file -- see
+    `service/ml/model_import.py`'s module docstring for the exact
+    format) as a new registry version, without going through this
+    service's own training loop. Deliberately open, no auth -- same
+    "triggering work isn't a privileged action in this platform's
+    current scope" reasoning this router's own module docstring already
+    states for `POST /model/train`. Runs the live evaluation gate
+    against fresh warehouse data immediately after registration (same
+    as a freshly-trained incremental version); a bad or incompatible
+    bundle is rejected with 422 before anything is registered."""
+    bundle_bytes = await file.read()
+    try:
+        result = await import_model_bundle(
+            bundle_bytes,
+            uploaded_filename=file.filename or "bundle.zip",
+            uploaded_by=uploaded_by,
+        )
+    except BundleValidationError as exc:
+        raise ApiError(422, "invalid_bundle", str(exc)) from exc
+
+    gate = result.eval_gate
+    return ModelImportResponse(
+        run_id=result.run_id,
+        model_version=result.model_version,
+        model_name=result.model_name,
+        architecture=result.architecture,
+        eval_gate_passed=gate.passed if gate else None,
+        eval_gate_mape=gate.overall_mape if gate else None,
+        eval_gate_regions=[
+            RegionEvaluationOut(
+                region=r.region,
+                candidate=r.model_name,
+                mape=r.mape,
+                rmse=r.rmse,
+                coverage=r.empirical_coverage,
+                interval_width=r.mean_interval_width,
+                n_origins=r.n_origins,
+                mae=r.mae,
+                mean_error=r.mean_error,
+            )
+            for r in gate.reports
+        ]
+        if gate
+        else [],
+    )
+
+
+@router.post(
+    "/model/versions/import-onnx", response_model=ModelImportResponse, status_code=201
+)
+async def import_onnx_model_version(
+    file: UploadFile = File(...),
+    uploaded_by: str | None = Form(default=None),
+) -> ModelImportResponse:
+    """`import_model_version`'s ONNX counterpart -- see `service/ml/
+    onnx_import.py`'s module docstring for the bundle format
+    (`docs/onnx-model-import.md`'s manifest schema) and why this is a
+    separate pipeline rather than a branch in the `.pt` one. Registers
+    under the uploader's own chosen `model_name` (not a fixed constant
+    like the LSTM/TFT path's `lstm_demand`/`lstm_demand_tft` -- ONNX
+    uploads are open-ended by design), tagged `architecture=
+    "onnx_custom"`. Same deliberately-open-no-auth convention, same
+    live-evaluation-gate-immediately-after-registration behavior, same
+    422-on-invalid-bundle contract as `POST /model/versions/import`.
+
+    **Not yet servable live** -- `GET /v1/forecast` doesn't dispatch to
+    ONNX models yet (a real, separate scope decision, see `docs/onnx-
+    model-import.md`'s Phase 0 notes); this endpoint makes an upload
+    registered and evaluable (via the live eval gate below, and via
+    `GET /v1/model/versions?model_name=<your chosen name>`), not
+    live-servable."""
+    bundle_bytes = await file.read()
+    try:
+        result = await import_onnx_bundle(
+            bundle_bytes,
+            uploaded_filename=file.filename or "bundle.zip",
+            uploaded_by=uploaded_by,
+        )
+    except BundleValidationError as exc:
+        raise ApiError(422, "invalid_bundle", str(exc)) from exc
+
+    gate = result.eval_gate
+    return ModelImportResponse(
+        run_id=result.run_id,
+        model_version=result.model_version,
+        model_name=result.model_name,
+        architecture=result.architecture,
+        eval_gate_passed=gate.passed if gate else None,
+        eval_gate_mape=gate.overall_mape if gate else None,
+        eval_gate_regions=[
+            RegionEvaluationOut(
+                region=r.region,
+                candidate=r.model_name,
+                mape=r.mape,
+                rmse=r.rmse,
+                coverage=r.empirical_coverage,
+                interval_width=r.mean_interval_width,
+                n_origins=r.n_origins,
+                mae=r.mae,
+                mean_error=r.mean_error,
+            )
+            for r in gate.reports
+        ]
+        if gate
+        else [],
     )
 
 

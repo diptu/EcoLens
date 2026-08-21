@@ -26,6 +26,7 @@ import {
   TrendingDown,
   TrendingUp,
   Trophy,
+  Upload,
   XCircle,
 } from "lucide-react";
 
@@ -39,8 +40,11 @@ import {
   fetchModelEvaluation,
   fetchModelEvaluationHistory,
   fetchModelVersions,
+  importModelBundle,
+  importOnnxBundle,
   promoteModelVersion,
   type LossCurve,
+  type ModelImportResult,
   type ModelVersion,
   type RegionEvaluation,
 } from "@/lib/emissions";
@@ -52,7 +56,7 @@ import {
   type TrainTrigger,
 } from "@/lib/ingestion";
 
-type Tab = "registry" | "comparison" | "train" | "fine-tune";
+type Tab = "registry" | "comparison" | "train" | "fine-tune" | "import";
 
 // This page's own architecture list, deliberately narrower than
 // `lib/emissions.ts`'s shared `MODEL_ARCHITECTURES` (which also backs
@@ -212,6 +216,9 @@ export default function AdminModelsPage() {
         <TabButton active={tab === "fine-tune"} onClick={() => setTab("fine-tune")} data-testid="tab-fine-tune">
           <Sliders className="h-3.5 w-3.5" /> Fine-tune
         </TabButton>
+        <TabButton active={tab === "import"} onClick={() => setTab("import")} data-testid="tab-import">
+          <Upload className="h-3.5 w-3.5" /> Import
+        </TabButton>
       </div>
 
       {/* ── Registry tab ────────────────────────────────────── */}
@@ -336,6 +343,23 @@ export default function AdminModelsPage() {
             }}
           />
         </div>
+      )}
+
+      {/* ── Import tab ──────────────────────────────────────── */}
+      {tab === "import" && (
+        <ImportForm
+          onImported={(newModelName, fresh) => {
+            // The bundle's own manifest.json decides architecture (LSTM
+            // vs TFT), not a client-side selector -- switch the shared
+            // `architecture` state to whatever the server actually
+            // registered against, so the Registry tab shows the version
+            // that was just imported rather than whichever architecture
+            // happened to be selected before this tab was opened.
+            setArchitecture(newModelName);
+            refreshVersions(fresh);
+            setTab("registry");
+          }}
+        />
       )}
     </div>
   );
@@ -1911,6 +1935,233 @@ function FineTuneForm({
           <p className="text-[11px] text-white/45">
             Runs in <code className="rounded bg-black/30 px-1 font-mono">forecast-api</code>'s
             train-worker process. The new version is registered in MLflow on completion.
+          </p>
+        </div>
+      </form>
+    </Card>
+  );
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Import tab -- registers an already-trained model bundle (trained
+// anywhere: a notebook, a different machine, a one-off experiment) as a
+// new registry version, without going through this service's own
+// training loop. Two real bundle formats, two real endpoints:
+//   - `.pt` (PyTorch state_dict) -> `POST /v1/model/versions/import` --
+//     the bundle's own `manifest.json` declares LSTM vs TFT.
+//   - `.onnx` -> `POST /v1/model/versions/import-onnx` (2026-08-21) --
+//     open-ended/user-named, architecture is always reported back as
+//     `"onnx_custom"`. Framework-agnostic: any model that exports to the
+//     ONNX graph format works, not just LSTM/TFT re-exported.
+// The format toggle below picks which endpoint `ImportForm` posts to;
+// the response always reports which `model_name`/architecture it
+// actually registered against (`ImportForm`'s `onImported` callback
+// switches the shared `architecture` state to match, see the Import tab
+// render block above).
+// ────────────────────────────────────────────────────────────────────
+
+type ImportFormat = "pt" | "onnx";
+
+type ImportState =
+  | { state: "idle" }
+  | { state: "uploading" }
+  | { state: "success"; result: ModelImportResult }
+  | { state: "error"; message: string };
+
+function ImportForm({
+  onImported,
+}: {
+  onImported: (modelName: string, versions: ModelVersion[]) => void;
+}) {
+  const [format, setFormat] = useState<ImportFormat>("pt");
+  const [file, setFile] = useState<File | null>(null);
+  const [uploadedBy, setUploadedBy] = useState("");
+  const [status, setStatus] = useState<ImportState>({ state: "idle" });
+
+  function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!file) return;
+    setStatus({ state: "uploading" });
+    const upload = format === "onnx" ? importOnnxBundle : importModelBundle;
+    upload(file, uploadedBy.trim() || undefined)
+      .then((result) => {
+        setStatus({ state: "success", result });
+        // The import response reports the new version but not the full
+        // registry list -- same "re-fetch the list after a real mutation"
+        // pattern `TrainForm`/`FineTuneForm` already use after their own
+        // trigger succeeds, just against `result.model_name` (decided by
+        // the bundle itself) rather than the page's already-selected
+        // architecture.
+        fetchModelVersions(result.model_name)
+          .then((fresh) => onImported(result.model_name, fresh.data))
+          .catch(() => {}); // registry refresh is best-effort -- the success message above is already real
+      })
+      .catch((err) => {
+        setStatus({
+          state: "error",
+          message: err instanceof Error ? err.message : "import failed",
+        });
+      });
+  }
+
+  const submitting = status.state === "uploading";
+
+  return (
+    <Card
+      title={
+        <span className="flex items-center gap-2">
+          <Upload className="h-4 w-4 text-emerald-200" />
+          Import a trained model bundle
+        </span>
+      }
+      subtitle={
+        <>
+          <span>
+            Upload a zip bundle trained anywhere (a notebook, another machine) and register it
+            as a new registry version -- no training loop runs here. A live evaluation gate runs
+            automatically against fresh warehouse data right after registration, same as a
+            freshly-trained version.{" "}
+            {format === "pt" ? (
+              <>
+                The bundle&apos;s own <code className="font-mono">manifest.json</code> decides
+                the architecture (LSTM or TFT).
+              </>
+            ) : (
+              <>
+                Framework-agnostic -- any model exported to ONNX works, not just LSTM/TFT.
+                Registers under the bundle&apos;s own chosen model name, tagged{" "}
+                <code className="font-mono">onnx_custom</code>.
+              </>
+            )}
+          </span>
+          <br />
+          <span className="font-mono text-white/35">
+            POST /v1/model/versions/{format === "onnx" ? "import-onnx" : "import"}
+          </span>
+        </>
+      }
+    >
+      <form onSubmit={submit} className="space-y-4" data-testid="import-form">
+        <div
+          className="flex flex-wrap gap-1"
+          role="tablist"
+          aria-label="Bundle format"
+          data-testid="import-format-selector"
+        >
+          <TabButton
+            active={format === "pt"}
+            onClick={() => {
+              setFormat("pt");
+              setFile(null);
+            }}
+            data-testid="import-format-pt"
+          >
+            PyTorch (.pt)
+          </TabButton>
+          <TabButton
+            active={format === "onnx"}
+            onClick={() => {
+              setFormat("onnx");
+              setFile(null);
+            }}
+            data-testid="import-format-onnx"
+          >
+            ONNX (.onnx)
+          </TabButton>
+        </div>
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <div>
+            <label className="mb-1.5 block text-[10px] font-semibold uppercase tracking-wider text-white/40">
+              Bundle (.zip)
+            </label>
+            <input
+              type="file"
+              accept=".zip"
+              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+              data-testid="import-file"
+              className="block w-full text-xs text-white/60 file:mr-3 file:rounded-md file:border-0 file:bg-lime-100 file:px-3 file:py-1.5 file:text-xs file:font-semibold file:text-black file:hover:bg-lime-200"
+            />
+            {format === "pt" ? (
+              <p className="mt-1.5 text-[10px] text-white/35">
+                Must contain <code className="font-mono">manifest.json</code>,{" "}
+                <code className="font-mono">model_state_dict.pt</code>,{" "}
+                <code className="font-mono">feature_scalers.json</code>, and{" "}
+                <code className="font-mono">target_scaler.json</code> -- see
+                service/ml/model_import.py for the exact format.
+              </p>
+            ) : (
+              <p className="mt-1.5 text-[10px] text-white/35">
+                Must contain <code className="font-mono">manifest.json</code>,{" "}
+                <code className="font-mono">model.onnx</code>,{" "}
+                <code className="font-mono">feature_scalers.json</code>, and{" "}
+                <code className="font-mono">target_scaler.json</code> -- see
+                service/ml/onnx_import.py for the exact format.
+              </p>
+            )}
+          </div>
+          <div>
+            <label className="mb-1.5 block text-[10px] font-semibold uppercase tracking-wider text-white/40">
+              Uploaded by (optional)
+            </label>
+            <input
+              type="text"
+              value={uploadedBy}
+              onChange={(e) => setUploadedBy(e.target.value)}
+              placeholder="e.g. your name -- tagged on the MLflow run"
+              data-testid="import-uploaded-by"
+              className="w-full rounded-md border border-white/10 bg-white/[0.04] px-3 py-1.5 text-sm text-white placeholder:text-white/35 focus:border-emerald-200/60 focus:outline-none"
+            />
+          </div>
+        </div>
+
+        {status.state === "error" && (
+          <p className="text-xs text-rose-300" data-testid="import-error">
+            {status.message}
+          </p>
+        )}
+        {status.state === "success" && (
+          <div
+            className="rounded-md border border-emerald-200/30 bg-emerald-200/5 p-3 text-xs text-emerald-100"
+            data-testid="import-success"
+          >
+            <p>
+              Registered{" "}
+              {status.result.architecture === "onnx_custom"
+                ? "ONNX"
+                : status.result.architecture.toUpperCase()}{" "}
+              v{status.result.model_version} ({status.result.model_name}). Switching to the
+              Registry tab…
+            </p>
+            <p className="mt-1 text-white/60">
+              Live evaluation gate:{" "}
+              {status.result.eval_gate_passed === null
+                ? "did not run (see server logs) -- registered in the None stage regardless."
+                : status.result.eval_gate_passed
+                  ? `passed (fresh walk-forward MAPE ${status.result.eval_gate_mape?.toFixed(2) ?? "—"}%).`
+                  : `failed (fresh walk-forward MAPE ${status.result.eval_gate_mape?.toFixed(2) ?? "—"}%) -- registered in the None stage, review before promoting.`}
+            </p>
+          </div>
+        )}
+
+        <div className="flex items-center gap-2">
+          <button
+            type="submit"
+            disabled={submitting || !file}
+            data-testid="start-import"
+            className={cn(
+              "inline-flex items-center gap-1.5 rounded-md px-4 py-2 text-sm font-semibold",
+              submitting || !file
+                ? "cursor-not-allowed bg-white/10 text-white/40"
+                : "bg-lime-100 text-black hover:bg-lime-100",
+            )}
+          >
+            <Upload className="h-3.5 w-3.5" /> {submitting ? "Uploading…" : "Import bundle"}
+          </button>
+          <p className="text-[11px] text-white/45">
+            Validated end-to-end before anything is registered — feature-set fingerprint, model
+            weights, and a dummy-input sanity check. A bad bundle is rejected with a specific
+            reason; nothing is half-registered. Never auto-promoted — lands in the{" "}
+            <code className="font-mono">None</code> stage, same as any other new version.
           </p>
         </div>
       </form>

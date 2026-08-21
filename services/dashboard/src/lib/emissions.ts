@@ -507,6 +507,99 @@ export async function deleteModelVersion(
   }
 }
 
+/** Shape of forecast-api's `ModelImportResponse`
+ * (`POST /v1/model/versions/import`). `eval_gate_passed=null` means the
+ * live-evaluation gate itself failed to run against fresh warehouse
+ * data (a real, logged, non-fatal degradation server-side) -- not that
+ * it ran and failed; `false` is reserved for "ran, and failed". */
+export type ModelImportResult = {
+  run_id: string;
+  model_version: string;
+  model_name: string;
+  architecture: string;
+  eval_gate_passed: boolean | null;
+  eval_gate_mape: number | null;
+  eval_gate_regions: RegionEvaluation[];
+};
+
+/** Live call to `POST /v1/model/versions/import` -- registers an
+ * already-trained model bundle (a zip file containing `manifest.json` +
+ * `model_state_dict.pt` + `feature_scalers.json` + `target_scaler.json`,
+ * see forecast-api's `service/ml/model_import.py` module docstring for
+ * the exact format) as a new registry version, without going through
+ * this service's own training loop. `architecture`/`model_name` are
+ * decided server-side from the bundle's own `manifest.json`, not a
+ * client choice -- the response reports which one it actually
+ * registered against, so the caller knows which architecture's registry
+ * to refresh. Deliberately open, no auth, same as every other mutating
+ * `/v1/model/*` route. A malformed/incompatible bundle rejects with a
+ * real 422 (`error.message` has the specific reason: bad zip, wrong
+ * architecture, stale feature set, incompatible weights, etc), never a
+ * half-registered version. `timeoutMs` is generous (120s, not this
+ * module's default 15s) -- unlike every other fetch here, this one does
+ * real synchronous work server-side (bundle validation, an MLflow run,
+ * then a live walk-forward evaluation against fresh warehouse data). */
+export async function importModelBundle(
+  file: File,
+  uploadedBy?: string,
+): Promise<ModelImportResult> {
+  const formData = new FormData();
+  formData.append("file", file);
+  if (uploadedBy) formData.append("uploaded_by", uploadedBy);
+
+  // No explicit `Content-Type` header -- the browser sets
+  // `multipart/form-data; boundary=...` itself for a `FormData` body;
+  // setting it by hand would drop the boundary parameter and break
+  // parsing server-side.
+  const res = await fetchWithTimeout(
+    `${FORECAST_API_URL}/model/versions/import`,
+    { method: "POST", body: formData },
+    120000,
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(
+      body?.error?.message ?? `POST /v1/model/versions/import failed: ${res.status}`,
+    );
+  }
+  return res.json();
+}
+
+/** Live call to `POST /v1/model/versions/import-onnx` -- the ONNX
+ * counterpart to `importModelBundle` above. Registers a `.onnx` bundle
+ * (`manifest.json` + `model.onnx` + `feature_scalers.json` +
+ * `target_scaler.json`, see forecast-api's `service/ml/onnx_import.py`
+ * module docstring for the exact format) as a new registry version.
+ * Unlike the `.pt` path, `model_name` is entirely the uploader's own
+ * choice (declared in the bundle's manifest, not one of the three fixed
+ * LSTM/TFT/TimesFM architectures) and the registered `architecture` is
+ * always the literal `"onnx_custom"` -- open-ended by design, since an
+ * ONNX bundle can come from any framework/architecture that exports to
+ * the ONNX graph format. Same validate-then-register-then-live-eval-gate
+ * flow, same generous 120s timeout, same error-shape contract as
+ * `importModelBundle`. */
+export async function importOnnxBundle(
+  file: File,
+  uploadedBy?: string,
+): Promise<ModelImportResult> {
+  const formData = new FormData();
+  formData.append("file", file);
+  if (uploadedBy) formData.append("uploaded_by", uploadedBy);
+
+  const res = await fetchWithTimeout(
+    `${FORECAST_API_URL}/model/versions/import-onnx`,
+    { method: "POST", body: formData },
+    120000,
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(
+      body?.error?.message ?? `POST /v1/model/versions/import-onnx failed: ${res.status}`,
+    );
+  }
+  return res.json();
+}
+
 /** Shape of forecast-api's `LossCurvePointOut`/`LossCurveOut`
  * (`GET /v1/model/versions/{version}/loss-curve`) -- real per-epoch
  * `train_loss`/`val_loss`/`val_mape`/`val_rmse`/`val_mae` history read

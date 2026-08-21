@@ -94,6 +94,34 @@ def main() -> None:
     help="Override Settings.model_quantile_weight.",
 )
 @click.option(
+    "--hidden-size",
+    type=int,
+    default=None,
+    help="Override Settings.model_hidden_size (LSTM hidden units per layer).",
+)
+@click.option(
+    "--num-layers",
+    type=int,
+    default=None,
+    help="Override Settings.model_num_layers (stacked LSTM layers).",
+)
+@click.option(
+    "--dropout", type=float, default=None, help="Override Settings.model_dropout."
+)
+@click.option(
+    "--train-frac",
+    type=float,
+    default=None,
+    help="Override TrainConfig.train_frac (fraction-based split -- see split_by_time's "
+    "own docstring for why this is chronological, not a random shuffle).",
+)
+@click.option(
+    "--val-frac",
+    type=float,
+    default=None,
+    help="Override TrainConfig.val_frac. Test is implicitly 1 - train_frac - val_frac.",
+)
+@click.option(
     "--shuffle/--no-shuffle",
     default=True,
     show_default=True,
@@ -125,6 +153,11 @@ def train(
     lr: float | None,
     early_stopping_patience: int | None,
     quantile_weight: float | None,
+    hidden_size: int | None,
+    num_layers: int | None,
+    dropout: float | None,
+    train_frac: float | None,
+    val_frac: float | None,
     shuffle: bool,
     train_start: str | None,
     train_end: str | None,
@@ -155,6 +188,16 @@ def train(
         overrides["early_stopping_patience"] = early_stopping_patience
     if quantile_weight is not None:
         overrides["quantile_weight"] = quantile_weight
+    if hidden_size is not None:
+        overrides["hidden_size"] = hidden_size
+    if num_layers is not None:
+        overrides["num_layers"] = num_layers
+    if dropout is not None:
+        overrides["dropout"] = dropout
+    if train_frac is not None:
+        overrides["train_frac"] = train_frac
+    if val_frac is not None:
+        overrides["val_frac"] = val_frac
 
     date_fields = {
         "train_start": train_start,

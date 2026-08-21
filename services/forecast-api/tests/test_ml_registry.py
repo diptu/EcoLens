@@ -42,7 +42,7 @@ class _FakeBundle:
 
 class TestModelRegistryRefresh:
     async def test_swaps_in_a_bundle_when_none_was_loaded(self, monkeypatch):
-        async def fake_load_bundle(model_name, stage="Production"):
+        async def fake_load_bundle(model_name, stage="Production", architecture="lstm"):
             return _FakeBundle("1")
 
         monkeypatch.setattr(registry_module, "load_bundle", fake_load_bundle)
@@ -56,7 +56,7 @@ class TestModelRegistryRefresh:
     async def test_does_not_swap_when_version_is_unchanged(self, monkeypatch):
         call_count = {"n": 0}
 
-        async def fake_load_bundle(model_name, stage="Production"):
+        async def fake_load_bundle(model_name, stage="Production", architecture="lstm"):
             call_count["n"] += 1
             return _FakeBundle("1")
 
@@ -76,7 +76,7 @@ class TestModelRegistryRefresh:
     async def test_swaps_when_a_newer_version_appears(self, monkeypatch):
         versions = iter(["1", "2"])
 
-        async def fake_load_bundle(model_name, stage="Production"):
+        async def fake_load_bundle(model_name, stage="Production", architecture="lstm"):
             return _FakeBundle(next(versions))
 
         monkeypatch.setattr(registry_module, "load_bundle", fake_load_bundle)
@@ -91,7 +91,7 @@ class TestModelRegistryRefresh:
     async def test_returns_false_and_keeps_existing_bundle_when_nothing_is_registered(
         self, monkeypatch
     ):
-        async def fake_load_bundle(model_name, stage="Production"):
+        async def fake_load_bundle(model_name, stage="Production", architecture="lstm"):
             return None
 
         monkeypatch.setattr(registry_module, "load_bundle", fake_load_bundle)

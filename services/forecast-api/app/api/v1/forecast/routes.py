@@ -502,10 +502,11 @@ async def _run_recent_backtest_nem(
         if len(group) != len(_NEM_AGGREGATE_REGIONS):
             continue
         actuals = [g.actual for g in group]
+        non_null_actuals = [a for a in actuals if a is not None]
         merged.append(
             RecentBacktestPoint(
                 ts=ts,
-                actual=None if any(a is None for a in actuals) else sum(actuals),
+                actual=sum(non_null_actuals) if len(non_null_actuals) == len(actuals) else None,
                 p10=sum(g.p10 for g in group),
                 p50=sum(g.p50 for g in group),
                 p90=sum(g.p90 for g in group),

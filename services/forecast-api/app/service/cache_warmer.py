@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -49,7 +50,7 @@ log = get_logger(__name__)
 
 async def run_emissions_forecast_warmer(
     redis: Redis,
-    db_session_factory: Callable[[], AsyncSession],
+    db_session_factory: Callable[[], AbstractAsyncContextManager[AsyncSession]],
     registry: ModelRegistry,
     settings: Settings,
     interval_seconds: float,
@@ -117,7 +118,7 @@ async def run_model_drift_warmer(
 
 async def run_recent_backtest_warmer(
     redis: Redis,
-    db_session_factory: Callable[[], AsyncSession],
+    db_session_factory: Callable[[], AbstractAsyncContextManager[AsyncSession]],
     registry: ModelRegistry,
     settings: Settings,
     interval_seconds: float,
@@ -193,7 +194,7 @@ async def run_recent_backtest_warmer(
 # spans) this warmer shouldn't trigger; the endpoints below have none.
 async def run_dashboard_essentials_warmer(
     redis: Redis,
-    db_session_factory: Callable[[], AsyncSession],
+    db_session_factory: Callable[[], AbstractAsyncContextManager[AsyncSession]],
     registry: ModelRegistry,
     settings: Settings,
     interval_seconds: float,

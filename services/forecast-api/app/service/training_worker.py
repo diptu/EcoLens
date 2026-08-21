@@ -45,10 +45,11 @@ from app.service.ml.incremental import train_and_register_incremental
 from app.service.ml.incremental_tft import train_and_register_tft_incremental
 from app.service.ml.timesfm_correction import (
     TIMESFM_CORRECTION_MODEL_NAME,
+    TrainAndRegisterCorrectionResult,
     load_registered_correction_model,
     train_and_register_correction,
 )
-from app.service.ml.train import train_and_register
+from app.service.ml.train import TrainAndRegisterResult, train_and_register
 from app.service.ml.train_tft import TFT_MODEL_NAME, train_and_register_tft
 from app.service.mlops.registry import get_version_in_stage
 from app.service.model.actions import log_training_finish, log_training_start
@@ -247,6 +248,7 @@ async def handle_training_trigger(payload: dict[str, Any]) -> None:
         since.to_pydatetime(),
         until.to_pydatetime(),
     )
+    result: TrainAndRegisterResult | TrainAndRegisterCorrectionResult
     try:
         try:
             if full_retrain and architecture == "tft":

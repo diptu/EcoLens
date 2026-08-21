@@ -33,7 +33,7 @@ async def test_succeeds_on_first_attempt_without_sleeping(monkeypatch):
         calls += 1
         return "ok"
 
-    result = await fetch_with_retry(fn, log_event="test.retry")
+    result = await fetch_with_retry(fn, source="test_source", log_event="test.retry")
 
     assert result == "ok"
     assert calls == 1
@@ -52,7 +52,9 @@ async def test_retries_on_transport_error_then_succeeds(monkeypatch):
             raise httpx.ConnectError("connection reset")
         return "recovered"
 
-    result = await fetch_with_retry(fn, log_event="test.retry", max_attempts=3)
+    result = await fetch_with_retry(
+        fn, source="test_source", log_event="test.retry", max_attempts=3
+    )
 
     assert result == "recovered"
     assert len(attempts) == 3
@@ -70,7 +72,9 @@ async def test_retries_on_5xx_then_succeeds(monkeypatch):
             raise _status_error(503)
         return "recovered"
 
-    result = await fetch_with_retry(fn, log_event="test.retry", max_attempts=3)
+    result = await fetch_with_retry(
+        fn, source="test_source", log_event="test.retry", max_attempts=3
+    )
 
     assert result == "recovered"
     assert len(attempts) == 2
@@ -87,7 +91,9 @@ async def test_does_not_retry_a_4xx(monkeypatch):
         raise _status_error(404)
 
     with pytest.raises(httpx.HTTPStatusError) as exc_info:
-        await fetch_with_retry(fn, log_event="test.retry", max_attempts=3)
+        await fetch_with_retry(
+            fn, source="test_source", log_event="test.retry", max_attempts=3
+        )
 
     assert exc_info.value.response.status_code == 404
     assert len(attempts) == 1  # no retry attempted
@@ -104,7 +110,9 @@ async def test_raises_the_last_error_after_exhausting_all_attempts(monkeypatch):
         raise httpx.ConnectTimeout("timed out")
 
     with pytest.raises(httpx.ConnectTimeout):
-        await fetch_with_retry(fn, log_event="test.retry", max_attempts=3)
+        await fetch_with_retry(
+            fn, source="test_source", log_event="test.retry", max_attempts=3
+        )
 
     assert len(attempts) == 3
 

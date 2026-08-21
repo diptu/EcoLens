@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from typing import Any
 
 import click
 
@@ -179,7 +180,7 @@ def train(
     resolved_model_name = model_name or settings.mlflow_registry_model_name
     config = TrainConfig.from_settings(settings)
 
-    overrides: dict[str, object] = {"shuffle": shuffle}
+    overrides: dict[str, Any] = {"shuffle": shuffle}
     if epochs is not None:
         overrides["epochs"] = epochs
     if lr is not None:
@@ -360,7 +361,7 @@ def train_tft(
     resolved_regions = list(regions) or settings.model_default_regions
     config = TFTTrainConfig.from_settings(settings)
 
-    overrides: dict[str, object] = {"shuffle": shuffle}
+    overrides: dict[str, Any] = {"shuffle": shuffle}
     if epochs is not None:
         overrides["epochs"] = epochs
     if lr is not None:

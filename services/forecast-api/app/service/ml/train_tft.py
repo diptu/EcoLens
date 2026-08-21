@@ -257,7 +257,6 @@ def train_tft_model(
     split_train = pd.concat([t for t, _, _, _ in per_region_split.values()])
     earlystop_val = pd.concat([v for _, v, _, _ in per_region_split.values()])
     cal = pd.concat([c for _, _, c, _ in per_region_split.values()])
-    test = pd.concat([t for _, _, _, t in per_region_split.values()])
 
     if split_train.empty or earlystop_val.empty or cal.empty:
         raise ValueError(

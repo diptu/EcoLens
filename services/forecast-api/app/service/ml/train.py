@@ -210,6 +210,16 @@ class TrainConfig:
             "p50_loss": "pinball",
         }
         if self.train_start is not None:
+            # `train_start` set implies all six are set -- `cli.py`'s
+            # `date_fields` check is the real enforcement (all-or-nothing),
+            # this just narrows the type for mypy rather than assuming it.
+            assert (
+                self.train_end is not None
+                and self.val_start is not None
+                and self.val_end is not None
+                and self.test_start is not None
+                and self.test_end is not None
+            ), "train_start is set but one of train_end/val_start/val_end/test_start/test_end is not"
             params.update(
                 {
                     "train_start": self.train_start.isoformat(),

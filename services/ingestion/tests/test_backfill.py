@@ -141,7 +141,11 @@ async def test_backfill_day_runs_when_not_yet_succeeded(monkeypatch):
     assert outcome == "success"
     assert captured == {
         "key": "oe",
-        "kwargs": {"triggered_by": "backfill", "lookback_minutes": 1440},
+        "kwargs": {
+            "triggered_by": "backfill",
+            "lookback_minutes": 1440,
+            "duckdb_only": False,
+        },
     }
 
 
@@ -170,6 +174,7 @@ async def test_backfill_day_routes_bom_through_start_end(monkeypatch):
         "triggered_by": "backfill",
         "start": expected_day,
         "end": expected_day,
+        "duckdb_only": False,
     }
 
 
@@ -200,6 +205,7 @@ async def test_backfill_day_routes_oe_through_start_end(monkeypatch):
         "triggered_by": "backfill",
         "start": expected_day,
         "end": expected_day,
+        "duckdb_only": False,
     }
 
 
@@ -276,7 +282,7 @@ async def test_backfill_covers_every_source_and_day_in_the_range(monkeypatch):
     calls = []
 
     async def fake_backfill_day(
-        key, day, lookback_minutes=backfill.DEFAULT_LOOKBACK_MINUTES
+        key, day, lookback_minutes=backfill.DEFAULT_LOOKBACK_MINUTES, duckdb_only=False
     ):
         calls.append((key, day))
         return "success"

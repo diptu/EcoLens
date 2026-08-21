@@ -209,6 +209,7 @@ def standard_run(
     window_start: str | None = None,
     window_end: str | None = None,
     bypass_breaker: bool = False,
+    duckdb_only: bool = False,
 ) -> Callable[[Callable[P, Awaitable[pd.DataFrame]]], Callable[P, Awaitable[int]]]:
     """Decorator factory: standardise the run-start / fetch / anomaly-scan /
     stage+publish / finish lifecycle.
@@ -234,6 +235,19 @@ def standard_run(
     recorded as a breaker success/failure either way — matches `breaker.
     call`'s existing "only successes and failures through the breaker
     affect its state" contract.
+
+    `duckdb_only=True` (2026-08-20, `ecolens-ingestion backfill
+    --duckdb-only`) stops right after `stage_dataframe` -- no R2 upload
+    (`upload_staged_file`), no `publish_landed_event`, so the real
+    Neon-backed `raw.*` tables are never touched at all. The fetched rows
+    exist only in the local DuckDB staging file this call just wrote.
+    Finishes as `status="success"` (not `"staged"`) since there's no
+    consumer this mode ever hands off to -- `"staged"` would leave the
+    row looking permanently unsynced, which is misleading when sync was
+    never going to happen by design. `meta._ingest_log`/`meta.anomalies`
+    bookkeeping still writes to the real logging Postgres either way --
+    that's small, cheap, and is what makes backfill's own
+    `already_succeeded` resumability work at all.
     """
 
     def decorator(
@@ -303,6 +317,32 @@ def standard_run(
                             rows=0,
                         )
                         return 0
+
+                    if duckdb_only:
+                        # No R2 upload, no `publish_landed_event` -- see this
+                        # decorator's own docstring. `status="success"`
+                        # (terminal), not `"staged"` -- no consumer will ever
+                        # sync this row into `raw.*`, so `"staged"` would be a
+                        # real, permanent lie about a hand-off that's never
+                        # coming.
+                        await _log_run_finish(
+                            run_id,
+                            status="success",
+                            rows_landed=rows_staged,
+                            rows_loaded=0,
+                            circuit_state=await _read_breaker_state(source, breaker),
+                        )
+                        ingest_rows_total.labels(source=source).inc(rows_staged)
+                        ingest_runs_total.labels(source=source, outcome="success").inc()
+                        latest_ingest_ts.labels(source=source).set(time.time())
+                        log.info(
+                            "ingest.run_staged_duckdb_only",
+                            source=source,
+                            run_id=str(run_id),
+                            rows=rows_staged,
+                            duckdb_path=duckdb_path,
+                        )
+                        return rows_staged
 
                     # Uploads the same local file `stage_dataframe` just wrote
                     # to object storage (`services/ingestion/TODO.md` Phase 2,

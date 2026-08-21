@@ -92,7 +92,10 @@ _DATE_RANGE_SOURCES: tuple[str, ...] = ("aemo-nem", "aemo-wem", "bom", "oe")
 
 
 async def backfill_day(
-    key: str, day: date, lookback_minutes: int = DEFAULT_LOOKBACK_MINUTES
+    key: str,
+    day: date,
+    lookback_minutes: int = DEFAULT_LOOKBACK_MINUTES,
+    duckdb_only: bool = False,
 ) -> str:
     """Backfill one `(source, day)` pair if it hasn't already succeeded.
 
@@ -128,10 +131,14 @@ async def backfill_day(
                 triggered_by="backfill",
                 start=day_start,
                 end=day_start,
+                duckdb_only=duckdb_only,
             )
         else:
             rows = await run_source(
-                key, triggered_by="backfill", lookback_minutes=lookback_minutes
+                key,
+                triggered_by="backfill",
+                lookback_minutes=lookback_minutes,
+                duckdb_only=duckdb_only,
             )
     except Exception as exc:
         log.error("backfill.day_failed", source=key, day=str(day), error=str(exc))
@@ -146,14 +153,24 @@ async def backfill(
     start: date,
     end: date,
     lookback_minutes: int = DEFAULT_LOOKBACK_MINUTES,
+    duckdb_only: bool = False,
 ) -> dict[tuple[str, date], str]:
     """Backfill every `(source, day)` pair in the range.
 
     Returns one result per pair, in `(source, day) -> outcome` order —
     see `backfill_day`'s docstring for the possible outcome strings.
+
+    `duckdb_only=True` (2026-08-20) threads straight through to
+    `_common.standard_run` -- every day's rows land only in the local
+    shared DuckDB staging file (`pipeline.duckdb_staging`'s
+    `landed.duckdb`), never uploaded to R2 or synced into the real
+    Neon-backed `raw.*` tables. See that decorator's own docstring for
+    the full reasoning.
     """
     results: dict[tuple[str, date], str] = {}
     for day in daterange(start, end):
         for key in sources:
-            results[(key, day)] = await backfill_day(key, day, lookback_minutes)
+            results[(key, day)] = await backfill_day(
+                key, day, lookback_minutes, duckdb_only=duckdb_only
+            )
     return results

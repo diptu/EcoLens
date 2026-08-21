@@ -50,3 +50,31 @@ class PublicDataQualitySummaryResponse(AppBaseModel):
     as_of: datetime
     data_quality_score_pct: float | None = None
     open_risks_high_plus: int
+
+
+class OpenRiskOut(AppBaseModel):
+    """One real `high`/`critical`-severity open issue -- the actual
+    per-issue detail `PublicDataQualitySummaryResponse.open_risks_high_plus`
+    counts but never names (2026-08-20 -- the Executive Dashboard's "Open
+    Risks" KPI showed a bare count with no way to see which service or
+    why; this is what backs the fix). Same three real sources
+    `_generate_issues` already produces -- consecutive ingest-run
+    failures, anomaly clusters, and actionable schema drift -- just
+    surfaced instead of only counted."""
+
+    id: str
+    source_id: str
+    source_name: str
+    severity: str
+    category: str
+    title: str
+    description: str
+    first_seen_at: datetime
+    last_seen_at: datetime
+    occurrences: int
+    suggested_action: str
+
+
+class OpenRisksListResponse(AppBaseModel):
+    as_of: datetime
+    data: list[OpenRiskOut]

@@ -127,6 +127,8 @@ __pypackages__/
 
 # Celery stuff
 celerybeat-schedule
+celerybeat-schedule-shm
+celerybeat-schedule-wal
 celerybeat.pid
 
 # Local MLflow dev server (sqlite backend store + filesystem artifact
@@ -196,3 +198,15 @@ yarn-error.log*
 dump.rdb
 .claude/worktrees/
 *.duckdb.*
+
+# Local DuckDB data/training files (services/ingestion/data/staging/
+# landed.duckdb, services/ingestion/data/training/master.duckdb, etc.) --
+# real local dev data, regenerated from source, not meant to be tracked.
+# `*.duckdb.*` above only ever matched WAL/temp suffixes, not the bare
+# `.duckdb` file itself -- real gap, confirmed live 2026-08-22 when
+# landed.duckdb (already tracked from before this rule existed) grew to
+# 276MB and got staged again via a routine `git add .`, hard-failing the
+# push against GitHub's 100MB per-file limit. Untrack already-tracked
+# copies with `git rm --cached`; this only stops *new* ones from being
+# added.
+*.duckdb

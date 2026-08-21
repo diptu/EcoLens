@@ -21,6 +21,8 @@ dbt/ML/forecast metrics since this service has none of those.
 
 from __future__ import annotations
 
+import os
+
 from fastapi import APIRouter, Depends, Response
 from redis.asyncio import Redis
 from sqlalchemy import text
@@ -29,7 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.v1.deps import get_db, get_log_db, get_redis_client
 from app.core.metrics import metrics_as_text
 from app.db.rabbitmq import get_rabbitmq_connection
-from app.schemas.health import ComponentHealth, HealthResponse, ReadyResponse
+from app.schemas.health import ComponentHealth, HealthResponse, ReadyResponse, SystemLoadResponse
 
 router = APIRouter(tags=["health"])
 
@@ -62,6 +64,50 @@ async def readyz(
 @router.get("/metrics")
 async def metrics() -> Response:
     return Response(content=metrics_as_text(), media_type="text/plain; version=0.0.4")
+
+
+@router.get("/v1/system/load", response_model=SystemLoadResponse)
+async def system_load() -> SystemLoadResponse:
+    """Real, not simulated -- `os.getloadavg()` (a thin wrapper over the
+    POSIX `getloadavg()` syscall, backed by `/proc/loadavg` on Linux) and
+    `/proc/meminfo`, read fresh on every call. Both reflect the whole
+    Linux kernel this container runs under, not just this one
+    container's own cgroup -- see `SystemLoadResponse`'s own docstring
+    for why that's the right scope for this platform's Operational Tasks
+    page. No new dependency: both are stdlib/`/proc`, no `psutil`
+    needed for numbers this simple."""
+    load_1m, load_5m, load_15m = os.getloadavg()
+    mem_total_kb, mem_available_kb = _read_meminfo()
+    mem_total_mb = mem_total_kb / 1024
+    mem_available_mb = mem_available_kb / 1024
+    mem_used_pct = (
+        100 * (mem_total_kb - mem_available_kb) / mem_total_kb if mem_total_kb else 0.0
+    )
+    return SystemLoadResponse(
+        load_avg_1m=load_1m,
+        load_avg_5m=load_5m,
+        load_avg_15m=load_15m,
+        cpu_count=os.cpu_count() or 1,
+        mem_total_mb=mem_total_mb,
+        mem_available_mb=mem_available_mb,
+        mem_used_pct=mem_used_pct,
+    )
+
+
+def _read_meminfo() -> tuple[float, float]:
+    """`(MemTotal_kb, MemAvailable_kb)` from `/proc/meminfo` -- `Avail
+    able` (not `MemFree`) is the kernel's own "how much could actually
+    be allocated right now" estimate, already accounting for reclaimable
+    cache/buffers, which is what a real "% memory used" figure should be
+    measured against."""
+    total_kb = available_kb = 0.0
+    with open("/proc/meminfo") as f:
+        for line in f:
+            if line.startswith("MemTotal:"):
+                total_kb = float(line.split()[1])
+            elif line.startswith("MemAvailable:"):
+                available_kb = float(line.split()[1])
+    return total_kb, available_kb
 
 
 async def _check_postgres(db: AsyncSession, *, name: str = "postgres") -> ComponentHealth:

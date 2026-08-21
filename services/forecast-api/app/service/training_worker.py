@@ -27,6 +27,7 @@ for the consume loop / DLX behavior on a failed handler call.
 
 from __future__ import annotations
 
+import gc
 from typing import Any
 
 import pandas as pd
@@ -247,44 +248,61 @@ async def handle_training_trigger(payload: dict[str, Any]) -> None:
         until.to_pydatetime(),
     )
     try:
-        if full_retrain and architecture == "tft":
-            result = await train_and_register_tft(model_name, regions, since=since)
-        elif full_retrain and architecture != "timesfm_correction":
-            result = await train_and_register(model_name, regions, since=since)
-        elif architecture == "tft":
-            result = await train_and_register_tft_incremental(
-                model_name, regions, since
-            )
-        elif architecture == "timesfm_correction":
-            result = await train_and_register_correction(
-                model_name, regions, since=since
-            )
-        else:
-            result = await train_and_register_incremental(model_name, regions, since)
-    except Exception as exc:
-        await log_training_finish(log_id, status="failed", error_message=str(exc))
-        raise
+        try:
+            if full_retrain and architecture == "tft":
+                result = await train_and_register_tft(model_name, regions, since=since)
+            elif full_retrain and architecture != "timesfm_correction":
+                result = await train_and_register(model_name, regions, since=since)
+            elif architecture == "tft":
+                result = await train_and_register_tft_incremental(
+                    model_name, regions, since
+                )
+            elif architecture == "timesfm_correction":
+                result = await train_and_register_correction(
+                    model_name, regions, since=since
+                )
+            else:
+                result = await train_and_register_incremental(model_name, regions, since)
+        except Exception as exc:
+            await log_training_finish(log_id, status="failed", error_message=str(exc))
+            raise
 
-    await log_training_finish(
-        log_id,
-        status="success",
-        run_id=result.run_id,
-        model_version=result.model_version,
-    )
-    log.info(
-        "training_worker.trained",
-        model_name=model_name,
-        run_id=result.run_id,
-        model_version=result.model_version,
-        regions=regions,
-        architecture=architecture,
-        full_retrain=full_retrain,
-    )
-
-    if result.model_version:
-        await _run_live_evaluation_gate(
-            architecture, model_name, result.model_version, list(regions)
+        await log_training_finish(
+            log_id,
+            status="success",
+            run_id=result.run_id,
+            model_version=result.model_version,
         )
+        log.info(
+            "training_worker.trained",
+            model_name=model_name,
+            run_id=result.run_id,
+            model_version=result.model_version,
+            regions=regions,
+            architecture=architecture,
+            full_retrain=full_retrain,
+        )
+
+        if result.model_version:
+            await _run_live_evaluation_gate(
+                architecture, model_name, result.model_version, list(regions)
+            )
+    finally:
+        # `train-worker` is one long-running process handling messages
+        # strictly sequentially (`consume_training_trigger_events`'s
+        # `prefetch_count=1`) -- each message here can build/discard
+        # multi-hundred-MB-to-GB torch tensors (model state dicts,
+        # optimizer state, engineered-feature DataFrames). CPython's own
+        # refcounting GC already frees these the moment this function's
+        # locals go out of scope, but a forced collection right here,
+        # every message, keeps the interpreter from letting reference
+        # cycles (a real possibility across the several `nn.Module`/
+        # `DataLoader`/closure objects a training run builds) sit
+        # uncollected until the next scheduled gen-2 pass, so this
+        # process's actual RSS reflects "what's still live" as closely
+        # and as often as possible rather than ratcheting upward across
+        # many sequential messages before Railway's OOM reaper notices.
+        gc.collect()
 
 
 async def run() -> None:

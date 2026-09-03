@@ -20,7 +20,7 @@ from .archive import ArchiveManager
 from .dbt_runner import DbtRunner
 from .freshness import SourceFreshnessChecker
 from .metrics import MetricsEmitter
-from ecolens.warehouse.model.run_result import RunResult, StageResult
+from ecolens.warehouse.models.run_result import RunResult, StageResult
 from .quality import DataQualityValidator
 from ecolens.warehouse.core.runner_settings import (
     WarehouseRunnerSettings,

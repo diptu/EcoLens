@@ -128,7 +128,7 @@ pipeline: ## Run data-pipeline locally.
 
 .PHONY: warehouse-api
 warehouse-api: ## Run the warehouse API locally (read-only PostgreSQL surface for the dashboard/forecast-api -- distinct from `make pipeline`'s control API, which triggers the pipeline instead of serving its output).
-	cd services/data-pipeline && $(UV) run --package data-pipeline uvicorn ecolens.warehouse.api.api:app --reload --port 8002
+	cd services/data-pipeline && $(UV) run --package data-pipeline uvicorn ecolens.warehouse.api.v1.api:app --reload --port 8002
 
 .PHONY: ingest-openelectricity
 ingest-openelectricity: ## Manually trigger one OpenElectricity (NEM/WEM) fetch -> validate -> DuckDB upsert.
@@ -187,8 +187,12 @@ restore-duckdb: ## Restore a DuckDB snapshot written by `make backup-duckdb`. Us
 	fi
 
 .PHONY: migrate-anomaly-columns
-migrate-anomaly-columns: ## One-off: adds anomaly_score/anomaly_flags/anomaly_explanation to every existing DuckDB source table (root TODO.md's Anomaly Detection section). Idempotent -- safe to re-run. Run once before the anomaly-scoring code ships against a pre-existing store.
+migrate-anomaly-columns: ## One-off: adds anomaly_score/anomaly_flags/anomaly_explanation/created_at to every existing DuckDB source table (root TODO.md's Anomaly Detection section). Idempotent -- safe to re-run. Run once before the anomaly-scoring code ships against a pre-existing store.
 	cd services/data-pipeline && $(UV) run --active python scripts/migrate_add_anomaly_columns.py $(if $(PATH_OVERRIDE),--path $(PATH_OVERRIDE),)
+
+.PHONY: rescore-anomalies
+rescore-anomalies: ## Clears then recomputes anomaly_score/anomaly_flags/anomaly_explanation/created_at for every existing row (all 5 DuckDB source tables). Usage: make rescore-anomalies [SOURCE=aemo_nem] [CLEAR_ONLY=1]. Run `make sync-raw FULL=1` afterwards to push the results to Postgres raw.*.
+	cd services/data-pipeline && $(UV) run --active python scripts/rescore_anomalies.py $(if $(SOURCE),--source $(SOURCE),) $(if $(CLEAR_ONLY),--clear-only,)
 
 .PHONY: train-anomaly-models
 train-anomaly-models: ## Retrain every (source, metric) IsolationForest anomaly model from recent DuckDB history (root TODO.md's Anomaly Detection v2). Daily cadence (see scripts/cron_train_anomaly_models.sh) -- not registered through MLflow, see isolation_forest.py's own docstring for why.

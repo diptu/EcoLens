@@ -1,4 +1,6 @@
-"""Warehouse API package — see `api.py`'s module docstring for the full design."""
+"""Warehouse API package — see `api/v1/api.py`'s module docstring for the
+full design.
+"""
 
 from __future__ import annotations
 
@@ -8,8 +10,8 @@ from ecolens.warehouse.core.api_settings import (
     get_warehouse_api_settings,
 )
 
-from .api import app
-from .app import create_app
+from .v1.api import app
+from .v1.app import create_app
 
 __all__ = [
     "app",

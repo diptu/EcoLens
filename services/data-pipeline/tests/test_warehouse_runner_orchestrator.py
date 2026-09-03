@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from ecolens.warehouse.model.run_result import StageResult
+from ecolens.warehouse.models.run_result import StageResult
 from ecolens.warehouse.service.orchestrator import WarehouseRunner
 from ecolens.warehouse.core.runner_settings import WarehouseRunnerSettings
 

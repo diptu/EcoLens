@@ -13,13 +13,13 @@ backfill funnel through `write_historical()`; hooking anomaly scoring in
 anywhere else means five (really six, counting `HistoricalFetcher`) call
 sites that could each forget it, versus one that can't.
 
-Never removes or nulls a record for scoring high -- this only adds three
+Never removes or nulls a record for scoring high -- this only adds four
 columns to what was already going to be written.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -214,11 +214,13 @@ def score_batch(
     statistical outlier's severity, and the worst v2 IsolationForest
     outlier's severity), `anomaly_flags` (comma-joined fired flag names,
     e.g. `"rule:price_above_cap,stat:demand_mw_robust_zscore_outlier,
-    ml:demand_mw_isolation_forest_outlier"`, `""` if nothing fired), and
+    ml:demand_mw_isolation_forest_outlier"`, `""` if nothing fired),
     `anomaly_explanation` (one human-readable line per fired check,
-    `"; "`-joined, `""` if nothing fired). Record count in == record
-    count out, always -- nothing is ever dropped or nulled for scoring
-    high.
+    `"; "`-joined, `""` if nothing fired), and `created_at` (UTC instant
+    this scoring pass ran -- overwritten every time a doc is re-scored,
+    so it reflects the most recent scoring, not the record's original
+    ingest time). Record count in == record count out, always -- nothing
+    is ever dropped or nulled for scoring high.
 
     `baseline`, if given, skips building a fresh one from DuckDB history
     (what tests use to inject synthetic history; production callers
@@ -300,6 +302,7 @@ def score_batch(
         doc["anomaly_explanation"] = _EXPLANATION_DELIMITER.join(
             rule_explanations + stat_explanations + iforest_explanations
         )
+        doc["created_at"] = datetime.now(timezone.utc)
 
         prev_by_entity[entity_key] = doc
 

@@ -30,12 +30,15 @@ Run directly:
 import argparse
 import asyncio
 import uuid
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 
 import httpx
 import pandera.errors
 
 from ecolens.config import get_settings
+from ecolens.ingestion.core.data_source_overrides import is_source_enabled
+from ecolens.ingestion.core.run_history import record_run
 from ecolens.ingestion.service.bom import BomFetcher
 from ecolens.ingestion.db import duckdb_store
 from ecolens.ingestion.schema.validators.bom import validate as validate_docs
@@ -96,6 +99,14 @@ def daterange(start: date, end: date) -> list[date]:
     return days
 
 
+@dataclass(frozen=True)
+class _WindowResult:
+    written: int
+    fetched: int
+    anomalies_flagged: int
+    error: str | None
+
+
 async def ingest_window(
     fetcher: BomFetcher,
     timeout: int,
@@ -103,26 +114,26 @@ async def ingest_window(
     until: datetime | None,
     *,
     label: str,
-) -> int:
-    """Fetch + validate + cache + upsert one time window. Returns docs upserted (0 on failure/no data)."""
+) -> _WindowResult:
+    """Fetch + validate + cache + upsert one time window."""
     run_id = uuid.uuid4().hex
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             docs = await fetcher.fetch(client, since=since, until=until)
     except Exception as exc:  # noqa: BLE001
         log.error("ingest.fetch_failed", run_id=run_id, window=label, error=str(exc))
-        return 0
+        return _WindowResult(0, 0, 0, str(exc))
 
     log.info("fetch.complete", run_id=run_id, window=label, doc_count=len(docs))
     if not docs:
         log.warning("fetch.empty", run_id=run_id, window=label)
-        return 0
+        return _WindowResult(0, 0, 0, None)
 
     try:
         docs = validate_docs(docs)
     except pandera.errors.SchemaError as e:
         log.error("validation.failed", run_id=run_id, window=label, error=str(e))
-        return 0
+        return _WindowResult(0, len(docs), 0, str(e))
     log.info("validation.passed", run_id=run_id, window=label, doc_count=len(docs))
 
     try:
@@ -132,21 +143,53 @@ async def ingest_window(
 
     written = duckdb_store.write_historical("bom", docs, run_id=run_id)
     log.info("duckdb.write_complete", run_id=run_id, window=label, written=written)
-    return written
+    anomalies_flagged = sum(1 for d in docs if d.get("anomaly_score", 0.0) > 0.0)
+    return _WindowResult(written, len(docs), anomalies_flagged, None)
 
 
 async def run(windows: list[tuple[datetime | None, datetime | None, str]]) -> None:
+    if not is_source_enabled("bom"):
+        log.info("source.disabled", source="bom", hint="skipping this run")
+        return
+
+    started_at = datetime.now(timezone.utc)
+    run_id = uuid.uuid4().hex
     settings = get_settings()
     fetcher = BomFetcher()
     log.info("ingest.start", windows=[label for *_rest, label in windows])
 
     totals: dict[str, int] = {}
+    results: list[_WindowResult] = []
     for since, until, label in windows:
-        totals[label] = await ingest_window(
+        result = await ingest_window(
             fetcher, settings.bom_request_timeout_seconds, since, until, label=label
         )
+        totals[label] = result.written
+        results.append(result)
 
     log.info("ingest.complete", totals=totals)
+
+    fetched = sum(r.fetched for r in results)
+    written = sum(r.written for r in results)
+    anomalies_flagged = sum(r.anomalies_flagged for r in results)
+    errors = [r.error for r in results if r.error is not None]
+    if errors and not written:
+        status, error = "failed", "; ".join(errors)
+    elif not fetched:
+        status, error = "empty", None
+    else:
+        status, error = "success", ("; ".join(errors) if errors else None)
+    record_run(
+        "bom",
+        status=status,
+        started_at=started_at,
+        finished_at=datetime.now(timezone.utc),
+        records_fetched=fetched,
+        records_inserted=written,
+        anomalies_flagged=anomalies_flagged,
+        error=error,
+        run_id=run_id,
+    )
 
 
 if __name__ == "__main__":

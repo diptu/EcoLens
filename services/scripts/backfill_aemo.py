@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Backfill AEMO NEM/WEM dispatch data over a date range into MongoDB.
+"""Backfill AEMO NEM/WEM dispatch data over a date range into the local
+DuckDB store.
 
 Loops day-by-day (inclusive) rather than fetching the whole range in
 one shot: each day is fetched and upserted independently, so progress
 is persisted incrementally (safe to Ctrl-C and resume from a later
 --start) and a single bad day is logged and skipped instead of
 aborting the whole backfill. Re-running over an already-backfilled
-range is safe — bulk_upsert is idempotent on each source's unique key.
+range is safe — `duckdb_store.write_historical` is idempotent on each
+source's unique key.
 
 Run from the data-pipeline venv (needs the `ecolens` package):
 
@@ -25,9 +27,9 @@ from datetime import date, timedelta
 
 import httpx
 
+from ecolens.ingestion.db import duckdb_store
 from ecolens.ingestion.service.aemo_nem import AEMONEMFetcher
 from ecolens.ingestion.service.aemo_wem import AEMOWEMFetcher
-from ecolens.ingestion.storage.mongo import bulk_upsert, get_db, get_mongo_client
 from ecolens.shared.observability.logging import get_logger
 
 log = get_logger("backfill_aemo")
@@ -81,7 +83,7 @@ async def backfill_one_day(
     client: httpx.AsyncClient, source_key: str, day: date
 ) -> int:
     """Fetch + upsert one source for one day. Returns docs upserted (0 on failure/no data)."""
-    collection_key, fetcher_cls = SOURCES[source_key]
+    source, fetcher_cls = SOURCES[source_key]
     run_id = uuid.uuid4().hex
     try:
         fetcher = fetcher_cls()
@@ -99,9 +101,8 @@ async def backfill_one_day(
         log.warning("backfill.no_data", source=source_key, day=day.isoformat())
         return 0
 
-    db = get_db()
     try:
-        upserted = await bulk_upsert(db, collection_key, docs, run_id)
+        upserted = duckdb_store.write_historical(source, docs, run_id=run_id)
     except Exception as exc:  # noqa: BLE001
         log.error(
             "backfill.upsert_failed",
@@ -138,7 +139,6 @@ async def run(start: date, end: date, source: str) -> None:
             for source_key in source_keys:
                 totals[source_key] += await backfill_one_day(client, source_key, day)
 
-    get_mongo_client().close()
     log.info("backfill.complete", days=len(days), totals=totals)
 
 

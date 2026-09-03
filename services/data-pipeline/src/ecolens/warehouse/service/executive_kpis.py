@@ -37,7 +37,7 @@ from ecolens.warehouse.core.regions import resolve_region_group
 from ecolens.warehouse.db.cache import Cache
 from ecolens.warehouse.db.connection import ConnectionPool
 from ecolens.warehouse.repository import queries
-from ecolens.warehouse.schema.api_responses import (
+from ecolens.warehouse.schemas.executive_kpis import (
     ExecutiveKpisMeta,
     ExecutiveKpisResponse,
     KpiCard,

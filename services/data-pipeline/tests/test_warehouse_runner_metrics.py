@@ -6,7 +6,7 @@ import json
 from datetime import datetime, timezone
 
 from ecolens.warehouse.service.metrics import MetricsEmitter
-from ecolens.warehouse.model.run_result import RunResult, StageResult
+from ecolens.warehouse.models.run_result import RunResult, StageResult
 from ecolens.warehouse.core.runner_settings import WarehouseRunnerSettings
 
 

@@ -188,3 +188,92 @@ class TestCircuitBreaker:
         with pytest.raises(CircuitBreakerOpen):
             await breaker.call(fn)
         assert called is False
+
+
+class TestGetState:
+    """`get_state()` -- the read-only snapshot `GET /v1/data-sources`
+    (ecolens.ingestion.api.data_sources_routes) reports.
+    """
+
+    @pytest.mark.asyncio
+    async def test_closed_by_default(self, settings: IngestionSettings):
+        breaker = CircuitBreaker("test_source", FakeRedis(), settings=settings)
+        state = await breaker.get_state()
+        assert state == {
+            "state": "closed",
+            "failures": 0,
+            "retry_after_seconds": None,
+            "opened_at": None,
+            "half_open_at": None,
+            "recovery_seconds": settings.ingest_circuit_breaker_timeout_seconds,
+        }
+
+    @pytest.mark.asyncio
+    async def test_reports_failure_count_below_threshold(
+        self, settings: IngestionSettings
+    ):
+        breaker = CircuitBreaker("test_source", FakeRedis(), settings=settings)
+        await breaker.record_failure()
+        state = await breaker.get_state()
+        assert state["state"] == "closed"
+        assert state["failures"] == 1
+
+    @pytest.mark.asyncio
+    async def test_open_after_threshold_failures(self, settings: IngestionSettings):
+        breaker = CircuitBreaker("test_source", FakeRedis(), settings=settings)
+        for _ in range(settings.ingest_circuit_breaker_threshold):
+            await breaker.record_failure()
+        state = await breaker.get_state()
+        assert state["state"] == "open"
+        assert state["failures"] == settings.ingest_circuit_breaker_threshold
+        assert state["retry_after_seconds"] > 0
+        assert state["opened_at"] is not None
+        assert state["half_open_at"] is not None
+        assert (
+            state["recovery_seconds"] == settings.ingest_circuit_breaker_timeout_seconds
+        )
+
+    @pytest.mark.asyncio
+    async def test_half_open_after_timeout_elapses(
+        self, settings: IngestionSettings, monkeypatch
+    ):
+        redis = FakeRedis()
+        breaker = CircuitBreaker("test_source", redis, settings=settings)
+        for _ in range(settings.ingest_circuit_breaker_threshold):
+            await breaker.record_failure()
+
+        import time as time_module
+
+        real_time = time_module.time
+        monkeypatch.setattr(
+            "ecolens.ingestion.core.circuit_breaker.time.time",
+            lambda: real_time() + settings.ingest_circuit_breaker_timeout_seconds + 1,
+        )
+        state = await breaker.get_state()
+        assert state["state"] == "half_open"
+
+    @pytest.mark.asyncio
+    async def test_does_not_mutate_state_unlike_before_call(
+        self, settings: IngestionSettings, monkeypatch
+    ):
+        # before_call() clears the "open" marker once the timeout has
+        # elapsed (moving to half-open as a side effect of being
+        # checked); get_state() must observe the same transition
+        # without causing it -- a second get_state() call right after
+        # must report the identical half_open state, not fall back to
+        # "closed" because the marker got cleared by the first read.
+        redis = FakeRedis()
+        breaker = CircuitBreaker("test_source", redis, settings=settings)
+        for _ in range(settings.ingest_circuit_breaker_threshold):
+            await breaker.record_failure()
+
+        import time as time_module
+
+        real_time = time_module.time
+        monkeypatch.setattr(
+            "ecolens.ingestion.core.circuit_breaker.time.time",
+            lambda: real_time() + settings.ingest_circuit_breaker_timeout_seconds + 1,
+        )
+        first = await breaker.get_state()
+        second = await breaker.get_state()
+        assert first["state"] == second["state"] == "half_open"

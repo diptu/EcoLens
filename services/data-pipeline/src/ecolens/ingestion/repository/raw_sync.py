@@ -98,6 +98,7 @@ _ENERGY_COLUMNS: tuple[str, ...] = (
     "anomaly_score",
     "anomaly_flags",
     "anomaly_explanation",
+    "created_at",
 )
 _BOM_COLUMNS: tuple[str, ...] = (
     "ts",
@@ -124,6 +125,7 @@ _BOM_COLUMNS: tuple[str, ...] = (
     "anomaly_score",
     "anomaly_flags",
     "anomaly_explanation",
+    "created_at",
 )
 _HOLIDAY_COLUMNS: tuple[str, ...] = (
     "date",
@@ -142,6 +144,7 @@ _HOLIDAY_COLUMNS: tuple[str, ...] = (
     "anomaly_score",
     "anomaly_flags",
     "anomaly_explanation",
+    "created_at",
 )
 
 # source key -> column contract for its raw.* table (source keys match
@@ -159,7 +162,7 @@ _SOURCE_COLUMNS: dict[str, tuple[str, ...]] = {
 # OpenElectricity's `ts` lands as an ISO string) -- coerce defensively
 # rather than assume, same as freshness.py already does for its own
 # timestamp field.
-_TIMESTAMP_COLUMNS = frozenset({"ts", "fetched_at"})
+_TIMESTAMP_COLUMNS = frozenset({"ts", "fetched_at", "created_at"})
 _DATE_COLUMNS = frozenset({"date", "observed_date"})
 # BoM's local CSV cache round-trip used to infer the all-numeric-looking
 # "1.0" as float64 (fixed at the source in bom/cache.py), so some

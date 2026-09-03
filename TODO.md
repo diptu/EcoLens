@@ -1,13 +1,13 @@
 # API:
 
 ## Data-Pipeline Service
-#	Endpoint	Method	Purpose
-1	/v1/data-sources	GET	List all 9 data sources (with health, cron, enabled)
-2	/v1/data-sources/{id}	GET / PATCH	Get one / edit cron, cadence, enable/disable
-3	/v1/data-sources/{id}/run	POST	Trigger an immediate fetch for this source
-4	/v1/data-sources/{id}/backfill	POST	Backfill a date range for this source
-5	/v1/data-sources/{id}/health	GET	Health metrics for one source (success rate, p95 latency)
-6	/v1/data-sources/{id}/history	GET	Fetch history (last 100 runs for this source)
+
+1	[x] /v1/data-sources	GET	List all  data sources (with health, cron, enabled)
+2	[x] /v1/data-sources/{id}	GET / PATCH	Get one / edit cron, cadence, enable/disable
+3	[x]/v1/data-sources/{id}/run	POST	Trigger an immediate fetch for this source
+4	[x]/v1/data-sources/{id}/backfill	POST	Backfill a date range for this source
+5	[x]/v1/data-sources/{id}/health	GET	Health metrics for one source (success rate, p95 latency)
+6 /v1/data-sources/{id}/history	GET	Fetch history (last 100 runs for this source)
 7	/v1/ingestion/pipelines	GET	List all 8 ingestion pipelines (with status)
 8	/v1/ingestion/runs	GET	List recent ingest runs (filter by pipeline, status)
 9	/v1/ingestion/runs/{id}	GET	Get one run (with duration, records, errors)
@@ -21,7 +21,8 @@
 17	/v1/data-quality/outliers	GET	List statistical outliers (z-score > 3)
 18	/v1/data-quality/schema	GET	Schema drift report
 19	/v1/data-quality/recheck/{source}	POST	Re-run DQ tests for one source
-20	/v1/emissions/calculate	POST	Main GHG calculator (Scope 1+2+3)
+
+POST	Main GHG calculator (Scope 1+2+3)
 21	/v1/emissions/factors	GET	List 14 emission factors
 22	/v1/emissions/by-source	GET	Emissions aggregated by source
 23	/v1/emissions/by-scope	GET	Emissions aggregated by GHG scope

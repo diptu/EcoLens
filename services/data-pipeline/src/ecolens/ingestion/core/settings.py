@@ -27,6 +27,7 @@ field via environment variables (e.g. `INGEST_MAX_RETRIES`).
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -60,6 +61,20 @@ class IngestionSettings(BaseSettings):
     ingest_retry_backoff_base: float = 1.5
     ingest_circuit_breaker_threshold: int = 3
     ingest_circuit_breaker_timeout_seconds: int = 300
+
+    # Where `PATCH /v1/data-sources/{id}` persists per-source
+    # enabled/cron admin overrides (ingestion/core/data_source_overrides.py)
+    # -- relative to CWD by default, same convention as
+    # `Settings.historical_duckdb_path`.
+    data_source_overrides_path: Path = Path("data/data_source_overrides.json")
+
+    # Append-only JSONL run history (ingestion/core/run_history.py),
+    # one line per `scripts/trigger_ingest_*.py` completion -- same
+    # convention/location family as `WarehouseRunnerSettings.log_dir`'s
+    # `warehouse-runs.jsonl`, just ingestion's own file since ingestion
+    # can't depend on warehouse settings (see the layering note on
+    # `data_source_health_threshold_minutes_*` above).
+    ingestion_runs_log_path: Path = Path("data/log/ingestion-runs.jsonl")
 
     # ── Anomaly detection (root TODO.md's "Anomaly Detection" section) ──
     # Rule thresholds live here, not hardcoded in
@@ -139,6 +154,20 @@ class IngestionSettings(BaseSettings):
     # empirically while building this. Each model instead calibrates
     # against its *own* training-data severity floor -- see
     # `isolation_forest.py`'s `LoadedIsolationForest.severity_floor`.
+
+    # ── Data-source health (root TODO.md's `GET /v1/data-sources`) ──────
+    # Deliberately mirrors `WarehouseRunnerSettings.freshness_threshold_*`
+    # (same real values) rather than importing it -- ingestion is the
+    # lower layer (warehouse depends on it, never the reverse), so
+    # importing a warehouse setting here would invert that. Not the same
+    # thing as `anomaly_staleness_minutes_*` above, which is a much
+    # looser per-*record* rule (a single row's fetched_at-vs-ts gap);
+    # this is "how long since the last successful fetch at all" -- the
+    # same question `SourceFreshnessChecker` (warehouse layer) already
+    # answers, at the same thresholds, for a different consumer.
+    data_source_health_threshold_minutes_aemo: float = 1_800.0  # 30h
+    data_source_health_threshold_minutes_bom: float = 120.0  # 2h
+    data_source_health_threshold_minutes_holidays: float = 10_080.0  # 7d
 
     # ── Helpers ────────────────────────────────────────────────────────
     def table_for_source(self, source: str) -> str:

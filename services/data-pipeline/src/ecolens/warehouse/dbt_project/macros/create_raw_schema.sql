@@ -11,8 +11,9 @@
   ecolens.ingestion.sources.*.schema -- keep in sync if those change.
 
   Root TODO.md's "Anomaly Detection" section: the `anomaly_score`/
-  `anomaly_flags`/`anomaly_explanation` columns at the end of each
-  `CREATE TABLE` only take effect for a table this macro creates fresh
+  `anomaly_flags`/`anomaly_explanation`/`created_at` columns at the end
+  of each `CREATE TABLE` only take effect for a table this macro creates
+  fresh
   -- `aemo_wem_dispatch`/`openelectricity_responses`'s `LIKE ...
   INCLUDING DEFAULTS` only copies `aemo_nem_dispatch`'s column list at
   *their own* creation time, not retroactively, and none of the 5
@@ -64,6 +65,7 @@ create table if not exists raw.aemo_nem_dispatch (
     anomaly_score double precision,
     anomaly_flags text,
     anomaly_explanation text,
+    created_at timestamptz,
     unique (region, ts)
 );
 
@@ -109,6 +111,7 @@ create table if not exists raw.bom_observations (
     anomaly_score double precision,
     anomaly_flags text,
     anomaly_explanation text,
+    created_at timestamptz,
     unique (station_id, ts)
 );
 
@@ -129,6 +132,7 @@ create table if not exists raw.aemo_holidays (
     anomaly_score double precision,
     anomaly_flags text,
     anomaly_explanation text,
+    created_at timestamptz,
     unique (region, date)
 );
 
@@ -139,22 +143,27 @@ create table if not exists raw.aemo_holidays (
 alter table raw.aemo_nem_dispatch add column if not exists anomaly_score double precision;
 alter table raw.aemo_nem_dispatch add column if not exists anomaly_flags text;
 alter table raw.aemo_nem_dispatch add column if not exists anomaly_explanation text;
+alter table raw.aemo_nem_dispatch add column if not exists created_at timestamptz;
 
 alter table raw.aemo_wem_dispatch add column if not exists anomaly_score double precision;
 alter table raw.aemo_wem_dispatch add column if not exists anomaly_flags text;
 alter table raw.aemo_wem_dispatch add column if not exists anomaly_explanation text;
+alter table raw.aemo_wem_dispatch add column if not exists created_at timestamptz;
 
 alter table raw.openelectricity_responses add column if not exists anomaly_score double precision;
 alter table raw.openelectricity_responses add column if not exists anomaly_flags text;
 alter table raw.openelectricity_responses add column if not exists anomaly_explanation text;
+alter table raw.openelectricity_responses add column if not exists created_at timestamptz;
 
 alter table raw.bom_observations add column if not exists anomaly_score double precision;
 alter table raw.bom_observations add column if not exists anomaly_flags text;
 alter table raw.bom_observations add column if not exists anomaly_explanation text;
+alter table raw.bom_observations add column if not exists created_at timestamptz;
 
 alter table raw.aemo_holidays add column if not exists anomaly_score double precision;
 alter table raw.aemo_holidays add column if not exists anomaly_flags text;
 alter table raw.aemo_holidays add column if not exists anomaly_explanation text;
+alter table raw.aemo_holidays add column if not exists created_at timestamptz;
 {% endset %}
 {% do run_query(ddl) %}
 {{ log("create_raw_schema: raw.* bootstrap tables ensured", info=true) }}

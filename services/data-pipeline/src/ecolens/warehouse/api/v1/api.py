@@ -13,9 +13,9 @@ Architecture
            │   HTTP/JSON     │
            └────────┬────────┘
                     │
-            ┌───────▼───────┐
-            │ warehouse/api │  ← this package (FastAPI :8002)
-            └───────┬───────┘
+            ┌─────────────────┐
+            │ warehouse/api/v1│  ← this package (FastAPI :8002)
+            └────────┬────────┘
                     │ asyncpg
             ┌───────▼───────┐
             │  PostgreSQL   │  ← populated by dbt (mongo → pg)
@@ -34,17 +34,18 @@ Splitting read/write:
   - Lets us rate-limit and auth (dependencies.require_api_key)
     separately from the ingestion API
 
-Split by concern (unlike the original single-file draft):
-  settings.py       WarehouseApiSettings — pg/redis/api tuning, own env prefix
-  db.py             ConnectionPool — asyncpg wrapper + health check
-  cache.py          Cache — async Redis cache, no-ops when unconfigured
-  models.py         Pydantic response models
-  validation.py     pure region/range/year validators
-  queries.py        one async query function per warehouse table
-  dependencies.py   FastAPI Depends wrappers (pool/settings come from app.state)
-  routes.py         health_router (no auth) + data_router (API-key gated)
-  app.py            create_app() factory + lifespan (connects pool/cache)
-  api.py            this file — builds and exposes the module-level `app`
+Split by concern, IAM-service-shaped (see each dir's own docstring):
+  ../../core/api_settings.py    WarehouseApiSettings — pg/redis/api tuning
+  ../../db/connection.py        ConnectionPool — asyncpg wrapper + health check
+  ../../db/cache.py             Cache — async Redis cache, no-ops when unconfigured
+  ../../schemas/<entity>/       Pydantic response models, one dir per resource
+  ../../core/validation.py      pure region/range/year validators
+  ../../repository/queries.py   one async query function per warehouse table
+  read_dependencies.py          FastAPI Depends wrappers (pool/settings from app.state)
+  read_routes.py                health_router (no auth) + data_router (API-key gated)
+  runner_router.py              pipeline control surface, mounted on ecolens.api.app instead
+  app.py                        create_app() factory + lifespan (connects pool/cache)
+  api.py                        this file — builds and exposes the module-level `app`
 
 Routes
 ======
@@ -63,7 +64,7 @@ Routes
 
 Usage
 =====
-    uvicorn ecolens.warehouse.api.api:app --host 0.0.0.0 --port 8002
+    uvicorn ecolens.warehouse.api.v1.api:app --host 0.0.0.0 --port 8002
 """
 
 from __future__ import annotations

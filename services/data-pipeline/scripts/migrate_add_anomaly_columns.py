@@ -1,5 +1,5 @@
 """One-off schema migration: adds `anomaly_score`/`anomaly_flags`/
-`anomaly_explanation` to every existing DuckDB source table.
+`anomaly_explanation`/`created_at` to every existing DuckDB source table.
 
 Root TODO.md's "Anomaly Detection" section: `duckdb_store.py`'s
 `_upsert()` only defines a table's columns on its *first-ever* write
@@ -43,11 +43,14 @@ log = get_logger("migrate_add_anomaly_columns")
 # VARCHAR (delimited text), not a native LIST type -- see
 # ingestion/service/anomaly/scorer.py's module docstring for why:
 # portability across DuckDB -> Postgres raw.* -> dbt without needing
-# array-handling machinery on any of those hops.
+# array-handling machinery on any of those hops. `created_at` is the UTC
+# instant `score_batch()` last (re-)scored the row, not its original
+# ingest time (`ingested_at`/`fetched_at` already cover that).
 _NEW_COLUMNS: tuple[tuple[str, str], ...] = (
     ("anomaly_score", "DOUBLE"),
     ("anomaly_flags", "VARCHAR"),
     ("anomaly_explanation", "VARCHAR"),
+    ("created_at", "TIMESTAMP"),
 )
 
 _ALL_SOURCES: tuple[str, ...] = (

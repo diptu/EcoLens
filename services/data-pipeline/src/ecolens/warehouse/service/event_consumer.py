@@ -32,7 +32,7 @@ specific run.
 Persists a small heartbeat (`data/log/warehouse_consumer_status.json`)
 on every state transition -- listening started, event received, run
 triggered/completed -- purely so `GET /warehouse/consumer-status`
-(`ecolens.warehouse.api.runner_router`) has something to report to the
+(`ecolens.warehouse.api.v1.runner_router`) has something to report to the
 dashboard's admin section. The consumer itself has no HTTP surface of
 its own; this file is the entire interface between the two.
 """

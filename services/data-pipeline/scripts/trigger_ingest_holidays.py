@@ -23,11 +23,14 @@ Run directly:
 import argparse
 import asyncio
 import uuid
-from datetime import date
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
 
 import httpx
 import pandera.errors
 
+from ecolens.ingestion.core.data_source_overrides import is_source_enabled
+from ecolens.ingestion.core.run_history import record_run
 from ecolens.ingestion.service.holidays import HolidayFetcher
 from ecolens.ingestion.db import duckdb_store
 from ecolens.ingestion.schema.validators.holidays import validate as validate_docs
@@ -74,26 +77,34 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-async def ingest_one_year(fetcher: HolidayFetcher, year: int) -> int:
-    """Fetch + validate + cache + upsert one year. Returns docs upserted (0 on failure/no data)."""
+@dataclass(frozen=True)
+class _YearResult:
+    written: int
+    fetched: int
+    anomalies_flagged: int
+    error: str | None
+
+
+async def ingest_one_year(fetcher: HolidayFetcher, year: int) -> _YearResult:
+    """Fetch + validate + cache + upsert one year."""
     run_id = uuid.uuid4().hex
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             docs = await fetcher.fetch(client, year=year)
     except Exception as exc:  # noqa: BLE001
         log.error("ingest.fetch_failed", run_id=run_id, year=year, error=str(exc))
-        return 0
+        return _YearResult(0, 0, 0, str(exc))
 
     log.info("fetch.complete", run_id=run_id, year=year, doc_count=len(docs))
     if not docs:
         log.warning("fetch.empty", run_id=run_id, year=year)
-        return 0
+        return _YearResult(0, 0, 0, None)
 
     try:
         docs = validate_docs(docs)
     except pandera.errors.SchemaError as e:
         log.error("validation.failed", run_id=run_id, year=year, error=str(e))
-        return 0
+        return _YearResult(0, len(docs), 0, str(e))
     log.info("validation.passed", run_id=run_id, year=year, doc_count=len(docs))
 
     try:
@@ -103,18 +114,50 @@ async def ingest_one_year(fetcher: HolidayFetcher, year: int) -> int:
 
     written = duckdb_store.write_historical("aemo_holidays", docs, run_id=run_id)
     log.info("duckdb.write_complete", run_id=run_id, year=year, written=written)
-    return written
+    anomalies_flagged = sum(1 for d in docs if d.get("anomaly_score", 0.0) > 0.0)
+    return _YearResult(written, len(docs), anomalies_flagged, None)
 
 
 async def run(years: list[int]) -> None:
+    if not is_source_enabled("aemo_holidays"):
+        log.info("source.disabled", source="aemo_holidays", hint="skipping this run")
+        return
+
+    started_at = datetime.now(timezone.utc)
+    run_id = uuid.uuid4().hex
     fetcher = HolidayFetcher()
     log.info("ingest.start", years=years)
 
     totals: dict[int, int] = {}
+    results: list[_YearResult] = []
     for year in years:
-        totals[year] = await ingest_one_year(fetcher, year)
+        result = await ingest_one_year(fetcher, year)
+        totals[year] = result.written
+        results.append(result)
 
     log.info("ingest.complete", years=years, totals=totals)
+
+    fetched = sum(r.fetched for r in results)
+    written = sum(r.written for r in results)
+    anomalies_flagged = sum(r.anomalies_flagged for r in results)
+    errors = [r.error for r in results if r.error is not None]
+    if errors and not written:
+        status, error = "failed", "; ".join(errors)
+    elif not fetched:
+        status, error = "empty", None
+    else:
+        status, error = "success", ("; ".join(errors) if errors else None)
+    record_run(
+        "aemo_holidays",
+        status=status,
+        started_at=started_at,
+        finished_at=datetime.now(timezone.utc),
+        records_fetched=fetched,
+        records_inserted=written,
+        anomalies_flagged=anomalies_flagged,
+        error=error,
+        run_id=run_id,
+    )
 
 
 if __name__ == "__main__":

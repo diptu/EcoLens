@@ -23,10 +23,12 @@ is still an empty stub) — docs go straight from fetch to upsert.
 import argparse
 import asyncio
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 import httpx
 
+from ecolens.ingestion.core.data_source_overrides import is_source_enabled
+from ecolens.ingestion.core.run_history import record_run
 from ecolens.ingestion.service.aemo_nem import AEMONEMFetcher
 from ecolens.ingestion.db import duckdb_store
 from ecolens.shared.observability.logging import get_logger
@@ -58,6 +60,11 @@ def parse_args() -> argparse.Namespace:
 
 
 async def run(for_date: date | None, for_month: tuple[int, int] | None) -> None:
+    if not is_source_enabled("aemo_nem"):
+        log.info("source.disabled", source="aemo_nem", hint="skipping this run")
+        return
+
+    started_at = datetime.now(timezone.utc)
     run_id = uuid.uuid4().hex
     fetcher = AEMONEMFetcher()
     async with httpx.AsyncClient(timeout=300) as client:
@@ -70,10 +77,31 @@ async def run(for_date: date | None, for_month: tuple[int, int] | None) -> None:
     log.info("fetch.complete", run_id=run_id, doc_count=len(docs))
     if not docs:
         log.warning("fetch.empty", run_id=run_id)
+        # "empty," not "failed" -- a genuinely expected outcome for
+        # --month against an archive not published yet, not an error.
+        record_run(
+            "aemo_nem",
+            status="empty",
+            started_at=started_at,
+            finished_at=datetime.now(timezone.utc),
+            records_fetched=0,
+            run_id=run_id,
+        )
         return
 
     written = duckdb_store.write_historical("aemo_nem", docs, run_id=run_id)
     log.info("duckdb.write_complete", run_id=run_id, written=written)
+    anomalies_flagged = sum(1 for d in docs if d.get("anomaly_score", 0.0) > 0.0)
+    record_run(
+        "aemo_nem",
+        status="success",
+        started_at=started_at,
+        finished_at=datetime.now(timezone.utc),
+        records_fetched=len(docs),
+        records_inserted=written,
+        anomalies_flagged=anomalies_flagged,
+        run_id=run_id,
+    )
 
 
 if __name__ == "__main__":

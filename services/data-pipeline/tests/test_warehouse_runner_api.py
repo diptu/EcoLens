@@ -1,5 +1,5 @@
-"""Tests for ecolens.warehouse.api.runner_router -- the /warehouse/run control
-surface.
+"""Tests for ecolens.warehouse.api.v1.runner_router -- the /warehouse/run
+control surface.
 
 `trigger_warehouse_run` fires a real `WarehouseRunner.run()` in the
 background, which needs a live warehouse Postgres + dbt -- out of scope
@@ -18,7 +18,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import ecolens.warehouse.api.runner_router as api_module
+import ecolens.warehouse.api.v1.runner_router as api_module
 from ecolens.warehouse.core.runner_settings import get_warehouse_runner_settings
 
 

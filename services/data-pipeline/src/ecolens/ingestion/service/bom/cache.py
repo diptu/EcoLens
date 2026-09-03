@@ -36,6 +36,10 @@ def read_cache(
     if not frames:
         return []
     out = pd.concat(frames, ignore_index=True)
+    # Older cache files may still carry the stray `date` column
+    # write_cache used to leave behind (see its docstring/comment) --
+    # drop it defensively so callers only ever get schema columns back.
+    out = out.drop(columns=["date"], errors="ignore")
     if out["ts"].dt.tz is None:
         out["ts"] = out["ts"].dt.tz_localize("UTC")
     else:
@@ -92,6 +96,10 @@ def write_cache(
             )
         else:
             combined = group
+        # `date` only exists to drive the groupby above (and, for the
+        # existing-file branch, may be a leftover from an older cache
+        # write) -- it's not a schema column, so don't persist it.
+        combined = combined.drop(columns=["date"], errors="ignore")
         combined.to_csv(path, index=False)
         written.append(path)
     log.info("bom.cache.written", files=len(written))

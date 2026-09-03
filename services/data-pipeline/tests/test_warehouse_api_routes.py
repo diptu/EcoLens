@@ -20,8 +20,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from conftest import FakeConnectionPool
-from ecolens.warehouse.api.app import create_app
-from ecolens.warehouse.api.read_dependencies import require_pool
+from ecolens.warehouse.api.v1.app import create_app
+from ecolens.warehouse.api.v1.read_dependencies import require_pool
 from ecolens.warehouse.core.api_settings import WarehouseApiSettings
 
 SINCE = "2026-01-01T00:00:00Z"

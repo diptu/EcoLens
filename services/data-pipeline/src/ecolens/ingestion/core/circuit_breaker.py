@@ -27,7 +27,8 @@ import asyncio
 import random
 import time
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, TypeVar
+from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from ecolens.shared.observability.logging import get_logger
 
@@ -146,6 +147,43 @@ class CircuitBreaker:
                 failures=failures,
                 timeout_seconds=self.timeout_seconds,
             )
+
+    async def get_state(self) -> dict[str, Any]:
+        """Read-only snapshot for observability surfaces (e.g.
+        `GET /v1/data-sources[/{id}/health]`) -- unlike `before_call()`,
+        never mutates anything (no clearing the "open" marker on timeout
+        elapse), so reading this can never itself flip a breaker from
+        open to half-open as a side effect of being asked.
+
+        `opened_at`/`half_open_at` are ISO 8601 (`None` when closed);
+        `recovery_seconds` is this breaker's own configured
+        `timeout_seconds`, always present (not `None` when closed) since
+        it's a fixed config value, not a live countdown.
+        """
+        opened_at_raw = await self.redis.get(self._opened_at_key)
+        failures_raw = await self.redis.get(self._failures_key)
+        failures = int(failures_raw) if failures_raw is not None else 0
+        if opened_at_raw is None:
+            return {
+                "state": "closed",
+                "failures": failures,
+                "retry_after_seconds": None,
+                "opened_at": None,
+                "half_open_at": None,
+                "recovery_seconds": self.timeout_seconds,
+            }
+        opened_at = datetime.fromtimestamp(float(opened_at_raw), tz=timezone.utc)
+        half_open_at = opened_at + timedelta(seconds=self.timeout_seconds)
+        remaining = self.timeout_seconds - (time.time() - float(opened_at_raw))
+        state = "half_open" if remaining <= 0 else "open"
+        return {
+            "state": state,
+            "failures": failures,
+            "retry_after_seconds": max(0.0, remaining),
+            "opened_at": opened_at.isoformat(),
+            "half_open_at": half_open_at.isoformat(),
+            "recovery_seconds": self.timeout_seconds,
+        }
 
     async def call(self, fn: Callable[[], Awaitable[T]]) -> T:
         """Run `fn()` guarded by this breaker.

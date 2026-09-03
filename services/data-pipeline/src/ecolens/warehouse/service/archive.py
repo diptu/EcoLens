@@ -35,7 +35,7 @@ import psycopg2
 
 from ecolens.shared.observability.logging import get_logger
 
-from ecolens.warehouse.model.run_result import StageResult
+from ecolens.warehouse.models.run_result import StageResult
 from ecolens.warehouse.core.runner_settings import WarehouseRunnerSettings
 
 log = get_logger(__name__)

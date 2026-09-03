@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from ecolens.warehouse.core.runner_settings import WarehouseRunnerSettings
-from ecolens.warehouse.model.run_result import RunResult
+from ecolens.warehouse.models.run_result import RunResult
 from ecolens.warehouse.service.event_consumer import WarehouseEventConsumer
 
 DEBOUNCE = 0.03

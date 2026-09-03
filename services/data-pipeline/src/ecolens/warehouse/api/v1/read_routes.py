@@ -16,19 +16,18 @@ from fastapi import APIRouter, Depends, Query, Request, Response
 
 from ecolens.warehouse.repository import queries
 from ecolens.warehouse.db.connection import ConnectionPool
-from ecolens.warehouse.schema.api_responses import (
-    DemandRow,
-    DemandSummary,
-    ExecutiveKpisResponse,
-    GenerationRow,
-    HealthResponse,
+from ecolens.warehouse.schemas.demand import DemandRow, DemandSummary
+from ecolens.warehouse.schemas.executive_kpis import ExecutiveKpisResponse
+from ecolens.warehouse.schemas.generation import GenerationRow
+from ecolens.warehouse.schemas.health import HealthResponse
+from ecolens.warehouse.schemas.holiday import PaginatedHolidays
+from ecolens.warehouse.schemas.national import (
     NationalDailyEmissionsRow,
     NationalGenerationMix,
     NationalSummary,
-    PaginatedHolidays,
-    Region,
-    WeatherRow,
 )
+from ecolens.warehouse.schemas.region import Region
+from ecolens.warehouse.schemas.weather import WeatherRow
 from ecolens.warehouse.core.validation import validate_range, validate_region
 from ecolens.warehouse.service.executive_kpis import build_executive_kpis
 

@@ -54,8 +54,17 @@ FROM python:3.12-slim AS runtime
 # makes `worker` correctly reap zombies and propagate a real Railway
 # restart/redeploy's `SIGTERM` instead of relying on the app process
 # happening to behave correctly as PID 1 by accident.
+#
+# `wget` -- docker-compose.yml's own healthcheck for this role (`CMD
+# wget -qO- http://localhost:8003/v1/healthz`) needs it on PATH;
+# `python:3.12-slim` doesn't ship it. Real bug, confirmed live
+# 2026-08-19: `/v1/healthz` answered fine over the published port the
+# whole time, but Docker's own healthcheck never once succeeded (`exec:
+# "wget": executable file not found in $PATH`, `FailingStreak` climbing
+# forever) -- same fix `forecast-api.Dockerfile`/`warehouse.Dockerfile`
+# already carry for the identical gap.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tini \
+    && apt-get install -y --no-install-recommends tini wget \
     && rm -rf /var/lib/apt/lists/*
 
 # Real, unprivileged runtime user -- the `builder` stage above still
@@ -66,6 +75,19 @@ RUN apt-get update \
 RUN groupadd --gid 10001 app && useradd --uid 10001 --gid app --no-create-home --shell /usr/sbin/nologin app
 
 WORKDIR /app/services/ingestion
+
+# `WORKDIR` creates this directory as root *before* anything below runs
+# -- the `COPY --chown=app:app` two lines down only stamps ownership on
+# what it copies IN, never on the parent directory it lands inside, so
+# without this the directory itself stays `root:root` (mode 755: not
+# writable by `app`). Real bug, confirmed live 2026-08-19: Celery Beat
+# (`ingestion-beat`, which writes its `celerybeat-schedule` file
+# straight into this WORKDIR, the CWD it runs from) crash-looped on
+# every single start with `PermissionError: [Errno 13] Permission
+# denied: 'celerybeat-schedule'` -- reproduced directly with `touch
+# celerybeat-schedule` as the `app` user before this fix, confirmed
+# fixed after it.
+RUN chown app:app /app/services/ingestion
 
 # Only the finished venv + source tree from `builder` -- no `uv`/`uvx`
 # binaries, no apt/uv package cache layers, no dependency-resolution

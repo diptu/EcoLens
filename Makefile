@@ -182,9 +182,65 @@ api: ## Run forecast-api locally.
 pipeline: ## Run data-pipeline locally.
 	$(UV) run --package data-pipeline uvicorn app.main:app --reload --port 8001
 
+.PHONY: ingestion
+ingestion: ## Run ingestion's FastAPI app locally (port 8003).
+	$(UV) run --directory services/ingestion ecolens-ingestion serve --reload
+
+.PHONY: ingestion-worker
+ingestion-worker: ## Run ingestion's Celery worker (executes scheduled ingestion tasks -- run ingestion-beat alongside this, or nothing gets dispatched).
+	$(UV) run --directory services/ingestion ecolens-ingestion worker --loglevel=info
+
+.PHONY: ingestion-beat
+ingestion-beat: ## Run ingestion's Celery Beat scheduler (fires each source's ingest on its real cadence, enqueuing for ingestion-worker to pick up).
+	$(UV) run --directory services/ingestion ecolens-ingestion beat --loglevel=info
+
+.PHONY: train-worker
+train-worker: ## Run forecast-api's training-trigger consumer (consumes RabbitMQ events published after a successful dbt build or a manual POST /v1/model/train).
+	$(UV) run --directory services/forecast-api ecolens-forecast train-worker
+
+.PHONY: warehouse
+warehouse: ## Run waerehouse's FastAPI control plane locally (port 8004).
+	$(UV) run --directory services/waerehouse ecolens-warehouse serve --reload
+
+.PHONY: warehouse-worker
+warehouse-worker: ## Run waerehouse's Celery worker (retention/vacuum/marts-archive tasks -- run warehouse-beat alongside this, or nothing gets dispatched).
+	$(UV) run --directory services/waerehouse ecolens-warehouse worker --loglevel=info
+
+.PHONY: warehouse-beat
+warehouse-beat: ## Run waerehouse's Celery Beat scheduler (daily retention/vacuum/marts-archive cadence, enqueuing for warehouse-worker to pick up).
+	$(UV) run --directory services/waerehouse ecolens-warehouse beat --loglevel=info
+
+.PHONY: warehouse-consume
+warehouse-consume: ## Run waerehouse's landed-events consumer (promotes ingestion's landed data into raw/raw_marts, auto-triggers dbt build -- this is what ecolense-warehouse-consumer runs in prod).
+	$(UV) run --directory services/waerehouse ecolens-warehouse consume
+
 .PHONY: web
 web: ## Run Next.js (requires pnpm).
 	cd services/dashboard && pnpm dev
+
+# Every local app process this platform has, run together in one
+# terminal -- infra (`make up`) first, then one background job per
+# service, all logs interleaved with a `[name]` prefix so they stay
+# distinguishable. Ctrl+C's SIGINT is trapped and forwarded to the whole
+# process group (`kill 0`), so stopping this one `make` command stops
+# every process it started -- not something the individual per-service
+# targets above need (they're meant to run one-per-terminal), but
+# essential here since this starts ~11 processes at once.
+.PHONY: dev-all
+dev-all: up ## Run every local service together (infra + all app processes) in this one terminal. Ctrl+C stops all of them.
+	@trap 'kill 0' EXIT INT TERM; \
+	( $(MAKE) api             2>&1 | sed -u 's/^/[api] /' ) & \
+	( $(MAKE) pipeline        2>&1 | sed -u 's/^/[pipeline] /' ) & \
+	( $(MAKE) train-worker    2>&1 | sed -u 's/^/[train-worker] /' ) & \
+	( $(MAKE) ingestion       2>&1 | sed -u 's/^/[ingestion] /' ) & \
+	( $(MAKE) ingestion-worker 2>&1 | sed -u 's/^/[ingestion-worker] /' ) & \
+	( $(MAKE) ingestion-beat  2>&1 | sed -u 's/^/[ingestion-beat] /' ) & \
+	( $(MAKE) warehouse       2>&1 | sed -u 's/^/[warehouse] /' ) & \
+	( $(MAKE) warehouse-worker 2>&1 | sed -u 's/^/[warehouse-worker] /' ) & \
+	( $(MAKE) warehouse-beat  2>&1 | sed -u 's/^/[warehouse-beat] /' ) & \
+	( $(MAKE) warehouse-consume 2>&1 | sed -u 's/^/[warehouse-consume] /' ) & \
+	( $(MAKE) web             2>&1 | sed -u 's/^/[web] /' ) & \
+	wait
 
 # ── dbt ─────────────────────────────────────────────────────────────────────
 .PHONY: dbt-build

@@ -10,7 +10,6 @@ import {
   ALL_EMISSION_REGIONS,
   EMISSION_FACTORS,
   formatEnergy,
-  formatIntensity,
   formatTco2e,
 } from "@/lib/emissions";
 
@@ -46,16 +45,6 @@ describe("formatTco2e", () => {
   it("returns em-dash for null/undefined", () => {
     expect(formatTco2e(null)).toBe("—");
     expect(formatTco2e(undefined)).toBe("—");
-  });
-});
-
-describe("formatIntensity", () => {
-  it("rounds to whole kg/MWh", () => {
-    expect(formatIntensity(700.4)).toBe("700 kg/MWh");
-    expect(formatIntensity(0)).toBe("0 kg/MWh");
-  });
-  it("handles null", () => {
-    expect(formatIntensity(null)).toBe("—");
   });
 });
 

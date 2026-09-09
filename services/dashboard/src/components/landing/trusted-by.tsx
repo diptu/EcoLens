@@ -7,7 +7,6 @@
 import { m } from "framer-motion";
 
 import { AnimatedSection, MotionItem, StaggerContainer } from "@/components/motion/motion-section";
-import { fadeUp } from "@/lib/animations";
 
 interface PartnerLogo {
   name: string;

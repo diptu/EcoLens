@@ -96,7 +96,7 @@ export function Navbar() {
 
         {/* Desktop CTA */}
         <div className="hidden items-center gap-3 md:flex">
-          <Link href="/dashboard/executive">
+          <Link href="/">
             <MotionButton size="sm" iconAfter={<ArrowIcon />}>
               Open Dashboard
             </MotionButton>
@@ -136,7 +136,7 @@ export function Navbar() {
                 </Link>
               ))}
               <div className="mt-2 flex flex-col gap-2 border-t border-white/5 pt-3">
-                <Link href="/dashboard/executive" onClick={() => setMobileOpen(false)}>
+                <Link href="/" onClick={() => setMobileOpen(false)}>
                   <MotionButton size="sm" iconAfter={<ArrowIcon />}>
                     Open Dashboard
                   </MotionButton>

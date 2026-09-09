@@ -6,10 +6,9 @@
 
 import Image from "next/image";
 import { m } from "framer-motion";
-import type { ReactNode } from "react";
 
 import { StaggerContainer, MotionItem } from "@/components/motion/motion-section";
-import { cardHover, fadeUp } from "@/lib/animations";
+import { cardHover } from "@/lib/animations";
 
 export interface ResourceItem {
   type: string;          // "GUIDE" | "TEMPLATE" | "REPORT" | "WEBINAR" | "CASE STUDY"
@@ -85,5 +84,3 @@ function ClockIcon() {
     </svg>
   );
 }
-
-export { fadeUp };

@@ -432,13 +432,3 @@ def standard_run(
         return wrapper
 
     return decorator
-
-
-# ── Sync helper for sources that don't speak async ─────────────────────
-def run_sync(loop: Any, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
-    """Run a sync function in the current event loop.
-
-    Use sparingly — prefer async fetch clients. Provided for SDKs that
-    only have a blocking variant.
-    """
-    return loop.run_in_executor(None, functools.partial(fn, *args, **kwargs))

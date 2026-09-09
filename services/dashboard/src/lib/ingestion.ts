@@ -2,7 +2,7 @@
  * Ingestion/pipelines domain client.
  *
  * **Cutover (this change)**: the per-row actions the Pipeline Operations
- * tab (`operational-tasks/page.tsx`) actually calls —
+ * tab (`data-ingestion/page.tsx`) actually calls —
  * `triggerIngestionRun`/`fetchBackfillStatus`/`triggerBackfill` — now
  * talk to `services/ingestion`'s real `/v1/data-sources/*` routes
  * instead of `data-pipeline`'s. Confirmed field-for-field identical
@@ -26,15 +26,9 @@
  * synthesized dbt row from `services/waerehouse`, since ingestion has
  * no 6th dbt pipeline and warehouse has no `stage`/`status`/
  * `depends_on` concept — see that function's own docstring),
- * `fetchPublicRuns`, `fetchPublicFailedRuns`, `fetchPublicRetryQueue`,
- * `fetchPublicScheduler` — now talk to `services/ingestion` too. All
- * confirmed field-compatible before switching (same schema names/
- * shapes, ported deliberately, not just similarly-shaped by
- * coincidence). One real, intentional gap in ingestion's `scheduler`
- * response vs. data-pipeline's: no `meta.pipelines` pause state or dbt
- * pipeline exist there, so `upcoming_runs`/`active_workers` are honest,
- * simplified equivalents, not byte-identical (see `PublicSchedulerStatus`'s
- * own docstring in `services/ingestion`).
+ * `fetchPublicRuns` — now talk to `services/ingestion` too. Confirmed
+ * field-compatible before switching (same schema names/shapes, ported
+ * deliberately, not just similarly-shaped by coincidence).
  *
  * **Full cutover, training (follow-up pass)**: `triggerTraining`/
  * `fetchTrainingRuns` (Model Operations tab, this same page) now talk to
@@ -262,7 +256,7 @@ export async function fetchPublicPipelines(): Promise<PipelinesList> {
 /** Polls `GET /v1/dbt/build/runs` for the dbt-warehouse row's live
  * status, same shape as `pollLatestRun` -- until this exists, a build
  * triggered from a *different* browser tab/session (or, eventually, a
- * real schedule) was invisible on `dashboard/operational-tasks/page.tsx`
+ * real schedule) was invisible on `(dashboard)/data-ingestion/page.tsx`
  * until a manual page refresh, since that page only ever fetched the
  * dbt row once, on load (`services/waerehouse/TODO.md`'s own note on
  * this gap). Reads the single latest run rather than the full list --
@@ -396,14 +390,6 @@ export const PIPELINE_CATALOG: PipelineCatalogEntry[] = [
   { id: "pipe-holidays", sourceId: "ds-holidays", label: "AEMO Public Holidays Ingest", triggerable: true, backfillable: false },
   { id: "pipe-dbt-warehouse", sourceId: null, label: "dbt Warehouse Build", triggerable: true, backfillable: false },
 ];
-
-const PIPELINE_LABELS: Record<string, string> = Object.fromEntries(
-  PIPELINE_CATALOG.map((p) => [p.id, p.label]),
-);
-
-export function formatPipeline(pipelineId: string): string {
-  return PIPELINE_LABELS[pipelineId] ?? pipelineId;
-}
 
 // ────────────────────────────────────────────────────────────────────
 // Runs — GET /v1/ingestion/public/runs
@@ -591,7 +577,7 @@ export type BackfillStatus = {
 
 /** Live call to `GET /v1/data-sources/{sourceId}/backfill/status` — the
  * fix for backfill state only ever living in this page's in-memory React
- * state (`operational-tasks/page.tsx`'s `backfillStatus`): call this on
+ * state (`data-ingestion/page.tsx`'s `backfillStatus`): call this on
  * mount to find out whether a backfill genuinely already in flight
  * server-side should resume showing as "running" instead of resetting to
  * "Idle" on every page load. No auth required, same reasoning as
@@ -673,93 +659,6 @@ export async function triggerDbtBuild(): Promise<DbtBuildTrigger> {
     const message: string =
       body?.error?.message ?? `POST /v1/dbt/build failed: ${res.status}`;
     throw new TriggerIngestionError(message, res.status, body?.error?.code ?? null);
-  }
-  return res.json();
-}
-
-/** Shape of `services/ingestion`'s `FeatureRebuildTriggerResponse`. */
-export type FeatureRebuildTrigger = {
-  run_id: string;
-  status: "success";
-  n_selected: number;
-};
-
-/** Live call to `POST /v1/features/rebuild` (`services/ingestion`) --
- * the "Rebuild Features" System Command (root `TODO.md`'s "System
- * Commands" item). Real sklearn/duckdb compute (mutual information +
- * RandomForest + permutation importance, per-region) against whatever
- * `data/training/master.duckdb` already exists on the server -- minutes,
- * not a fast request/response cycle (verified live: ~10 minutes for a
- * real 6-region pass). This call blocks for that whole duration; the
- * caller's own UI should show a real "running" state, not assume this
- * resolves quickly the way `triggerDbtBuild` usually does.
- *
- * Two real, honest failure modes, not silently retried or hidden:
- * `TriggerIngestionError.code === "rebuild_in_progress"` (409, another
- * rebuild is already running) and `"master_duckdb_missing"` (422,
- * `data/training/master.duckdb` doesn't exist on the server -- this
- * endpoint deliberately never auto-builds it from cloud credentials,
- * see `app.service.features.rebuild`'s own module docstring for why). */
-export async function triggerFeatureRebuild(): Promise<FeatureRebuildTrigger> {
-  const res = await fetch(`${INGESTION_API_URL}/features/rebuild`, {
-    method: "POST",
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => null);
-    const message: string =
-      body?.error?.message ?? `POST /v1/features/rebuild failed: ${res.status}`;
-    throw new TriggerIngestionError(message, res.status, body?.error?.code ?? null);
-  }
-  return res.json();
-}
-
-/** Real result of one `meta._feature_selection_log` row -- the actual
- * sklearn output (`scripts/select_features.py`'s `run_selection()`:
- * mutual information + RandomForest importance + permutation importance,
- * min-max normalized to [0,1] each, per feature) `triggerFeatureRebuild`
- * itself only returns a count for. Shape matches that script's own
- * `selected_features.json` output exactly -- nothing renamed/reshaped
- * here. `feature_scores`/`selected_features` are absent on a `"failed"`
- * run (no real result to report). */
-export type FeatureRebuildResult = {
-  target: string;
-  regions: string[];
-  feature_scores?: Record<string, number>;
-  n_common_features?: number;
-  selected_features?: string[];
-  historical_variables?: string[];
-};
-
-export type FeatureRebuildRun = {
-  id: string;
-  triggered_by: string;
-  status: "running" | "success" | "failed";
-  started_at: string;
-  finished_at: string | null;
-  n_selected: number | null;
-  result: FeatureRebuildResult | null;
-  error: string | null;
-};
-
-export type FeatureRebuildRunsList = {
-  data: FeatureRebuildRun[];
-};
-
-/** Live call to `GET /v1/features/rebuild/runs` (`services/ingestion`) --
- * real history of every feature-selection run, including the FULL real
- * `result` (per-feature importance scores), not just the `n_selected`
- * count `POST /v1/features/rebuild` itself returns. Backs the Model
- * Performance page's "Feature Impact" tab -- the most recent
- * `status: "success"` entry (`data[0]` if the caller doesn't filter) is
- * a real, already-computed sklearn feature-importance pass, not a
- * placeholder; there just isn't a *live-serving* SHAP/per-prediction
- * attribution anywhere in this platform (a materially bigger, separate
- * feature), so this shows the real offline selection run's importance
- * instead of fabricating one. */
-export async function fetchFeatureRebuildRuns(limit = 5): Promise<FeatureRebuildRunsList> {
-  const res = await fetch(`${INGESTION_API_URL}/features/rebuild/runs?limit=${limit}`);
-  if (!res.ok) {
-    throw new Error(`GET /v1/features/rebuild/runs failed: ${res.status}`);
   }
   return res.json();
 }
@@ -867,86 +766,6 @@ export async function fetchTrainingRuns(limit = 20): Promise<TrainingRunsList> {
     throw new Error(`GET /v1/model/training-runs failed: ${res.status}`);
   }
   return res.json();
-}
-
-export type TrainingRunMatch =
-  | { state: "waiting" }
-  | { state: "running"; run: TrainingRunLog }
-  | { state: "success"; run: TrainingRunLog }
-  | { state: "failed"; run: TrainingRunLog };
-
-/** Polls `GET /v1/model/training-runs` for the real `meta._training_log`
- * row a `triggerTraining()` call produced, until it reaches success/
- * failed or `timeoutMs` elapses -- real progress for the dashboard's
- * Fine-tune form, which previously had no visibility into a run at all
- * until a new registry version appeared or the whole thing timed out
- * (`pollForNewModelVersion` in `lib/emissions.ts`, still used for the
- * final registry refresh once this resolves to `"success"`).
- *
- * Matches by `model_name` + `triggered_by` + `started_at` at/after the
- * trigger's own `queued_at` (5s slack for clock skew between this
- * client and forecast-api) -- there's no run id to match on directly
- * (`TrainTrigger`'s own docstring: the trigger call and the worker that
- * does the work are different processes with no completion channel
- * between them). Good enough in practice: a second identically-
- * architected manual trigger fired within the same few seconds is the
- * only way this could pick the wrong row, and the worker's single
- * consume loop (`prefetch_count=1`) processes them one at a time either
- * way. `triggered_by` must be the *same* value on both sides to match
- * at all -- confirmed live 2026-08-11 this was silently broken
- * (`app.service.model.actions.trigger_training` hardcoded `"manual"`
- * for the published event regardless of what `triggered_by` it was
- * actually given, while the trigger response it returned said
- * `"public"` -- fixed server-side alongside this). */
-export function pollForTrainingRun(
-  modelName: string,
-  triggeredBy: string,
-  queuedAtIso: string,
-  onUpdate: (match: TrainingRunMatch) => void,
-  intervalMs = 3000,
-  timeoutMs = 120_000,
-  onTimeout?: () => void,
-): () => void {
-  let cancelled = false;
-  const deadline = Date.now() + timeoutMs;
-  const queuedAtMs = new Date(queuedAtIso).getTime() - 5000;
-  const tick = async () => {
-    try {
-      const res = await fetchTrainingRuns(20);
-      if (cancelled) return;
-      const candidates = res.data
-        .filter(
-          (r) =>
-            r.model_name === modelName &&
-            r.triggered_by === triggeredBy &&
-            new Date(r.started_at).getTime() >= queuedAtMs,
-        )
-        .sort((a, b) => new Date(b.started_at).getTime() - new Date(a.started_at).getTime());
-      const match = candidates[0];
-      if (match) {
-        onUpdate({
-          state: match.status === "running" ? "running" : match.status === "success" ? "success" : "failed",
-          run: match,
-        });
-        if (match.status !== "running") return; // terminal -- stop polling
-      } else {
-        onUpdate({ state: "waiting" });
-      }
-    } catch {
-      // Transient poll failure -- same tolerance `pollLatestRun` gives a
-      // dropped request, keep going rather than erroring the whole form.
-    }
-    if (cancelled) return;
-    if (Date.now() < deadline) {
-      setTimeout(tick, intervalMs);
-    } else {
-      onTimeout?.();
-    }
-  };
-  void tick();
-  return () => {
-    cancelled = true;
-  };
 }
 
 const TERMINAL_RUN_STATUSES: RunStatus[] = ["success", "failed", "sync_failed", "partial"];
@@ -1060,127 +879,3 @@ export function pollBackfillSummary(
   };
 }
 
-// ────────────────────────────────────────────────────────────────────
-// Failed jobs — GET /v1/ingestion/public/failed
-// ────────────────────────────────────────────────────────────────────
-
-/** Shape of data-pipeline's `FailedRunOut`. `error.message` is redacted
- * server-side on the public route (`_redact_public_error_message` —
- * strips anything that looks like a secret/credential out of the raw
- * exception text), not something this client does. */
-export type FailedRun = {
-  run_id: string;
-  pipeline_id: string;
-  source_id: string;
-  status: RunStatus;
-  started_at: string;
-  finished_at: string | null;
-  duration_ms: number | null;
-  error: { code: string | null; message: string; http_status: number | null; retryable: boolean };
-  retry_count: number;
-  next_retry_at: string | null;
-  in_dlq: boolean;
-  can_retry_now: boolean;
-};
-
-export type FailedRunsList = {
-  meta: { total_failed_24h: number; total_failed_7d: number; as_of: string };
-  data: FailedRun[];
-  next_cursor: string | null;
-  has_more: boolean;
-};
-
-export async function fetchPublicFailedRuns(limit = 50): Promise<FailedRunsList> {
-  const res = await fetch(`${INGESTION_API_URL}/ingestion/public/failed?limit=${limit}`);
-  if (!res.ok) {
-    throw new Error(`GET /v1/ingestion/public/failed failed: ${res.status}`);
-  }
-  return res.json();
-}
-
-// ────────────────────────────────────────────────────────────────────
-// Retry queue — GET /v1/ingestion/public/retry-queue
-// ────────────────────────────────────────────────────────────────────
-
-/** Shape of data-pipeline's `RetryQueueItem`. Backed by `status='sync_failed'`
- * rows (fetched fine, but the warehouse-sync consumer failed to load
- * them into Postgres) -- `backoff_strategy` is always `"manual"`, there
- * is no automated retry scheduler anywhere in this codebase
- * (`RetryQueueItem`'s own docstring, data-pipeline). */
-export type RetryQueueItem = {
-  queue_id: string;
-  run_id: string;
-  pipeline_id: string;
-  source_id: string;
-  queued_at: string;
-  next_retry_at: string | null;
-  retry_count: number;
-  max_retries: number | null;
-  last_error: { code: string | null; message: string; http_status: number | null; retryable: boolean };
-  backoff_strategy: "manual";
-  backoff_base_seconds: number | null;
-};
-
-export type RetryQueueList = {
-  meta: { queue_size: number; oldest_queued_at: string | null; as_of: string };
-  data: RetryQueueItem[];
-};
-
-export async function fetchPublicRetryQueue(limit = 50): Promise<RetryQueueList> {
-  const res = await fetch(`${INGESTION_API_URL}/ingestion/public/retry-queue?limit=${limit}`);
-  if (!res.ok) {
-    throw new Error(`GET /v1/ingestion/public/retry-queue failed: ${res.status}`);
-  }
-  return res.json();
-}
-
-// ────────────────────────────────────────────────────────────────────
-// Scheduler status — GET /v1/ingestion/public/scheduler
-// ────────────────────────────────────────────────────────────────────
-
-/** Shape of data-pipeline's `SchedulerResponse`. `active_workers`/
- * `total_workers` are always `1`/`1` -- runs execute in-process
- * (FastAPI `BackgroundTasks` for API-triggered runs, the calling
- * GitHub Actions runner itself for cron-triggered ones), there's no
- * separate worker pool. `prefect_version`/`prefect_api_url` are always
- * `null` -- the `prefect` container in the root `docker-compose.yml` is
- * for the (unbuilt) Forecasting pipeline, not ingestion.
- * (`SchedulerStatus`'s own docstring, data-pipeline.) */
-export type SchedulerStatusInfo = {
-  status: "healthy";
-  as_of: string;
-  active_workers: number;
-  total_workers: number;
-  queue_depth: number;
-  prefect_version: string | null;
-  prefect_api_url: string | null;
-};
-
-export type UpcomingRun = {
-  pipeline_id: string;
-  source_id: string | null;
-  scheduled_at: string;
-  trigger: "schedule";
-};
-
-export type RecentRunSummary = {
-  run_id: string;
-  pipeline_id: string;
-  status: RunStatus;
-  finished_at: string | null;
-  duration_ms: number | null;
-};
-
-export type SchedulerInfo = {
-  scheduler: SchedulerStatusInfo;
-  upcoming_runs: UpcomingRun[];
-  recent_runs: RecentRunSummary[];
-};
-
-export async function fetchPublicScheduler(): Promise<SchedulerInfo> {
-  const res = await fetch(`${INGESTION_API_URL}/ingestion/public/scheduler`);
-  if (!res.ok) {
-    throw new Error(`GET /v1/ingestion/public/scheduler failed: ${res.status}`);
-  }
-  return res.json();
-}

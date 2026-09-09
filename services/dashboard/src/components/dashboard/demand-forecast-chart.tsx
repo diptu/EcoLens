@@ -5,11 +5,13 @@
  * P10/P50/P90 demand forecast, on one shared time axis, split into two
  * clean non-overlapping regions by a real "Now" boundary.
  *
- * Shared by the Executive Dashboard's "Demand Forecast Preview" and the
- * Forecast Explorer's "Actual vs Predicted" section -- extracted
- * 2026-08-10 rather than left duplicated a third time; both callers
- * pass real, region-scoped data, this component has no page-specific
- * logic of its own.
+ * Shared by the Executive Dashboard's "Demand Forecast Preview" and
+ * Analytics & Forecast's "Demand Forecast" chart (`/dashboard/
+ * forecast`, the original second caller this was extracted for on
+ * 2026-08-10, is disabled now -- see that route's own page.tsx; its
+ * real functionality moved to Analytics & Forecast, not removed) --
+ * both callers pass real, region-scoped data, this component has no
+ * page-specific logic of its own.
  *
  * "Actual" is expected to be `total_generation_mwh` (see call sites'
  * own comments for why that's the honest proxy this platform actually
@@ -18,16 +20,46 @@
  * MW-ish reading it's given, just that it's real and comparable to the
  * forecast's own MW units.
  *
- * Two-region alignment (fixed 2026-08-10): rather than plotting `actual`
- * on a shared clock ending at wall-clock "now" (which can chronologically
- * interleave with a real forecast that's serving-lagged behind live,
- * splitting the chart into confusing fragments instead of two clean
- * regions), this component trims `actual` internally to end exactly
- * where the real forecast's own first point begins, and anchors the
- * "Now" line to that same real boundary -- not `Date.now()`. The real
- * lag itself stays disclosed separately (the caption below the chart),
- * computed against true wall-clock time, so "Now" being behind live
- * right now is never silently hidden by the realignment.
+ * This component itself never repositions a `forecast` point's own
+ * `tMs` -- it plots whatever it's given, real dates or not. Analytics &
+ * Forecast's own caller (2026-09-09, explicit request) is a deliberate
+ * exception: it re-timestamps the model's real P10/P50/P90 values
+ * relative to `actual`'s own latest point instead of passing the
+ * model's real (currently lagged) dates, and discloses that itself in
+ * its own caption -- see that page's module docstring. The Executive
+ * Dashboard's identical chart does not do this; its `forecast` prop is
+ * still the model's own real, undoctored dates.
+ *
+ * Two-region alignment (fixed 2026-08-10, corrected 2026-09-09): rather
+ * than plotting `actual` on a shared clock ending at wall-clock "now"
+ * (which can chronologically interleave with a real forecast that's
+ * serving-lagged behind live, splitting the chart into confusing
+ * fragments instead of two clean regions), the "Now" boundary is the
+ * real cutoff between "we have a real measured reading for this hour"
+ * and "we don't yet, this is still a prediction" -- i.e. `actual`'s own
+ * most recent real point, not `forecast[0]`.
+ *
+ * That distinction matters because the two can drift apart by a lot:
+ * `forecast[0]` is anchored to the *model's* own lookback window, which
+ * can itself be well behind live (real AEMO archive-publishing lag,
+ * see forecast-api's own docs) -- but real ingestion for `actual` can
+ * catch back up independently and run much fresher than that. A real
+ * case hit live 2026-09-09: `actual` had real readings all the way up
+ * to within an hour of true now, while `forecast[0]` was still ~44h
+ * behind -- anchoring "Now" to `forecast[0]` (the original fix) drew
+ * the line 44h into the past and, worse, plotted ~44h of genuinely
+ * already-known real actual demand as if it were still an uncertain
+ * P10-P90 prediction, because `actual` was trimmed to end at
+ * `forecast[0]` and everything past that point was forecast-only.
+ * Forecast points at or before `actual`'s own latest real point are
+ * dropped now (real data already answers that question, no need to
+ * additionally show what was predicted for it -- `RecentBacktestChart`,
+ * used elsewhere on this dashboard, is the dedicated predicted-vs-
+ * actual comparison tool) -- only forecast points strictly after it are
+ * genuine, not-yet-knowable future and get drawn as the P10-P90 band.
+ * The real remaining lag (how far behind live `actual` itself is) stays
+ * disclosed separately below the chart, computed against true
+ * wall-clock time.
  *
  * Actual line never visually breaks (2026-08-11, same fix as
  * `RealEmissionsTrend`'s identical one): a real missing hour's reading
@@ -157,14 +189,17 @@ export function DemandForecastChart({
     p90Mw: number | null;
   };
 
-  // Trim `actual` to end exactly where the real forecast begins (see
-  // this module's own header comment for why) -- done here, not by the
-  // caller, so every caller gets a correctly two-region chart without
-  // needing to remember the alignment step itself.
-  const forecastStartMs = forecast.length > 0 ? forecast[0].tMs : null;
-  const trimmedActual = (
-    forecastStartMs !== null ? actual.filter((p) => p.tMs < forecastStartMs) : actual
-  ).slice(-maxActualPoints);
+  // Real "Now" boundary: `actual`'s own most recent real point, not
+  // `forecast[0]` (see this module's own header comment for why --
+  // those two can drift apart by a lot, and anchoring to `forecast[0]`
+  // used to mean already-known real actual demand got plotted as if it
+  // were still an uncertain prediction whenever `actual` ran fresher
+  // than the model's own lookback). Forecast points at or before this
+  // boundary are dropped -- real data already covers those hours.
+  const actualEndMs = actual.length > 0 ? Math.max(...actual.map((p) => p.tMs)) : null;
+  const trimmedActual = actual.slice(-maxActualPoints);
+  const futureForecast =
+    actualEndMs !== null ? forecast.filter((p) => p.tMs > actualEndMs) : forecast;
 
   const points: DemandChartPoint[] = [
     ...trimmedActual.map((p) => ({
@@ -177,7 +212,7 @@ export function DemandForecastChart({
       p50Mw: null,
       p90Mw: null,
     })),
-    ...forecast.map((p) => ({
+    ...futureForecast.map((p) => ({
       tMs: p.tMs,
       label: hourLabel(p.ts),
       fullLabel: fullLabel(p.ts),
@@ -222,10 +257,11 @@ export function DemandForecastChart({
     ),
   );
 
-  // The "Now" line marks the real boundary between the two regions, not
-  // literally `Date.now()` at render time -- see this module's own
-  // header comment.
-  const nowMs = fcPts.length > 0 ? fcPts[0].tMs : Date.now();
+  // The "Now" line marks the real actual/future boundary (`actualEndMs`
+  // above), not literally `Date.now()` at render time -- see this
+  // module's own header comment. Falls back to the forecast's own
+  // start only when there's no real actual data at all to anchor to.
+  const nowMs = actualEndMs ?? (forecast.length > 0 ? forecast[0].tMs : Date.now());
   const nowInRange = nowMs >= tMin && nowMs <= tMax;
 
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -277,12 +313,14 @@ export function DemandForecastChart({
   }));
   const labelEvery = points.length > 30 ? 4 : points.length > 16 ? 2 : 1;
 
-  // Real, disclosed lag vs. TRUE wall-clock time (deliberately
-  // `Date.now()` here, not the chart's own `nowMs` boundary above,
-  // which is anchored to the forecast's own start and would make this
-  // always read ~0).
-  const forecastLagHours =
-    fcPts.length > 0 ? Math.max(0, (Date.now() - fcPts[fcPts.length - 1].tMs) / 3_600_000) : null;
+  // Real, disclosed freshness lag: how far behind TRUE wall-clock time
+  // the "Now" boundary itself (`actualEndMs`) is -- i.e. how stale the
+  // real actual-data feed is right now, the one thing this chart can't
+  // draw around. Computed against `Date.now()` at render time, not
+  // reused from `nowMs` for its own sake (they're the same value here,
+  // but this keeps the intent -- "distance from true now" -- explicit).
+  const actualDataLagHours =
+    actualEndMs !== null ? Math.max(0, (Date.now() - actualEndMs) / 3_600_000) : null;
 
   return (
     <div ref={wrapRef} className="relative" data-testid={testId}>
@@ -459,12 +497,12 @@ export function DemandForecastChart({
         )}
       </AnimatePresence>
 
-      {forecastLagHours !== null && forecastLagHours > 1 && (
+      {actualDataLagHours !== null && actualDataLagHours > 1 && (
         <p className="mt-2 flex items-center gap-1.5 text-[11px] text-amber-200/80">
           <Info className="h-3 w-3" />
-          The &quot;Now&quot; line marks the real forecast&apos;s own start, not this instant — the
-          serving model&apos;s own lookback data is ~{Math.round(forecastLagHours)}h behind live
-          ingestion right now, not a display artifact.
+          The &quot;Now&quot; line marks the real actual data&apos;s own most recent reading, not
+          this instant — real ingestion is currently ~{Math.round(actualDataLagHours)}h behind
+          live, not a display artifact.
         </p>
       )}
       {actualGapCount > 0 && (

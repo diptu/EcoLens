@@ -1,40 +1,27 @@
 /**
- * E2E tests for the 14 dashboard pages (the new 15-page taxonomy).
- * Verifies sidebar + topbar are present, each page renders its
- * expected content, and navigation works.
+ * E2E tests for the live dashboard pages (the new 15-page taxonomy,
+ * minus the disabled routes -- see each disabled route's own
+ * page.tsx). Verifies sidebar + topbar are present, each page renders
+ * its expected content, and navigation works.
  *
- * Routes (15-page taxonomy):
+ * Routes:
  *   /login                        — auth (separate)
- *   /dashboard/executive          — executive dashboard
- *   /dashboard/operations         — operations dashboard
- *   /dashboard/data-sources       — data sources
- *   /dashboard/ingestion          — ingestion pipeline
- *   /dashboard/data-quality       — data quality & anomalies
- *   /dashboard/forecast           — forecast explorer
- *   /dashboard/carbon             — carbon intelligence
- *   /dashboard/analytics          — energy analytics
- *   /dashboard/models             — model registry
- *   /dashboard/training           — training & experiments
- *   /dashboard/operational-tasks  — operational tasks
- *   /dashboard/system-health      — system health
+ *   /                             — executive dashboard
+ *   /analytics-forecast           — analytics & forecast (combines the
+ *                                    disabled Forecast Explorer/Carbon
+ *                                    Intelligence/Energy Analytics)
+ *   /data-ingestion               — data ingestion
+ *   /architecture                 — end-to-end model architecture
  *   /dashboard/reports            — reports
  *   /dashboard/settings           — settings & users
  */
 import { test, expect } from "@playwright/test";
 
 const DASHBOARD_PAGES = [
-  "/dashboard/executive",
-  "/dashboard/operations",
-  "/dashboard/data-sources",
-  "/dashboard/ingestion",
-  "/dashboard/data-quality",
-  "/dashboard/forecast",
-  "/dashboard/carbon",
-  "/dashboard/analytics",
-  "/dashboard/models",
-  "/dashboard/training",
-  "/dashboard/operational-tasks",
-  "/dashboard/system-health",
+  "/",
+  "/analytics-forecast",
+  "/data-ingestion",
+  "/architecture",
   "/dashboard/reports",
   "/dashboard/settings",
 ] as const;
@@ -53,18 +40,31 @@ for (const route of DASHBOARD_PAGES) {
   });
 }
 
-test.describe("/dashboard/executive", () => {
+test.describe("/", () => {
   test("renders KPIs", async ({ page }) => {
-    await page.goto("/dashboard/executive");
+    await page.goto("/");
     await expect(page.getByRole("heading", { name: /Executive Dashboard/ })).toBeVisible();
     await expect(page.getByText(/Total CO₂e/).first()).toBeVisible();
   });
 });
 
-test.describe("/dashboard/forecast", () => {
-  test("renders forecast page", async ({ page }) => {
-    await page.goto("/dashboard/forecast");
-    await expect(page.locator("h1").first()).toBeVisible();
+test.describe("/analytics-forecast", () => {
+  test("renders KPIs and period/region selectors", async ({ page }) => {
+    await page.goto("/analytics-forecast");
+    await expect(page.getByRole("heading", { name: /Analytics & Forecast/ })).toBeVisible();
+    await expect(page.getByText("Total Demand (Actual)")).toBeVisible();
+    await expect(page.getByTestId("af-period-7d")).toBeVisible();
+    await expect(page.getByTestId("af-region-NEM")).toBeVisible();
+  });
+});
+
+test.describe("/architecture", () => {
+  test("renders the 7-stage flow", async ({ page }) => {
+    await page.goto("/architecture");
+    await expect(page.getByRole("heading", { name: /End-to-End Model Architecture/ })).toBeVisible();
+    await expect(page.getByText("Real Data Sources")).toBeVisible();
+    await expect(page.getByText("MLflow Model Registry")).toBeVisible();
+    await expect(page.getByText("Model Serving")).toBeVisible();
   });
 });
 
@@ -78,7 +78,7 @@ test.describe("/dashboard/reports", () => {
 test.describe("core web vitals (dashboard)", () => {
   test("executive: FCP < 1.5s, CLS = 0", async ({ page }) => {
     const t0 = Date.now();
-    await page.goto("/dashboard/executive");
+    await page.goto("/");
     const fcp = await page.evaluate(() => {
       const entries = performance.getEntriesByName("first-contentful-paint");
       return entries.length > 0 ? entries[0].startTime : -1;

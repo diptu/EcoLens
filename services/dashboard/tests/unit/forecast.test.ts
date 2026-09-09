@@ -1,13 +1,15 @@
 /**
  * Tests for src/lib/forecast.ts — region constants and the shared
- * `summarize`/`formatStepLabel` helpers used by the Forecast Explorer
- * page and `FanChart`. (The old deterministic mock generator this file
- * used to test was removed once /dashboard/forecast was wired to
- * forecast-api's real `GET /v1/forecast`.)
+ * `summarize` helper used by `/analytics-forecast`. (The old
+ * deterministic mock generator this file used to test was removed
+ * once /dashboard/forecast was wired to forecast-api's real
+ * `GET /v1/forecast`; `formatStepLabel`'s own tests were removed
+ * along with it once /dashboard/forecast was disabled — see that
+ * route's own page.tsx.)
  */
 import { describe, it, expect } from "vitest";
 
-import { ALL_REGIONS, formatStepLabel, summarize, type Forecast } from "@/lib/forecast";
+import { ALL_REGIONS, summarize, type Forecast } from "@/lib/forecast";
 
 describe("constants", () => {
   it("ALL_REGIONS contains the 6 NEM regions + WEM", () => {
@@ -66,30 +68,5 @@ describe("summarize", () => {
     expect(s.peak.value).toBe(0);
     expect(s.mean).toBe(0);
     expect(s.total).toBe(0);
-  });
-});
-
-describe("formatStepLabel", () => {
-  const t1 = "2026-07-22T22:30:00Z"; // ~08:30 AEST
-  const t2 = "2026-07-22T13:00:00Z"; // ~23:00 AEST
-
-  it("labels the first and last step for short horizons", () => {
-    expect(formatStepLabel(t1, 1, 12)).toBe("08:30");
-    expect(formatStepLabel(t2, 12, 12)).toBe("23:00");
-  });
-
-  it("skips intermediate steps that don't fall on a label stride", () => {
-    // With total=12, stride = floor(12/6) = 2, so steps 2,4,6,8,10 ARE labeled.
-    // We pick a step that doesn't fall on the stride or the endpoints.
-    expect(formatStepLabel(t1, 3, 12)).toBe("");
-    expect(formatStepLabel(t1, 5, 12)).toBe("");
-    expect(formatStepLabel(t1, 7, 12)).toBe("");
-    expect(formatStepLabel(t1, 9, 12)).toBe("");
-    expect(formatStepLabel(t1, 11, 12)).toBe("");
-  });
-
-  it("uses date format for long horizons (>48 steps)", () => {
-    const label = formatStepLabel(t1, 1, 100);
-    expect(label).toMatch(/\d+\/\d+/);
   });
 });

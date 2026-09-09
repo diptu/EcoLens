@@ -18,19 +18,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en" className="dark">
       <head>
-        {/* LCP element — preload the Earth (WebP is 33% smaller than JPG).
-            fetchPriority="high" tells the browser this is the most
-            important image to load. */}
-        <link
-          rel="preload"
-          as="image"
-          href="/images/earth.webp"
-          fetchPriority="high"
-        />
-        {/* Tell the browser the same-origin (so no preconnect needed) */}
         <meta name="theme-color" content="#050a08" />
-        {/* Performance: keep the document color dark to match the LCP
-            so the LCP-to-paint transition is invisible. */}
+        {/* Performance: keep the document color dark so first paint
+            (before hydration) never flashes a lighter background. */}
         <style
           dangerouslySetInnerHTML={{
             __html: `html,body{background:#050a08;color:#fff}`,

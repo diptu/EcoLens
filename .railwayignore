@@ -1,0 +1,32 @@
+# Keeps `railway up` uploads small for this monorepo -- every service's
+# Dockerfile only COPYs its own `services/<name>/` subtree (confirmed
+# against infra/docker/*.Dockerfile), so none of the paths below are ever
+# part of a real build context. Without this, a `railway up` run from the
+# repo root uploads local dependency caches, build output, and data
+# directories that can individually run into the hundreds of MB -- real,
+# hit live 2026-08-21: a forecast-api deploy failed outright with a 413
+# Payload Too Large once the ingestion service's local staging data grew
+# past ~230MB combined.
+node_modules/
+.venv/
+.next/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Per-service local data/notebook-output directories -- real ingested
+# data, trained-model artifacts, and notebook scratch output, none of it
+# needed by any service's Docker build (each Dockerfile COPYs source
+# code, not these).
+services/ingestion/data/
+services/forecast-api/mlruns/
+services/forecast-api/notebooks/*.zip
+services/forecast-api/notebooks/lstm_demand_onnx_bundle/
+services/forecast-api/mlflow.db
+
+# Stray root-level DuckDB temp files (hundreds of small per-connection
+# copies observed live under `data/staging/` at the repo root, unrelated
+# to any service's own `data/` directory) -- not real source either way.
+/data/

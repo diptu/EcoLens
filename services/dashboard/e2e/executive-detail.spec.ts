@@ -11,7 +11,7 @@ import { loginAs } from "./_helpers/auth";
 
 test.beforeEach(async ({ page }) => {
   await loginAs(page, "diptu");
-  await page.goto("/dashboard/executive/");
+  await page.goto("/");
   await expect(page.getByRole("heading", { name: "Executive Dashboard" })).toBeVisible();
 });
 
@@ -100,13 +100,13 @@ test("emissions by source donut shows hover tooltip", async ({ page }) => {
 test("executive page has View full forecast link", async ({ page }) => {
   const link = page.getByTestId("forecast-preview-link");
   await expect(link).toBeVisible();
-  await expect(link).toHaveAttribute("href", "/dashboard/forecast/");
+  await expect(link).toHaveAttribute("href", "/analytics-forecast/");
 });
 
-test("executive page has View details link to carbon", async ({ page }) => {
+test("executive page has View details link to Analytics & Forecast", async ({ page }) => {
   const link = page.getByTestId("emissions-preview-link");
   await expect(link).toBeVisible();
-  await expect(link).toHaveAttribute("href", "/dashboard/carbon/");
+  await expect(link).toHaveAttribute("href", "/analytics-forecast/");
 });
 
 test("executive page shows 6 KPIs", async ({ page }) => {

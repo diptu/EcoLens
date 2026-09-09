@@ -31,7 +31,6 @@ import { PageHero } from "@/components/sections/page-hero";
 import { StepFlow } from "@/components/sections/step-flow";
 import { TrustedBy } from "@/components/landing/trusted-by";
 import { StaggerContainer, MotionItem } from "@/components/motion/motion-section";
-import { m } from "framer-motion";
 
 /* ─────────────────  Dashboard mockup (right side of hero)  ───────────────── */
 function DashboardMockup() {

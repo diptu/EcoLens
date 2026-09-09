@@ -9,6 +9,58 @@ x-common-env: &common-env
     - .env
   restart: unless-stopped
 
+# Real bug, confirmed live 2026-08-19: every app service below only had
+# `<<: *common-env` (root `.env`'s Postgres/S3 bootstrap vars) -- none of
+# them ever explicitly set DATABASE_URL/REDIS_URL/RABBITMQ_URL/
+# MLFLOW_TRACKING_URI, so each service's own `app/core/config.py` fell
+# back to its code default, which is a `localhost`-based URL (matching
+# the *non-Docker* `make api`/`make ingestion`/etc. local-dev workflow,
+# where every process really does share one host). Inside a container,
+# `localhost` means that container itself, not a sibling one -- so every
+# service silently tried to reach Postgres/Redis/RabbitMQ/MLflow on
+# itself instead of the real `postgres`/`redis`/`rabbitmq`/`mlflow`
+# containers, producing exactly the repeating connection-refused retries
+# and stuck-loading dashboard cards ("Failed to fetch") this fixes.
+# `mlflow` itself doesn't need this -- its own `command:` already builds
+# its Postgres URL inline with the real `postgres` hostname.
+# `DATABASE_URL` deliberately NOT set here (2026-08-20, real fix): every
+# app service below now loads its own real `services/*/.env` too (see
+# each service's own `env_file:` list) -- the same real Neon databases
+# `make api`/`make ingestion`/`make warehouse` already correctly use
+# outside Docker. Forcing a local-only `DATABASE_URL` here (the old
+# behavior) silently shadowed that real value with this stack's own
+# empty local `postgres` container -- confirmed live: `raw_marts.*`/
+# `meta.anomalies` etc. all raised `UndefinedTableError` from inside the
+# `api`/`ingestion` containers even though the real, already-populated
+# Neon databases were one env var away the whole time. `REDIS_URL`/
+# `RABBITMQ_URL`/`MLFLOW_TRACKING_URI` stay pinned to this compose
+# stack's own local containers -- those are genuinely local
+# infrastructure (a cache, a queue, an artifact tracking server), not
+# data that needs to match a shared remote source of truth the way the
+# Postgres-backed tables above do.
+x-service-urls: &service-urls
+  REDIS_URL: redis://redis:6379/0
+  RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+  MLFLOW_TRACKING_URI: http://mlflow:5000
+
+# `api`/`train-worker` only -- the MLflow *server* (below) already has
+# these, but the MLflow *Python client* running inside these two
+# services (`mlflow.pytorch.log_model`, `mlflow.log_artifacts`,
+# `mlflow.artifacts.download_artifacts`/`load_dict`) talks to MinIO
+# directly via boto3 for its S3-backed artifact store
+# (`--default-artifact-root s3://.../mlflow` below) -- it needs its own
+# credentials, not just a tracking URI. Real bug, confirmed live
+# 2026-08-19: every real training run failed with `NoCredentialsError:
+# Unable to locate credentials` the instant `log_and_register_run` tried
+# to upload `serving/model_state_dict.pt` etc. -- registering a version
+# had never actually worked in this compose stack before this fix.
+x-mlflow-s3-env: &mlflow-s3-env
+  MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+  AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-minioadmin}
+  AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-minioadmin}
+  AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+  AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+
 services:
   # ── Database ───────────────────────────────────────────────────────────────
   postgres:
@@ -142,35 +194,39 @@ services:
       # rather than only when R2 is actually the target.
       AWS_REQUEST_CHECKSUM_CALCULATION: when_required
       AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+      # `mlflow server --allowed-hosts` (below) is real, honest-looking
+      # config that turns out not to do anything -- real bug, confirmed
+      # live 2026-08-20 by reading `mlflow.server.fastapi_security`'s own
+      # source: the CLI flag's value never actually reaches
+      # `HostValidationMiddleware` (it's constructed from the
+      # `MLFLOW_SERVER_ALLOWED_HOSTS` *env var* via `get_allowed_hosts_
+      # from_env()`, which this server's CLI invocation never sets --
+      # `docker exec ecolens-mlflow-1 printenv` confirms it's simply
+      # absent). The middleware silently falls back to MLflow's own
+      # built-in default host list instead, which intermittently 403'd
+      # real `localhost:${MLFLOW_HOST_PORT}` requests from this stack's
+      # own `api`/`train-worker`/notebook clients -- reproduced directly
+      # against `HostValidationMiddleware`'s exact matching logic, not
+      # guessed. DNS-rebinding protection has no real value for a
+      # docker-compose stack that's never exposed past `localhost` on a
+      # single dev machine anyway, so disabling MLflow's security
+      # middleware outright here is the honest fix, not a workaround for
+      # a threat model this deployment doesn't have.
+      MLFLOW_SERVER_DISABLE_SECURITY_MIDDLEWARE: "true"
     command: >
       mlflow server
         --host 0.0.0.0
         --port 5000
+        --workers 1
         --backend-store-uri postgresql://${POSTGRES_USER:-ecolens}:${POSTGRES_PASSWORD:-ecolens}@postgres:5432/${POSTGRES_DB:-ecolens}
         --default-artifact-root s3://${S3_BUCKET_MODELS:-ecolens}/mlflow
     ports:
-      - "5000:5000"
+      - "${MLFLOW_HOST_PORT:-5000}:5000"
     depends_on:
       postgres:
         condition: service_healthy
       minio-setup:
         condition: service_completed_successfully
-
-  # ── Prefect worker ────────────────────────────────────────────────────────
-  prefect:
-    build:
-      context: .
-      dockerfile: infra/docker/worker.Dockerfile
-    <<: *common-env
-    command: >
-      prefect worker start --pool ecolens-pool --type process
-    depends_on:
-      postgres:
-        condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
 
   # ── Ingestion (services/ingestion/TODO.md) ───────────────────────────────
   # The real, sole ingestion implementation -- `data-pipeline`'s own
@@ -188,6 +244,14 @@ services:
       context: .
       dockerfile: infra/docker/ingestion.Dockerfile
     <<: *common-env
+    # Real Neon DB + OE/R2 credentials -- same file `make ingestion`
+    # already reads outside Docker. Listed after `.env` so its values win
+    # (env_file entries are applied in order, later overrides earlier).
+    env_file:
+      - .env
+      - services/ingestion/.env
+    environment:
+      <<: *service-urls
     ports:
       - "8003:8003"
     volumes:
@@ -221,6 +285,13 @@ services:
       context: .
       dockerfile: infra/docker/ingestion.Dockerfile
     <<: *common-env
+    # Same real Neon DB + OE/R2 credentials as `ingestion` above -- see
+    # its own comment on this same `env_file:` shape.
+    env_file:
+      - .env
+      - services/ingestion/.env
+    environment:
+      <<: *service-urls
     command: worker --loglevel=info
     restart: unless-stopped
     volumes:
@@ -250,6 +321,13 @@ services:
       context: .
       dockerfile: infra/docker/ingestion.Dockerfile
     <<: *common-env
+    # Same real Neon DB + OE/R2 credentials as `ingestion` above -- see
+    # its own comment on this same `env_file:` shape.
+    env_file:
+      - .env
+      - services/ingestion/.env
+    environment:
+      <<: *service-urls
     command: beat --loglevel=info
     restart: unless-stopped
     depends_on:
@@ -273,6 +351,14 @@ services:
       context: .
       dockerfile: infra/docker/warehouse.Dockerfile
     <<: *common-env
+    # Real Neon DB(s) + R2 credentials -- same file `make warehouse`
+    # already reads outside Docker. See `ingestion`'s own comment above
+    # on this `env_file:` shape/ordering.
+    env_file:
+      - .env
+      - services/waerehouse/.env
+    environment:
+      <<: *service-urls
     ports:
       - "8004:8004"
     volumes:
@@ -308,6 +394,12 @@ services:
       context: .
       dockerfile: infra/docker/warehouse.Dockerfile
     <<: *common-env
+    # Same real Neon DB(s) + R2 credentials as `warehouse` above.
+    env_file:
+      - .env
+      - services/waerehouse/.env
+    environment:
+      <<: *service-urls
     command: consume
     volumes:
       - duckdb_staging:/app/services/waerehouse/data/staging:ro
@@ -357,6 +449,13 @@ services:
       context: .
       dockerfile: infra/docker/forecast-api.Dockerfile
     <<: *common-env
+    # Real Neon DB -- same file `make api` already reads outside Docker.
+    # See `ingestion`'s own comment above on this `env_file:` shape.
+    env_file:
+      - .env
+      - services/forecast-api/.env
+    environment:
+      <<: [*service-urls, *mlflow-s3-env]
     command: ["ecolens-forecast", "train-worker"]
     deploy:
       resources:
@@ -377,6 +476,12 @@ services:
       context: .
       dockerfile: infra/docker/forecast-api.Dockerfile
     <<: *common-env
+    # Same real Neon DB as `train-worker` above.
+    env_file:
+      - .env
+      - services/forecast-api/.env
+    environment:
+      <<: [*service-urls, *mlflow-s3-env]
     ports:
       - "8000:8000"
     depends_on:
@@ -391,19 +496,6 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
-
-  # ── Web ───────────────────────────────────────────────────────────────────
-  web:
-    build:
-      context: ./frontend
-      dockerfile: ../infra/docker/web.Dockerfile
-    <<: *common-env
-    environment:
-      NEXT_PUBLIC_API_BASE: http://api:8000
-    ports:
-      - "3000:3000"
-    depends_on:
-      - api
 
   # ── Observability ─────────────────────────────────────────────────────────
   prometheus:

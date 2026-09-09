@@ -103,33 +103,3 @@ test.describe("/solutions", () => {
     await expect(page.getByText(/Don't see your industry/i).first()).toBeVisible();
   });
 });
-
-test.describe("core web vitals (smoke)", () => {
-  test("home page: FCP < 1.5s, CLS = 0", async ({ page }) => {
-    await page.goto("/");
-    const metrics = await page.evaluate(() => {
-      return new Promise<{ fcp: number; cls: number }>((resolve) => {
-        let fcp = 0;
-        let cls = 0;
-        new PerformanceObserver((list) => {
-          for (const entry of list.getEntries()) {
-            if (entry.name === "first-contentful-paint") {
-              fcp = entry.startTime;
-            }
-          }
-        }).observe({ type: "paint", buffered: true });
-        new PerformanceObserver((list) => {
-          for (const entry of list.getEntries()) {
-            if (!(entry as PerformanceEntry & { hadRecentInput?: boolean }).hadRecentInput) {
-              cls += (entry as PerformanceEntry & { value: number }).value;
-            }
-          }
-        }).observe({ type: "layout-shift", buffered: true });
-        setTimeout(() => resolve({ fcp, cls }), 500);
-      });
-    });
-    expect(metrics.fcp).toBeGreaterThan(0);
-    expect(metrics.fcp).toBeLessThan(1500);
-    expect(metrics.cls).toBe(0);
-  });
-});

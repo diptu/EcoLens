@@ -60,7 +60,7 @@
  */
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { m, AnimatePresence, useReducedMotion } from "framer-motion";
 import { Globe, Info, ArrowUpRight } from "lucide-react";
 

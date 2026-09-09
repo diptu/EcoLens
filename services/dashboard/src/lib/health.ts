@@ -222,3 +222,30 @@ export async function fetchAllServicesHealth(): Promise<ServiceHealth[]> {
     fetchIamHealth(),
   ]);
 }
+
+/** Shape of ingestion's `SystemLoadResponse` (`GET /v1/system/load`,
+ * 2026-08-20) -- real `os.getloadavg()`/`/proc/meminfo` reads, reflecting
+ * the whole Linux kernel this container shares with every other service
+ * in the stack, not just this one container's own cgroup. Backs the
+ * Data Ingestion page's "System Load" KPI, previously a permanent
+ * "No host-metrics endpoint exists yet" placeholder. */
+export type SystemLoad = {
+  load_avg_1m: number;
+  load_avg_5m: number;
+  load_avg_15m: number;
+  cpu_count: number;
+  mem_total_mb: number;
+  mem_available_mb: number;
+  mem_used_pct: number;
+};
+
+/** Live call to `GET /v1/system/load` (ingestion) -- throws on any
+ * non-2xx/network failure, same "let the caller decide the fallback"
+ * convention as every other fetch in this file. */
+export async function fetchSystemLoad(): Promise<SystemLoad> {
+  const res = await fetch(`${INGESTION_API_URL}/system/load`);
+  if (!res.ok) {
+    throw new Error(`GET /v1/system/load failed: ${res.status}`);
+  }
+  return res.json();
+}

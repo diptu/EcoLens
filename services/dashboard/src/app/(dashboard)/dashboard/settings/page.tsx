@@ -10,12 +10,10 @@
 
 import { useMemo, useState } from "react";
 import {
-  CheckCircle2, ChevronDown, ChevronUp, Crown, Eye, Filter, KeyRound,
-  Mail, Search, Settings as SettingsIcon, Shield, ShieldCheck,
-  User as UserIcon, XCircle, BellRing, Cpu, Database, Plus, Sliders,
-  Plug, PlugZap, ExternalLink, FileSpreadsheet, History, Play, Pause,
+  Settings as SettingsIcon, Plus,
+  Plug, PlugZap, FileSpreadsheet, Play, Pause,
   Trash2, Edit3, RefreshCw, AlertCircle, Calendar, Clock, ChevronRight,
-  X, Check, AlertTriangle, RotateCcw, Download,
+  X, Check, RotateCcw, Download,
 } from "lucide-react";
 
 import { Card } from "@/components/dashboard/card";

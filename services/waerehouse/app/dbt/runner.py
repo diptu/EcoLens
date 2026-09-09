@@ -100,10 +100,28 @@ def run_dbt(
     # `dbt/ecolens/profiles.yml` reads POSTGRES_HOST/PORT/USER/PASSWORD/DB
     # as raw OS env vars (Jinja `env_var()`) -- entirely separate from
     # this service's own `DATABASE_URL`-first `Settings.database_url`.
-    # `setdefault` so an operator's explicit env var still wins.
+    #
+    # Real bug fixed here, confirmed live 2026-09-09: this used to be
+    # `env.setdefault(key, value)`, on the theory that "an operator's
+    # explicit env var still wins". But in every compose deployment this
+    # container's env already has POSTGRES_USER/PASSWORD/DB set -- not
+    # by an operator overriding dbt on purpose, but because `env_file:
+    # .env` unconditionally injects the *local* `postgres` service's
+    # own credentials (`ecolens`/`ecolens`) for unrelated consumers
+    # (MLflow's backend store, etc.). `setdefault` silently kept those
+    # local values instead of `dbt_postgres_env`'s real ones derived
+    # from `DATABASE_URL` (Neon's `neondb_owner` + its real password) --
+    # every `dbt build` against a NeonDB deployment connected to the
+    # right *host* (POSTGRES_HOST/PORT weren't already set, so those two
+    # did get through) with the wrong *user/password*, failed auth, and
+    # exited non-zero without ever refreshing a single mart. Direct
+    # assignment: `dbt_postgres_env` is always derived from the same
+    # `DATABASE_URL` this whole service already reads/writes through, so
+    # there's no legitimate case where a different independently-set
+    # POSTGRES_* value should win over it for dbt specifically.
     env = os.environ.copy()
     for key, value in settings.dbt_postgres_env.items():
-        env.setdefault(key, value)
+        env[key] = value
 
     started = time.monotonic()
     try:

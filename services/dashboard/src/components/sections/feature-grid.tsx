@@ -3,19 +3,15 @@
  * used on /product. Each card has an icon, title, body, bullet list, and
  * a decorative right-side visual (CSS or image).
  *
- * Animations:
- *  - Framer Motion: stagger entrance, hover lift
- *  - GSAP:        optional continuous orbit on the visuals
+ * Animations: Framer Motion stagger entrance + hover lift.
  */
 "use client";
 
-import { m, useReducedMotion } from "framer-motion";
-import { useEffect, useRef, type ReactNode } from "react";
+import { m } from "framer-motion";
+import { type ReactNode } from "react";
 
 import { StaggerContainer, MotionItem } from "@/components/motion/motion-section";
 import { cardHover, fadeUp } from "@/lib/animations";
-import { ensureGsapRegistered, prefersReducedMotion } from "@/lib/gsap";
-import gsap from "gsap/dist/gsap.js";
 
 export interface FeatureGridItem {
   title: string;

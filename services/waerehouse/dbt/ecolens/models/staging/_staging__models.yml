@@ -99,17 +99,3 @@ models:
         tests: [not_null]
       - name: anomaly_reason
         tests: [not_null]
-
-  - name: stg_aemo_holidays
-    description: Thin passthrough over raw.aemo_holidays.
-    columns:
-      - name: date
-        tests: [not_null]
-      - name: region
-        tests:
-          - not_null
-          - accepted_values:
-              arguments:
-                values: ["NSW1", "QLD1", "VIC1", "SA1", "TAS1", "WEM"]
-      - name: holiday_name
-        tests: [not_null]

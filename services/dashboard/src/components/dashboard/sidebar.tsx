@@ -1,6 +1,6 @@
 /**
- * Dashboard sidebar — persistent left nav with logo, items grouped
- * by section, and the small brand/footer.
+ * Dashboard sidebar — persistent left nav with logo, a flat list of
+ * nav items, and the small brand/footer.
  *
  * Sticky on desktop (>= lg), drawer-style overlay on mobile.
  *
@@ -9,29 +9,34 @@
  *
  * Nav structure mirrors the ecoLens page taxonomy (Settings & Users
  * and Reports still exist as pages, just aren't linked from the
- * sidebar nav):
- *   1. Executive Dashboard            /dashboard/executive      — executives
- *   2. Operations Dashboard           /dashboard/operations     — data engineers
- *   3. Data Sources                   /dashboard/data-sources   — data engineers
- *   4. Ingestion Pipeline             /dashboard/ingestion      — data engineers
- *   5. Data Quality & Anomalies       /dashboard/data-quality   — data engineers
- *   6. Forecast Explorer              /dashboard/forecast       — analysts
- *   7. Carbon Intelligence            /dashboard/carbon         — sustainability
- *   8. Energy Analytics               /dashboard/analytics      — analysts
- *   9. Model Registry                 /dashboard/models         — ML engineers
- *  10. Model Training & Experiments   /dashboard/training       — ML engineers
- *  11. Operational Tasks              /dashboard/operational-tasks — platform eng
- *  12. System Health                  /dashboard/system-health  — platform eng
- *  13. Architecture                   /dashboard/architecture   — all users (about)
+ * sidebar nav; Data Sources, Ingestion Pipeline, Data Quality &
+ * Anomalies, the Operations Dashboard, the Model Registry, Forecast
+ * Explorer, Carbon Intelligence, Energy Analytics, Carbon
+ * Intelligence's own Methodology subpage, Performance, System Health,
+ * and Model Training & Experiments are disabled entirely — see those
+ * routes' own page.tsx. Forecast Explorer/Carbon Intelligence/Energy
+ * Analytics' real functionality (demand forecast, emissions/generation
+ * mix, weather correlation) was consolidated into Analytics &
+ * Forecast; Performance/System Health/Training's own real data (model
+ * eval/backtest, service health, MLflow experiments) is still live via
+ * other still-active pages — none of these disablings was a removed
+ * feature so much as a removed dedicated page for it. Architecture
+ * (2026-09-09) is back with new, different content — a rendering of
+ * `docs/architecture/model-architecture.md`'s real end-to-end model
+ * flow, not the old tabbed pipeline-overview page it replaces):
+ *   1. Overview (Executive Dashboard) /                              — executives
+ *   2. Analytics & Forecast           /analytics-forecast            — analysts (combines
+ *                                       Forecast Explorer/Carbon Intelligence/Energy Analytics)
+ *   3. Data Ingestion                 /data-ingestion                — platform eng
+ *   4. Architecture                   /architecture                  — all users (about)
  */
 "use client";
 
 import { useState } from "react";
 import { AnimatePresence, m } from "framer-motion";
 import {
-  Activity, BarChart3, Beaker, Cpu, Database,
-  Gauge, Leaf, LineChart, Menu, Server, Shield,
-  TrendingUp, Webhook, Workflow, X, Zap,
+  Gauge, LayoutDashboard, Leaf, Menu,
+  Workflow, X, Zap,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -46,54 +51,15 @@ interface NavItem {
 }
 
 /**
- * Primary nav — the 14 dashboard pages (auth handled outside sidebar).
- * Grouped by persona/use-case for scannability.
+ * Primary nav — the live dashboard pages (auth handled outside
+ * sidebar). Flat list, in the same order the page taxonomy above
+ * lists them.
  */
-const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
-  {
-    label: "Dashboards",
-    items: [
-      { label: "Executive",  href: "/dashboard/executive",  icon: Gauge },
-      { label: "Operations", href: "/dashboard/operations", icon: Server },
-    ],
-  },
-  {
-    label: "Data Platform",
-    items: [
-      { label: "Data Sources",            href: "/dashboard/data-sources", icon: Database },
-      { label: "Ingestion Pipeline",      href: "/dashboard/ingestion",    icon: Webhook },
-      { label: "Data Quality & Anomalies",href: "/dashboard/data-quality", icon: Shield },
-    ],
-  },
-  {
-    label: "Insights",
-    items: [
-      { label: "Forecast Explorer",  href: "/dashboard/forecast",  icon: TrendingUp },
-      { label: "Carbon Intelligence",href: "/dashboard/carbon",    icon: Leaf },
-      { label: "Energy Analytics",   href: "/dashboard/analytics", icon: BarChart3 },
-    ],
-  },
-  {
-    label: "ML Platform",
-    items: [
-      { label: "Model Registry",             href: "/dashboard/models",   icon: Cpu },
-      { label: "Training & Experiments",      href: "/dashboard/training", icon: Beaker },
-      { label: "Performance",                 href: "/dashboard/performance", icon: LineChart },
-    ],
-  },
-  {
-    label: "Operations",
-    items: [
-      { label: "Operational Tasks", href: "/dashboard/operational-tasks", icon: Zap },
-      { label: "System Health",     href: "/dashboard/system-health",     icon: Activity },
-    ],
-  },
-  {
-    label: "About",
-    items: [
-      { label: "Architecture", href: "/dashboard/architecture", icon: Workflow },
-    ],
-  },
+const NAV_ITEMS: NavItem[] = [
+  { label: "Overview",               href: "/",                             icon: Gauge },
+  { label: "Analytics & Forecast",   href: "/analytics-forecast",           icon: LayoutDashboard },
+  { label: "Data Ingestion",         href: "/data-ingestion",              icon: Zap },
+  { label: "Architecture",           href: "/architecture",                icon: Workflow },
 ];
 
 function NavLink({ item, active, accent }: { item: NavItem; active: boolean; accent?: "emerald" }) {
@@ -140,7 +106,7 @@ export function Sidebar() {
 
       {/* Desktop sidebar */}
       <aside className="fixed inset-y-0 left-0 hidden w-64 flex-col border-r border-white/5 bg-[#050a08] lg:flex">
-        <SidebarBody pathname={pathname} isActive={isActive} />
+        <SidebarBody isActive={isActive} />
       </aside>
 
       {/* Mobile drawer */}
@@ -172,7 +138,7 @@ export function Sidebar() {
                   <X className="h-4 w-4" />
                 </button>
               </div>
-              <SidebarBody pathname={pathname} isActive={isActive} />
+              <SidebarBody isActive={isActive} />
             </m.aside>
           </>
         )}
@@ -182,10 +148,8 @@ export function Sidebar() {
 }
 
 function SidebarBody({
-  pathname,
   isActive,
 }: {
-  pathname: string;
   isActive: (href: string) => boolean;
 }) {
   return (
@@ -200,19 +164,12 @@ function SidebarBody({
 
       {/* Nav */}
       <nav className="flex-1 overflow-y-auto px-3 py-4">
-        {NAV_GROUPS.map((group) => (
-          <div key={group.label} className="mb-2">
-            <p className="mb-1.5 mt-3 px-3 text-[10px] font-semibold uppercase tracking-[0.18em] text-white/40">
-              {group.label}
-            </p>
-            {group.items.map((item) => (
-              <NavLink
-                key={item.href}
-                item={item}
-                active={isActive(item.href)}
-              />
-            ))}
-          </div>
+        {NAV_ITEMS.map((item) => (
+          <NavLink
+            key={item.href}
+            item={item}
+            active={isActive(item.href)}
+          />
         ))}
       </nav>
 

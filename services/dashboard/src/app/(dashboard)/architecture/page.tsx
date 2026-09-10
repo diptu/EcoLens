@@ -1,106 +1,66 @@
 /**
- * /architecture — End-to-End Model Architecture.
+ * /architecture — System Architecture (tabbed).
  *
- * Purely presentational — no live data fetches, no loading states. The
- * 7-stage flow (data sources → ingestion → warehouse → training →
- * registry → serving → dashboard), the registered-model table, the
- * services/ports, and the "honest gaps" section are all a direct
- * rendering of `docs/architecture/model-architecture.md` (the
- * repo-root doc this page is kept in sync with) — every real name
- * (`ml/train.py`, `training.trigger`, `lstm_demand`, `:8003`, ...) is
- * copied from there, not re-derived or guessed independently. Built
- * from a reference infographic (`ChatGPT Image Sep 9, 2026, 06_52_10
- * PM.png`) for the section layout/flow, adapted to this dashboard's
- * own dark theme and `Card`/`Pill` components rather than the
- * reference's literal light-theme colors — same "match structure, not
- * literal pixels" precedent Analytics & Forecast's own reference image
- * followed.
+ * Rebuilt 2026-09-10 (explicit request, "full tabbed rebuild") into 5
+ * tabs — Overview / Data Pipeline / Model Architecture / Training &
+ * MLOps / Deployment — following the layout of a sixth reference image
+ * (`ChatGPT Image Sep 10, 2026, 02_11_44 PM.png`). That image is a
+ * generic SaaS-dashboard mockup, not derived from this codebase, so its
+ * structure was kept but its content was re-verified rather than copied:
  *
- * The "Deep Learning Model Architecture" section (between Model
- * Training and MLflow Model Registry) has the same "match layout,
- * verify every number" treatment against a second reference image
- * (`ChatGPT Image Sep 9, 2026, 07_05_18 PM.png`) — several of that
- * image's specific numbers turned out not to match `app/models/ml.py`'s
- * real `DemandLSTM` (it depicts two *different*-sized LSTM layers, 128
- * then 64, and 3 independent symmetric quantile heads; the real model
- * is a single 2-layer stacked `nn.LSTM` at 128 hidden units on both
- * layers, and a point head plus two structurally non-negative spread
- * heads, not 3 independent heads) — this section uses the real ones
- * instead, read directly from `app/models/ml.py`,
- * `app/service/ml/features.py`, and `app/service/ml/train.py`.
+ *   - "94.8% Interval Coverage" -- not real; no live-measured coverage
+ *     metric exists anywhere in this codebase. Replaced with the real,
+ *     verifiable number: conformal calibration's ~80% *nominal target*
+ *     coverage (`app/service/ml/conformal.py`).
+ *   - "Online Learning -- Continuous Adaptation" -- not real; fine-tuning
+ *     is warm-started but event-triggered (a dbt-build-completion
+ *     `training.trigger` message), not continuous/streaming. Relabeled
+ *     "Event-Triggered Fine-Tuning".
+ *   - The reference's "Weighted Ensemble -- Learned weights (dynamic)"
+ *     box implies live ensemble fusion; real `ml/blend.py` exists but is
+ *     wired into offline evaluation only (see the Overview tab's
+ *     Multi-Model Architecture card for the full correction) -- kept
+ *     honest there rather than repeated as fact in a KPI card.
+ *   - "Model: LSTM + TFT + TimesFM" is real (this service's own
+ *     `TrainRequest.architecture: Literal["lstm","tft",
+ *     "timesfm_correction"]`) -- kept as a header badge.
+ *   - "v1.0" / "Last updated Aug 26, 2026" / a live "Online" status dot
+ *     -- all dropped. This page stays purely presentational (no live
+ *     data fetches, no loading states, same principle every earlier
+ *     pass on this page followed) -- a static fake timestamp or a
+ *     hardcoded "Online" dot would be a fabricated live-status claim,
+ *     not a real one.
+ *   - The reference's sidebar (Model Performance / Scenarios / Data
+ *     Explorer / Team) was NOT touched -- those aren't real routes in
+ *     this app, and adding stub pages for them was explicitly out of
+ *     scope for this pass.
+ *   - "Prediction Output Example" is kept as a clearly-labeled
+ *     illustrative shape (no fabricated per-day numbers, no fake
+ *     calendar dates) with a link to `/analytics-forecast`, where the
+ *     real, live P10/P50/P90 forecast actually lives.
  *
- * "LSTM Cell — inside one time step" is a third reference pass
- * (`Gemini_Generated_Image_36bx5h36bx5h36bx.jpeg`) — that image was
- * mostly fake chrome around a generic template (a browser/Miro-
- * whiteboard mockup, garbled "Deploymention"/"Monitoringr" labels,
- * non-real "BDN"/"Ms" data-source icons matching nothing in this
- * codebase), so none of that was carried over. The one real, useful,
- * verifiable thing in it was the gate-level LSTM cell view — added
- * here using the standard `nn.LSTM` equations (Hochreiter &
- * Schmidhuber 1997, universal, not repo-specific), consistent with the
- * tensor shapes already established as real.
+ * Tab contents are the same real, source-verified sections this page
+ * already had before this pass (previously one long scroll, momentarily
+ * trimmed to just the Overview flow per an intermediate request, now
+ * restored into tabs rather than re-derived): Data Pipeline (real data
+ * sources / ingestion / warehouse), Model Architecture (the byte-level
+ * DemandLSTM/DemandTFT/conformal-calibration deep-dive), Training &
+ * MLOps (the training flow, MLflow registry, fine-tune/maintenance
+ * paths), Deployment (serving endpoints, key technologies, guarantees,
+ * honest gaps). See each tab's own inline comments for that content's
+ * full provenance against reference images and source files.
  *
- * **Rescoped 2026-09-09** (explicit request): this section now covers
- * only the "Train model (PyTorch) — DemandLSTM / DemandTFT" and
- * "Conformal calibration (CQR)" steps from the Model Training flow
- * above — the Input Features / Feature Engineering sub-sections it
- * used to also carry (both real, just belonging to that flow's earlier
- * "Load data"/"Build features" steps, not "Train model") were removed
- * for scope, not accuracy. `DemandTFT`'s own real architecture
- * (`app/models/tft.py` — Variable Selection Networks, encoder/decoder
- * LSTMs, gated skip connection, static enrichment, interpretable
- * multi-head attention, the same point+2-spread-head output contract
- * as `DemandLSTM`) was added at the same time, since "Train model"
- * names both architectures and only `DemandLSTM`'s had been diagrammed
- * before this pass.
- *
- * The LSTM card's layer-by-layer tensor-shape flow (Input →
- * Layer 1 → Layer 2 → `lstm_out`) is a fourth reference pass
- * (`Gemini_Generated_Image_p848d3p848d3p848.jpeg`) — same fake
- * browser/Miro chrome as the third image, but its core content (a
- * layer-by-layer shape breakdown) was worth verifying rather than
- * discarding outright. Its specific `h_n`/`c_n` shapes turned out
- * wrong: it showed `(B,24,37)`/`(B,24,128)`; a real
- * `nn.LSTM(input_size=37, hidden_size=128, num_layers=2)` call
- * (verified live via `forecast-api`'s own `.venv` PyTorch, not assumed)
- * returns `(num_layers, B, hidden_size)` = `(2, B, 128)` for each —
- * corrected here. More to the point, `DemandLSTM.forward` never uses
- * `h_n`/`c_n` at all (`lstm_out, _ = self.lstm(x)`) — shown as a
- * real, called-out detail rather than silently included as if it fed
- * something downstream.
- *
- * "Neural Network Fundamentals" (right before the DemandLSTM
- * subsection) started as a fifth reference pass -- a generic textbook
- * "Neural Network Architecture" diagram (a plain fully-connected
- * input/hidden/output-layer network + a single node's z=Σw·x+b -> f(z)
- * computation) -- reproduced with two real corrections: the `nn.Linear`
- * building block framing (not a claim `DemandLSTM`/`DemandTFT`
- * themselves are feedforward, both are recurrent) and the 4 real
- * activation functions this codebase actually uses in place of a
- * generic unlabeled "f(z)" (σ/tanh/softplus/softmax, checked against
- * `app/models/ml.py`/`tft.py`).
- *
- * **Rebuilt 2026-09-09** (explicit follow-up request) to use our own
- * `DemandLSTM`'s real layer sizes (Input F=37, Hidden 128×2 stacked
- * layers, Output 3 heads) instead of a generic 4-3-2 network, and
- * extended with a real input → hidden → output → calibration flow plus
- * a real pruning explanation. Pruning (`ml/prune.py`'s `compact_lstm`)
- * is drawn as a branch off the Hidden box, not inline in the main
- * arrow chain — it's a real, LSTM-only, between-training-runs weight-
- * compaction operation on an already-registered version (ranks the 128
- * units by L-norm importance, grouped correctly across each unit's 4
- * non-contiguous gate-block rows, physically drops the lowest-ranked
- * ones' rows *and* columns, then recovery-fine-tunes — a real
- * `keep_fraction=0.5` example run is 128→64 units), not a step that
- * runs on every single inference the way the rest of the chain does.
- *
- * Route history: this replaces the old `/dashboard/architecture` (a
- * different, tabbed "Pipeline Overview/Anomaly Detection/ML Lifecycle/
- * Storage Strategy/Frontend & API" page, disabled 2026-09-09 as
- * redundant) — that route now redirects here rather than 404ing, since
- * "Architecture" is a real concept in this app again, just with
- * different, more specific content this time.
+ * Overview tab adds three new, real pieces on top of the existing
+ * "ML Model Architecture -- Input to Output" flow: a "Model Components"
+ * summary card (LSTM/TFT/TimesFM, one line each, matching the deep-dive
+ * tab's own real detail), a "Training & MLOps Pipeline" mini-flow (Train
+ * & Validate -> Hyperparameter Tuning -> Model Registry & Versioning ->
+ * Deploy -> Monitor & Retrain, every step real and cross-linked to the
+ * Training & MLOps tab), and the illustrative prediction chart above.
  */
+"use client";
+
+import { useState } from "react";
 import Link from "next/link";
 import {
   Activity,
@@ -157,16 +117,6 @@ const ACCENT_BADGE: Record<Accent, string> = {
   rose: "border-rose-400/40 bg-rose-400/10 text-rose-300",
 };
 
-const STAGES: { n: number; label: string; accent: Accent }[] = [
-  { n: 1, label: "Data Sources", accent: "sky" },
-  { n: 2, label: "Ingestion", accent: "emerald" },
-  { n: 3, label: "Warehouse", accent: "amber" },
-  { n: 4, label: "Training", accent: "purple" },
-  { n: 5, label: "Registry", accent: "lime" },
-  { n: 6, label: "Serving", accent: "sky" },
-  { n: 7, label: "Dashboard", accent: "purple" },
-];
-
 function SectionBadge({ n, accent }: { n: number; accent: Accent }) {
   return (
     <span
@@ -209,45 +159,428 @@ function FlowStep({ icon: Icon, label }: { icon: React.ComponentType<{ className
   );
 }
 
+/** Connects two full-size Cards sitting side-by-side in a
+ * `[1fr_auto_1fr]`-style grid — horizontal on desktop, rotates to
+ * vertical when the grid collapses to a single column on mobile. */
+function RowArrow() {
+  return (
+    <div className="flex items-center justify-center py-1 lg:py-0">
+      <ArrowRight className="h-5 w-5 shrink-0 rotate-90 text-white/20 lg:rotate-0" />
+    </div>
+  );
+}
+
+/** Connects two full-width rows stacked vertically — always vertical,
+ * with an optional caption describing what the arrow represents (this
+ * page never draws an unlabeled arrow between non-adjacent boxes; a
+ * caption stands in for a literal long connector). */
+function DownArrow({ label }: { label?: string }) {
+  return (
+    <div className="flex flex-col items-center gap-1 py-0.5 text-center">
+      <ArrowRight className="h-5 w-5 rotate-90 text-white/20" />
+      {label && <span className="max-w-xs text-[10px] leading-snug text-white/30">{label}</span>}
+    </div>
+  );
+}
+
 function FlowArrow() {
   return <ArrowRight className="h-3.5 w-3.5 shrink-0 text-white/25" />;
 }
 
+/** KPI summary card — Overview tab only. Every number here is either a
+ * real, source-verified fact or an explicit target/nominal value, never
+ * a fabricated live metric (see module docstring for the specific
+ * numbers this replaced from the reference image). */
+function KpiCard({
+  icon: Icon,
+  label,
+  value,
+  accent,
+}: {
+  icon: React.ComponentType<{ className?: string }>;
+  label: string;
+  value: string;
+  accent: Accent;
+}) {
+  return (
+    <div className={cn("rounded-xl border bg-white/[0.02] p-3.5", ACCENT_BORDER[accent])}>
+      <span
+        className={cn(
+          "grid h-8 w-8 place-items-center rounded-lg border",
+          ACCENT_BADGE[accent],
+        )}
+      >
+        <Icon className="h-4 w-4" />
+      </span>
+      <div className="mt-2 text-sm font-bold text-white">{value}</div>
+      <div className="mt-0.5 text-[11px] leading-snug text-white/50">{label}</div>
+    </div>
+  );
+}
+
+type TabId = "overview" | "pipeline" | "model" | "training" | "deployment";
+
+const TABS: { id: TabId; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
+  { id: "overview", label: "Overview", icon: Workflow },
+  { id: "pipeline", label: "Data Pipeline", icon: Network },
+  { id: "model", label: "Model Architecture", icon: Cpu },
+  { id: "training", label: "Training & MLOps", icon: GitBranch },
+  { id: "deployment", label: "Deployment", icon: Server },
+];
 export default function ArchitecturePage() {
+  const [tab, setTab] = useState<TabId>("overview");
+
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div>
-          <h1 className="flex items-center gap-2 text-2xl font-bold text-white">
-            <Workflow className="h-6 w-6 text-emerald-100" />
-            End-to-End Model Architecture
-          </h1>
-          <p className="mt-1 text-sm text-white/60">
-            From real electricity-market data to a served demand forecast — every stage below is
-            real, verified against the live code in <code className="rounded bg-black/30 px-1 font-mono text-[11px]">services/ingestion/</code>,{" "}
-            <code className="rounded bg-black/30 px-1 font-mono text-[11px]">services/waerehouse/</code>, and{" "}
-            <code className="rounded bg-black/30 px-1 font-mono text-[11px]">services/forecast-api/</code>.
-          </p>
+      <div className="flex flex-col gap-3">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <h1 className="flex items-center gap-2 text-2xl font-bold text-white">
+              <Workflow className="h-6 w-6 text-emerald-100" />
+              System Architecture
+            </h1>
+            <p className="mt-1 text-sm text-white/60">
+              From real electricity-market data to a served demand forecast — every tab below is
+              real, verified against the live code in <code className="rounded bg-black/30 px-1 font-mono text-[11px]">services/ingestion/</code>,{" "}
+              <code className="rounded bg-black/30 px-1 font-mono text-[11px]">services/waerehouse/</code>, and{" "}
+              <code className="rounded bg-black/30 px-1 font-mono text-[11px]">services/forecast-api/</code>.
+            </p>
+          </div>
+          <Pill color="purple">Model: LSTM + TFT + TimesFM</Pill>
         </div>
-        <div className="flex flex-wrap items-center gap-1.5">
-          {STAGES.map((s, i) => (
-            <span key={s.n} className="flex items-center gap-1.5">
-              <Pill color={s.accent}>
-                {s.n}. {s.label}
-              </Pill>
-              {i < STAGES.length - 1 && <ArrowRight className="h-3 w-3 text-white/20" />}
-            </span>
-          ))}
+
+        {/* Tab bar */}
+        <div className="flex flex-wrap gap-1.5 border-b border-white/10 pb-2.5">
+          {TABS.map((t) => {
+            const Icon = t.icon;
+            const active = tab === t.id;
+            return (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => setTab(t.id)}
+                className={cn(
+                  "flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[12.5px] font-medium transition-colors",
+                  active
+                    ? "bg-emerald-200/10 text-emerald-100 ring-1 ring-emerald-200/25"
+                    : "text-white/55 hover:bg-white/5 hover:text-white/80",
+                )}
+              >
+                <Icon className="h-3.5 w-3.5" />
+                {t.label}
+              </button>
+            );
+          })}
         </div>
       </div>
 
+      {tab === "overview" && (
+        <>
+          {/* KPI row — real/verified only, see module docstring for what
+              was corrected against the reference image's own KPI row. */}
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
+            <KpiCard icon={Boxes} label="Deep Learning Models — LSTM · TFT · TimesFM" value="3" accent="sky" />
+            <KpiCard icon={Percent} label="Probabilistic Forecasts" value="P10 / P50 / P90" accent="lime" />
+            <KpiCard icon={Timer} label="Event-triggered fine-tune, not streaming" value="Fine-Tuning" accent="amber" />
+            <KpiCard icon={ShieldCheck} label="Target coverage (Conformal Calibration, CQR)" value="~80%" accent="emerald" />
+            <KpiCard icon={Workflow} label="From data to insights" value="End-to-End" accent="purple" />
+          </div>
+
+      {/* ML Model Architecture — Input to Output. Layout now follows
+          model.png closely — numbered badges (1-6, same numbering the
+          reference uses) and RowArrow/DownArrow connectors between every
+          box, not just a stacked card grid. See module docstring for the
+          full list of content corrections made against that reference. */}
+      <div className="space-y-2.5 rounded-2xl border border-white/10 bg-white/[0.015] p-4">
+        <div>
+          <h2 className="flex items-center gap-2 text-lg font-bold text-white">
+            <Cpu className="h-5 w-5 text-sky-200" /> ML Model Architecture — Input to Output
+          </h2>
+          <p className="mt-0.5 text-xs text-white/50">
+            Multi-model time-series forecasting with conformal uncertainty and event-triggered
+            fine-tuning — a quick-glance flow before the byte-level DemandLSTM/DemandTFT internals
+            further down this page.
+          </p>
+        </div>
+
+        {/* Row 1: Input Data(1) -> Pre-processing(2) -> Multi-Model Architecture(3) */}
+        <div className="grid grid-cols-1 items-stretch gap-1 lg:grid-cols-[1fr_auto_1fr_auto_1fr]">
+          <Card
+            title={<span className="flex items-center gap-2"><SectionBadge n={1} accent="sky" /> Input Data</span>}
+            subtitle="app/service/ml/features.py — 37 real feature columns"
+            className={cn("border", ACCENT_BORDER.sky)}
+          >
+            <div className="space-y-2">
+              <MiniBox icon={Database} label="Historical Load & Price" sub="demand history, price_mwh" accent="sky" />
+              <MiniBox icon={Cloud} label="Weather" sub="temp_c, apparent_temp_c, humidity_pct, wind_speed_kmh" accent="sky" />
+              <MiniBox icon={Calendar} label="Calendar & Time" sub="is_weekend, is_holiday, cyclical hour/day/month" accent="sky" />
+              <MiniBox icon={Network} label="Generation Mix" sub="total_generation_mw, total_renewable_mw" accent="sky" />
+              <MiniBox icon={Server} label="Cross-Region Demand" sub="total_demand_all_regions_mw, demand_share_of_total, region one-hot" accent="sky" />
+            </div>
+            <p className="mt-2.5 text-[10.5px] text-white/40">
+              Not real inputs: carbon intensity, renewable share — both are downstream of this
+              model&apos;s output (Output, box 6 below).
+            </p>
+          </Card>
+
+          <RowArrow />
+
+          <Card
+            title={<span className="flex items-center gap-2"><SectionBadge n={2} accent="emerald" /> Pre-processing</span>}
+            subtitle="app/service/ml/features.py + data.py"
+            className={cn("border", ACCENT_BORDER.emerald)}
+          >
+            <div className="space-y-2">
+              <MiniBox icon={ShieldCheck} label="Cleaning & Validation" accent="emerald" />
+              <MiniBox icon={Sparkles} label="Feature Engineering" sub="5 lag features (1,2,3,6,12h), 6 rolling stats (mean/std × 6/12/24h)" accent="emerald" />
+              <MiniBox icon={Sigma} label="Normalization & Scaling" sub="per-region StandardScaler (fit_scalers)" accent="emerald" />
+              <MiniBox icon={Layers} label="Sequence Generation" sub="windowed, lookback=24 / horizon=48" accent="emerald" />
+            </div>
+          </Card>
+
+          <RowArrow />
+
+          <Card
+            title={<span className="flex items-center gap-2"><SectionBadge n={3} accent="purple" /> Multi-Model Architecture</span>}
+            subtitle="app/models/ml.py + tft.py + timesfm_adapter.py"
+            className={cn("border", ACCENT_BORDER.purple)}
+          >
+            <div className="space-y-2">
+              <MiniBox icon={Cpu} label="LSTM" sub="2 stacked layers, 128 units, AttentionPool — Production, live" accent="purple" />
+              <MiniBox icon={Cpu} label="TFT" sub="encoder + decoder LSTM (64 units each) + variable selection + interpretable attention — not '2 stacked TFT layers'" accent="purple" />
+              <MiniBox icon={Cpu} label="TimesFM" sub="frozen zero-shot foundation model — NOT fine-tuned; a separate Ridge layer corrects its residuals" accent="purple" />
+            </div>
+            <div className="mt-2.5 flex items-start gap-2 rounded-lg border border-amber-400/20 bg-amber-400/[0.04] p-2.5">
+              <GitBranch className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-300" />
+              <p className="text-[10.5px] text-white/55">
+                <span className="font-semibold text-amber-200">No live ensemble fusion.</span>{" "}
+                <code className="font-mono">ml/blend.py</code> (inverse-recent-MAPE weighting) is real
+                but wired into offline evaluation only — live <code className="font-mono">GET /v1/forecast</code>{" "}
+                serves exactly one architecture at a time via <code className="font-mono">?architecture=</code>{" "}
+                (default <code className="font-mono">lstm</code>).
+              </p>
+            </div>
+          </Card>
+        </div>
+
+        <DownArrow label="raw quantile predictions from whichever architecture served this request" />
+
+        {/* Row 2: Probabilistic Forecasting(4) -> Output(6) */}
+        <div className="grid grid-cols-1 items-stretch gap-1 lg:grid-cols-[1fr_auto_1fr]">
+          <Card
+            title={<span className="flex items-center gap-2"><SectionBadge n={4} accent="lime" /> Probabilistic Forecasting</span>}
+            subtitle="Softplus-based spread heads + CQR"
+            className={cn("border", ACCENT_BORDER.lime)}
+          >
+            <svg viewBox="0 0 200 70" className="w-full" role="img" aria-label="Illustrative P10/P50/P90 forecast band shape — not real data">
+              <polygon points="0,50 40,42 80,34 120,26 160,18 200,10 200,46 160,50 120,54 80,58 40,62 0,66" fill="rgba(190,242,100,0.12)" />
+              <polyline points="0,50 40,42 80,34 120,26 160,18 200,10" stroke="rgba(190,242,100,0.35)" strokeWidth="1" fill="none" strokeDasharray="2,2" />
+              <polyline points="0,58 40,52 80,46 120,40 160,34 200,28" stroke="rgba(190,242,100,0.9)" strokeWidth="1.5" fill="none" />
+              <polyline points="0,66 40,62 80,58 120,54 160,50 200,46" stroke="rgba(190,242,100,0.35)" strokeWidth="1" fill="none" strokeDasharray="2,2" />
+            </svg>
+            <div className="mt-2 space-y-2">
+              <MiniBox icon={Percent} label="P10 / P50 / P90 quantile heads" sub="softplus spreads — P10 ≤ P50 ≤ P90 guaranteed by construction" accent="lime" />
+              <MiniBox icon={ShieldCheck} label="Conformal calibration (CQR)" sub="adjusts raw spread so realized coverage matches the ~80% target" accent="lime" />
+            </div>
+          </Card>
+
+          <RowArrow />
+
+          <Card
+            title={<span className="flex items-center gap-2"><SectionBadge n={6} accent="rose" /> Output</span>}
+            subtitle="app/schemas/forecast/response.py"
+            className={cn("border", ACCENT_BORDER.rose)}
+          >
+            <div className="space-y-2">
+              <MiniBox icon={CheckCircle2} label="Demand Forecast (P10/P50/P90, MW)" sub="the model's real, direct output" accent="rose" />
+              <MiniBox icon={GitBranch} label="Carbon Emissions / Renewable Share" sub="downstream — demand forecast × carbon intensity, computed by GET /v1/emissions/forecast, not a model output" accent="rose" />
+            </div>
+          </Card>
+        </div>
+
+        <DownArrow label="fine-tune signal loops back into Multi-Model Architecture (box 3) above" />
+
+        <Card
+          title={<span className="flex items-center gap-2"><SectionBadge n={5} accent="amber" /> Online & Incremental Learning</span>}
+          subtitle="Event-triggered, not streaming"
+          className={cn("border", ACCENT_BORDER.amber)}
+        >
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <MiniBox
+              icon={Timer}
+              label="Event-triggered incremental fine-tune"
+              sub="warm-started from current Production weights, fired by a dbt-build-completion training.trigger message — not per-sample streaming"
+              accent="amber"
+            />
+            <MiniBox
+              icon={Activity}
+              label="Drift detection — logged, not auto-adaptive"
+              sub="PSI/KS feature drift + weight-norm drift computed and surfaced on a dashboard card; no automatic correction runs"
+              accent="amber"
+            />
+          </div>
+        </Card>
+
+        <DownArrow label="applies to whichever architecture is currently Production in Multi-Model Architecture (box 3) above" />
+
+        <Card title="Model Optimization & Reliability" subtitle="Four independent lifecycle stages — not a sequential pipeline">
+          <div className="flex flex-wrap items-stretch gap-2">
+            <div className="min-w-[150px] flex-1 rounded-lg border border-amber-400/25 bg-amber-400/[0.05] p-2.5">
+              <div className="flex items-center gap-1.5 text-[11px] font-semibold text-white">
+                <ShieldCheck className="h-3.5 w-3.5 text-amber-300" /> Conformal Calibration
+              </div>
+              <p className="mt-1 text-[10.5px] text-white/50">train-time, CQR</p>
+            </div>
+            <FlowArrow />
+            <div className="min-w-[150px] flex-1 rounded-lg border border-purple-400/25 bg-purple-400/[0.05] p-2.5">
+              <div className="flex items-center gap-1.5 text-[11px] font-semibold text-white">
+                <Layers className="h-3.5 w-3.5 text-purple-300" /> Structured Pruning
+              </div>
+              <p className="mt-1 text-[10.5px] text-white/50">optional, offline, LSTM-only</p>
+            </div>
+            <FlowArrow />
+            <div className="min-w-[150px] flex-1 rounded-lg border border-sky-400/25 bg-sky-400/[0.05] p-2.5">
+              <div className="flex items-center gap-1.5 text-[11px] font-semibold text-white">
+                <GitBranch className="h-3.5 w-3.5 text-sky-300" /> Fine-tuning
+              </div>
+              <p className="mt-1 text-[10.5px] text-white/50">event-triggered, warm-start incremental</p>
+            </div>
+            <FlowArrow />
+            <div className="min-w-[150px] flex-1 rounded-lg border border-rose-400/25 bg-rose-400/[0.05] p-2.5">
+              <div className="flex items-center gap-1.5 text-[11px] font-semibold text-white">
+                <Activity className="h-3.5 w-3.5 text-rose-300" /> Fallback to Baseline
+              </div>
+              <p className="mt-1 text-[10.5px] text-white/50">
+                request-time — Redis circuit breaker trips on sustained real error, not &quot;anomaly
+                detected&quot;
+              </p>
+            </div>
+          </div>
+          <p className="mt-2.5 text-[10.5px] text-white/40">
+            Shown left-to-right for layout only — each stage runs at a different, independent point
+            in the lifecycle (train-time / optional offline / event-triggered / request-time), not in
+            this sequence.
+          </p>
+        </Card>
+      </div>
+
+          {/* Model Components — real LSTM/TFT/TimesFM characteristics,
+              same facts as the Model Architecture tab's deep-dive, just
+              one line each. Badges use this app's real MLflow registry
+              vocabulary (Production/Experimental/Foundation), not the
+              reference image's "Primary" (not a real stage name here). */}
+          <Card title="Model Components" subtitle="Key characteristics of each real, registered architecture">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              <div className="rounded-lg border border-sky-400/20 bg-sky-400/[0.03] p-3">
+                <div className="mb-1.5 flex items-center justify-between">
+                  <span className="flex items-center gap-1.5 text-[12.5px] font-semibold text-white">
+                    <Activity className="h-3.5 w-3.5 text-sky-300" /> LSTM
+                  </span>
+                  <Pill color="sky">Production</Pill>
+                </div>
+                <ul className="space-y-1 text-[11px] text-white/60">
+                  <li>2 stacked layers (128 units) + attention pooling</li>
+                  <li>Captures temporal dependencies</li>
+                  <li>Live, serving <code className="font-mono">lstm_demand</code></li>
+                </ul>
+              </div>
+              <div className="rounded-lg border border-purple-400/20 bg-purple-400/[0.03] p-3">
+                <div className="mb-1.5 flex items-center justify-between">
+                  <span className="flex items-center gap-1.5 text-[12.5px] font-semibold text-white">
+                    <Network className="h-3.5 w-3.5 text-purple-300" /> TFT
+                  </span>
+                  <Pill color="purple">Experimental</Pill>
+                </div>
+                <ul className="space-y-1 text-[11px] text-white/60">
+                  <li>Encoder + decoder LSTM (64 units) + variable selection</li>
+                  <li>Models multivariate relationships</li>
+                  <li>Interpretable attention weights</li>
+                </ul>
+              </div>
+              <div className="rounded-lg border border-lime-200/20 bg-lime-200/[0.03] p-3">
+                <div className="mb-1.5 flex items-center justify-between">
+                  <span className="flex items-center gap-1.5 text-[12.5px] font-semibold text-white">
+                    <Boxes className="h-3.5 w-3.5 text-lime-200" /> TimesFM
+                  </span>
+                  <Pill color="lime">Foundation</Pill>
+                </div>
+                <ul className="space-y-1 text-[11px] text-white/60">
+                  <li>Frozen zero-shot foundation model</li>
+                  <li>Transformer-based, pretrained by Google</li>
+                  <li>A separate Ridge layer corrects its residuals</li>
+                </ul>
+              </div>
+            </div>
+          </Card>
+
+          {/* Training & MLOps Pipeline — mini-flow, real steps, each
+              cross-linked (by name) to the Training & MLOps tab's own
+              full detail rather than re-explained here. */}
+          <Card
+            title="Training & MLOps Pipeline"
+            subtitle={
+              <span>
+                From training to production — full detail under the{" "}
+                <button type="button" onClick={() => setTab("training")} className="text-emerald-200 underline decoration-dotted underline-offset-2 hover:text-emerald-100">
+                  Training &amp; MLOps
+                </button>{" "}
+                tab
+              </span>
+            }
+          >
+            <div className="flex flex-wrap items-center gap-2">
+              <FlowStep icon={Database} label="Train & Validate" />
+              <FlowArrow />
+              <FlowStep icon={Sigma} label="Hyperparameter Tuning" />
+              <FlowArrow />
+              <FlowStep icon={GitBranch} label="Model Registry & Versioning" />
+              <FlowArrow />
+              <FlowStep icon={Server} label="Deploy (Production)" />
+              <FlowArrow />
+              <FlowStep icon={Activity} label="Monitor & Retrain" />
+            </div>
+          </Card>
+
+          {/* Prediction Output Example — illustrative only, no
+              fabricated numbers or fake calendar dates. Links to the
+              real, live forecast rather than pretending to be it. */}
+          <Card
+            title="Prediction Output Example"
+            subtitle="Illustrative shape only — not real data"
+            className={cn("border", ACCENT_BORDER.lime)}
+          >
+            <svg viewBox="0 0 400 120" className="w-full" role="img" aria-label="Illustrative P10/P50/P90 forecast band shape — not real data">
+              <polygon
+                points="0,90 50,70 100,85 150,55 200,60 250,35 300,45 350,20 400,30 400,70 350,55 300,65 250,60 200,85 150,80 100,100 50,95 0,105"
+                fill="rgba(190,242,100,0.10)"
+              />
+              <polyline points="0,90 50,70 100,85 150,55 200,60 250,35 300,45 350,20 400,30" stroke="rgba(248,113,113,0.5)" strokeWidth="1" fill="none" strokeDasharray="2,2" />
+              <polyline points="0,98 50,83 100,93 150,68 200,73 250,48 300,55 350,38 400,50" stroke="rgba(190,242,100,0.9)" strokeWidth="1.5" fill="none" />
+              <polyline points="0,105 50,95 100,100 150,80 200,85 250,60 300,65 350,55 400,70" stroke="rgba(125,211,252,0.5)" strokeWidth="1" fill="none" strokeDasharray="2,2" />
+            </svg>
+            <div className="mt-2 flex flex-wrap items-center gap-3 text-[10.5px] text-white/45">
+              <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-rose-300/70" /> P90 (upper)</span>
+              <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-lime-200" /> P50 (expected)</span>
+              <span className="flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-sky-300/70" /> P10 (lower)</span>
+              <span className="text-white/30">·</span>
+              <span>T+1h … T+48h (real horizon shape, illustrative values)</span>
+            </div>
+            <Link href="/analytics-forecast" className="mt-2.5 inline-flex items-center gap-1.5 text-[11px] text-emerald-200 hover:text-emerald-100">
+              See the real, live forecast on Analytics &amp; Forecast <ArrowRight className="h-3 w-3" />
+            </Link>
+          </Card>
+        </>
+      )}
+
+      {tab === "pipeline" && (
+        <>
       {/* 1. Real Data Sources */}
       <Card
         className={cn("border", ACCENT_BORDER.sky)}
         title={
           <span className="flex items-center gap-2.5">
-            <SectionBadge n={1} accent="sky" /> Real Data Sources
+            Real Data Sources
           </span>
         }
       >
@@ -265,7 +598,7 @@ export default function ArchitecturePage() {
         className={cn("border", ACCENT_BORDER.emerald)}
         title={
           <span className="flex items-center gap-2.5">
-            <SectionBadge n={2} accent="emerald" /> Ingestion
+            Ingestion
           </span>
         }
         subtitle="services/ingestion — FastAPI :8003 + Celery worker/beat"
@@ -294,7 +627,7 @@ export default function ArchitecturePage() {
         className={cn("border", ACCENT_BORDER.amber)}
         title={
           <span className="flex items-center gap-2.5">
-            <SectionBadge n={3} accent="amber" /> Warehouse
+            Warehouse
           </span>
         }
         subtitle="services/waerehouse — FastAPI :8004 + RabbitMQ consumer"
@@ -348,31 +681,11 @@ export default function ArchitecturePage() {
         </p>
       </Card>
 
-      {/* 4. Model Training */}
-      <Card
-        className={cn("border", ACCENT_BORDER.purple)}
-        title={
-          <span className="flex items-center gap-2.5">
-            <SectionBadge n={4} accent="purple" /> Model Training
-          </span>
-        }
-        subtitle="services/forecast-api — train-worker container (same image as the serving API)"
-      >
-        <div className="flex flex-wrap items-center gap-2">
-          <FlowStep icon={Database} label="Load data (raw_marts)" />
-          <FlowArrow />
-          <FlowStep icon={Sparkles} label="Build features (calendar, weather, cross-region, lags)" />
-          <FlowArrow />
-          <FlowStep icon={Cpu} label="Train model (PyTorch) — DemandLSTM / DemandTFT" />
-          <FlowArrow />
-          <FlowStep icon={ShieldCheck} label="Conformal calibration (CQR)" />
-          <FlowArrow />
-          <FlowStep icon={Activity} label="Evaluate (walk-forward vs. BaselineForecaster)" />
-          <FlowArrow />
-          <FlowStep icon={GitBranch} label="Log run + register version" />
-        </div>
-      </Card>
+        </>
+      )}
 
+      {tab === "model" && (
+        <>
       {/* Deep Learning Model Architecture — scoped deliberately narrow
           (2026-09-09, explicit request): only the "Train model (PyTorch)
           — DemandLSTM / DemandTFT" and "Conformal calibration (CQR)"
@@ -775,12 +1088,42 @@ export default function ArchitecturePage() {
         </Card>
       </div>
 
+        </>
+      )}
+
+      {tab === "training" && (
+        <>
+      {/* 4. Model Training */}
+      <Card
+        className={cn("border", ACCENT_BORDER.purple)}
+        title={
+          <span className="flex items-center gap-2.5">
+            Model Training
+          </span>
+        }
+        subtitle="services/forecast-api — train-worker container (same image as the serving API)"
+      >
+        <div className="flex flex-wrap items-center gap-2">
+          <FlowStep icon={Database} label="Load data (raw_marts)" />
+          <FlowArrow />
+          <FlowStep icon={Sparkles} label="Build features (calendar, weather, cross-region, lags)" />
+          <FlowArrow />
+          <FlowStep icon={Cpu} label="Train model (PyTorch) — DemandLSTM / DemandTFT" />
+          <FlowArrow />
+          <FlowStep icon={ShieldCheck} label="Conformal calibration (CQR)" />
+          <FlowArrow />
+          <FlowStep icon={Activity} label="Evaluate (walk-forward vs. BaselineForecaster)" />
+          <FlowArrow />
+          <FlowStep icon={GitBranch} label="Log run + register version" />
+        </div>
+      </Card>
+
       {/* 5. MLflow Model Registry */}
       <Card
         className={cn("border", ACCENT_BORDER.lime)}
         title={
           <span className="flex items-center gap-2.5">
-            <SectionBadge n={5} accent="lime" /> MLflow Model Registry
+            MLflow Model Registry
           </span>
         }
       >
@@ -821,6 +1164,30 @@ export default function ArchitecturePage() {
         </div>
       </Card>
 
+      {/* Fine-tune / maintenance paths */}
+      <Card title="Fine-tune & maintenance paths" subtitle="Real, but separate from the primary train → register → serve cycle above">
+        <div className="flex flex-wrap gap-2">
+          {[
+            ["ml/incremental.py / incremental_tft.py", "incremental fine-tune, triggered from Data Ingestion's \"Fine-tune\" action"],
+            ["ml/prune.py", "structured pruning + fine-tune recovery"],
+            ["ml/tune.py", "grid search over hidden_size / lr"],
+            ["adaptive_calibration.py", "re-widens conformal intervals against what was actually served"],
+            ["bias_correction.py / divergence.py / blend.py", "post-hoc correction layers"],
+            ["onnx_import.py / model_import.py", "importing an externally trained bundle into the registry"],
+          ].map(([name, desc]) => (
+            <div key={name} className="min-w-[220px] flex-1 rounded-lg border border-white/10 bg-white/[0.02] p-3">
+              <div className="font-mono text-[11px] text-emerald-100">{name}</div>
+              <div className="mt-1 text-[11px] text-white/50">{desc}</div>
+            </div>
+          ))}
+        </div>
+      </Card>
+
+        </>
+      )}
+
+      {tab === "deployment" && (
+        <>
       {/* 6 + 7 side by side on wide screens */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
         {/* 6. Model Serving */}
@@ -828,7 +1195,7 @@ export default function ArchitecturePage() {
           className={cn("border", ACCENT_BORDER.sky)}
           title={
             <span className="flex items-center gap-2.5">
-              <SectionBadge n={6} accent="sky" /> Model Serving
+              Model Serving
             </span>
           }
           subtitle="services/forecast-api — api container, FastAPI :8000"
@@ -858,7 +1225,7 @@ export default function ArchitecturePage() {
           className={cn("border", ACCENT_BORDER.purple)}
           title={
             <span className="flex items-center gap-2.5">
-              <SectionBadge n={7} accent="purple" /> Dashboard &amp; Users
+              Dashboard &amp; Users
             </span>
           }
           subtitle="services/dashboard — Next.js, static export"
@@ -879,25 +1246,6 @@ export default function ArchitecturePage() {
           </p>
         </Card>
       </div>
-
-      {/* Fine-tune / maintenance paths */}
-      <Card title="Fine-tune & maintenance paths" subtitle="Real, but separate from the primary train → register → serve cycle above">
-        <div className="flex flex-wrap gap-2">
-          {[
-            ["ml/incremental.py / incremental_tft.py", "incremental fine-tune, triggered from Data Ingestion's \"Fine-tune\" action"],
-            ["ml/prune.py", "structured pruning + fine-tune recovery"],
-            ["ml/tune.py", "grid search over hidden_size / lr"],
-            ["adaptive_calibration.py", "re-widens conformal intervals against what was actually served"],
-            ["bias_correction.py / divergence.py / blend.py", "post-hoc correction layers"],
-            ["onnx_import.py / model_import.py", "importing an externally trained bundle into the registry"],
-          ].map(([name, desc]) => (
-            <div key={name} className="min-w-[220px] flex-1 rounded-lg border border-white/10 bg-white/[0.02] p-3">
-              <div className="font-mono text-[11px] text-emerald-100">{name}</div>
-              <div className="mt-1 text-[11px] text-white/50">{desc}</div>
-            </div>
-          ))}
-        </div>
-      </Card>
 
       {/* Key Technologies + Key Guarantees + Companion Docs */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
@@ -978,10 +1326,12 @@ export default function ArchitecturePage() {
           </li>
         </ul>
       </Card>
+        </>
+      )}
 
       <p className="flex items-center gap-1.5 pt-1 text-[11px] text-white/30">
         <Link2 className="h-3 w-3" />
-        Full detail, real service ports, and the complete ASCII flow diagrams live in{" "}
+        The complete ASCII flow diagrams and full service-port detail live in{" "}
         <code className="font-mono">docs/architecture/model-architecture.md</code> at the repo root.
       </p>
 

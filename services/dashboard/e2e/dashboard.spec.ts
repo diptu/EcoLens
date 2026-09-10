@@ -59,12 +59,20 @@ test.describe("/analytics-forecast", () => {
 });
 
 test.describe("/architecture", () => {
-  test("renders the 7-stage flow", async ({ page }) => {
+  test("renders the Overview tab by default", async ({ page }) => {
     await page.goto("/architecture");
-    await expect(page.getByRole("heading", { name: /End-to-End Model Architecture/ })).toBeVisible();
+    await expect(page.getByRole("heading", { name: /System Architecture/ })).toBeVisible();
+    await expect(page.getByText("ML Model Architecture — Input to Output")).toBeVisible();
+    await expect(page.getByText("Multi-Model Architecture").first()).toBeVisible();
+    await expect(page.getByText("Model Optimization & Reliability")).toBeVisible();
+  });
+
+  test("tabs switch content", async ({ page }) => {
+    await page.goto("/architecture");
+    await page.getByRole("button", { name: "Data Pipeline" }).click();
     await expect(page.getByText("Real Data Sources")).toBeVisible();
-    await expect(page.getByText("MLflow Model Registry")).toBeVisible();
-    await expect(page.getByText("Model Serving")).toBeVisible();
+    await page.getByRole("button", { name: "Deployment" }).click();
+    await expect(page.getByText("Model Serving", { exact: true })).toBeVisible();
   });
 });
 

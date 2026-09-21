@@ -51,11 +51,15 @@ class EvaluateModelRequest(AppBaseModel):
 
     model_name: str | None = None
     # `None` defaults to `"lstm"`, same server-side default `TrainRequest.
-    # architecture` uses. `"timesfm_correction"` isn't supported here --
-    # `evaluate_timesfm_and_log` has a fundamentally different signature
-    # (no registered version to load; it downloads a pinned HuggingFace
-    # checkpoint directly), not just a different dispatch target.
-    architecture: Literal["lstm", "tft"] | None = None
+    # architecture` uses. `"timesfm_correction"` dispatches to
+    # `evaluate_timesfm_correction_and_log` (the registered Ridge
+    # residual-correction layer's own real walk-forward evaluate, same
+    # `EvaluationRunResult` shape as the lstm/tft paths) -- distinct from
+    # raw zero-shot TimesFM's `evaluate_timesfm_and_log`, which has a
+    # fundamentally different signature (no registered version to load;
+    # it downloads a pinned HuggingFace checkpoint directly) and stays
+    # CLI-only (`ecolens-forecast evaluate-timesfm`), not reachable here.
+    architecture: Literal["lstm", "tft", "timesfm_correction"] | None = None
     regions: list[str] | None = None
     horizon: int | None = None
     n_origins: int = 10

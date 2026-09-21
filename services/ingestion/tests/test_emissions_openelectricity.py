@@ -1,5 +1,6 @@
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -12,6 +13,34 @@ pytestmark = pytest.mark.anyio
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
+
+
+def test_to_records_linear_does_not_double_shift_an_already_aware_timestamp():
+    # Real bug found + fixed 2026-09-12 (see `_to_records_linear`'s own
+    # docstring): the real OE API's `point.timestamp` comes back already
+    # tz-aware in the network's own local offset (e.g. `22:05:00+10:00`
+    # for NEM) -- not naive UTC as the SDK's own `_create_network_date`
+    # assumes. Calling that SDK method here used to add a *second*
+    # `+offset` on top of an already-correct value, so `_fetch_metric`'s
+    # single reversing `tz_localize().tz_convert("UTC")` left the local
+    # clock digits mislabeled as UTC (every ts landing `offset` hours in
+    # the future). `_to_records_linear` must use `point.timestamp`
+    # as-is, just dropping its already-correct tzinfo.
+    aware_local = datetime(2026, 9, 12, 22, 5, tzinfo=timezone(timedelta(hours=10)))
+    point = SimpleNamespace(timestamp=aware_local, value=100.0)
+    result = SimpleNamespace(
+        columns=SimpleNamespace(fueltech="coal", unit_code=None), data=[point]
+    )
+    series = SimpleNamespace(
+        results=[result], network_timezone_offset="+10:00", metric="power"
+    )
+    response = SimpleNamespace(data=[series])
+
+    records = oe._to_records_linear(response)
+
+    assert len(records) == 1
+    assert records[0]["interval"] == datetime(2026, 9, 12, 22, 5)
+    assert records[0]["interval"].tzinfo is None
 
 
 class FakeResponse:
@@ -72,7 +101,11 @@ async def test_fetch_emissions_returns_long_form(monkeypatch):
     df = await oe.fetch_emissions("WEM", ts_request)
 
     assert list(df.columns) == ["ts", "fuel_type", "value"]
-    assert df.iloc[0]["value"] == 12.3
+    # Real unit bug found + fixed 2026-09-12 (see `fetch_emissions`'s own
+    # docstring): OE's raw `emissions` value is tonnes CO2e, not kg --
+    # `fetch_emissions` now converts (×1000) so its "value in kgCO2e"
+    # contract actually holds. 12.3 raw (tonnes) -> 12,300 kg.
+    assert df.iloc[0]["value"] == 12_300.0
 
 
 async def test_fetch_network_data_passes_network_region_through(monkeypatch):

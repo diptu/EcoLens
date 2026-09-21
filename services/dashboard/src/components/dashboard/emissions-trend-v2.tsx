@@ -597,7 +597,7 @@ function RangeIcon({ small }: { small?: boolean }) {
 
 /** Catmull-Rom -> cubic Bezier SVG path (tension 0.35 = loose, natural
  * curve). Pure pixel-space -- same function used by the real chart's
- * `smoothPath` in `app/(dashboard)/dashboard/executive/page.tsx`. */
+ * `smoothPath` in `app/(dashboard)/page.tsx`. */
 function smoothPath(pts: Array<[number, number]>, tension: number = 0.5): string {
   if (pts.length === 0) return "";
   if (pts.length === 1) return `M ${pts[0][0].toFixed(2)} ${pts[0][1].toFixed(2)}`;
@@ -633,7 +633,7 @@ function smoothPath(pts: Array<[number, number]>, tension: number = 0.5): string
  * runs `smoothPath` on the reversed bottom points too, then rewrites
  * its leading "M" to "L" so it continues the top curve into one closed
  * path -- same fix already applied to the real chart's `smoothBandPath`
- * in `app/(dashboard)/dashboard/executive/page.tsx`. */
+ * in `app/(dashboard)/page.tsx`. */
 function smoothBandPath(topPts: Array<[number, number]>, botPts: Array<[number, number]>, tension: number = 0.5): string {
   if (topPts.length === 0 || botPts.length === 0) return "";
   if (topPts.length !== botPts.length) return "";

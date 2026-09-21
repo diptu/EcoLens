@@ -13,6 +13,7 @@ from app.schemas.model.experiments import (
     MlflowRunOut,
     MlflowRunsListResponse,
 )
+from app.schemas.model.import_bundle import ModelImportResponse
 from app.schemas.model.loss_curve import LossCurveOut, LossCurvePointOut
 from app.schemas.model.response import ModelInfo
 from app.schemas.model.training import (
@@ -41,6 +42,7 @@ __all__ = [
     "LossCurvePointOut",
     "MlflowRunOut",
     "MlflowRunsListResponse",
+    "ModelImportResponse",
     "ModelInfo",
     "ModelVersionOut",
     "ModelVersionsListResponse",

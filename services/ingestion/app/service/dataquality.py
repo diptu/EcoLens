@@ -41,6 +41,8 @@ from app.models.datasources import CATALOG, CATALOG_BY_ID
 from app.schemas.data_quality import (
     BySourceSummary,
     DataQualitySummaryResponse,
+    OpenRiskOut,
+    OpenRisksListResponse,
     OverallSummary,
     PublicDataQualitySummaryResponse,
 )
@@ -299,3 +301,61 @@ async def get_public_summary(
         data_quality_score_pct=full.overall.pass_rate_pct_24h,
         open_risks_high_plus=open_risks,
     )
+
+
+OPEN_RISKS_CACHE_TTL = 60
+
+
+async def get_open_risks(db: AsyncSession, redis: Redis) -> OpenRisksListResponse:
+    """The actual per-issue detail behind `PublicDataQualitySummaryResponse.
+    open_risks_high_plus` -- real bug, confirmed live 2026-08-20: the
+    Executive Dashboard's "Open Risks" KPI showed a bare count ("1
+    high+") with no way to see which service it was or why, because
+    `_generate_issues`'s own title/description/suggested_action per
+    issue were computed and then discarded -- only counted into
+    `by_severity_24h`, never returned anywhere. This is the same real
+    issues (`_generate_issues`: consecutive ingest-run failures, real
+    `meta.anomalies` clusters, actionable `meta.schema_drifts` rows),
+    filtered to the identical `critical`/`high` severity + 24h-recency
+    condition `get_summary`'s `by_severity_24h` loop applies -- so this
+    list's length always matches `open_risks_high_plus` exactly, never a
+    separately-drifting count.
+
+    Cached the same way/TTL as `get_summary` -- this is real work (a
+    live `meta.anomalies`/`meta._ingest_log`/`meta.schema_drifts` scan
+    via `_generate_issues`), not free to recompute per request.
+    """
+    cache_key = "dataquality:open_risks:v1"
+    cached = await redis.get(cache_key)
+    if cached is not None:
+        return OpenRisksListResponse.model_validate_json(cached)
+
+    now = datetime.now(UTC)
+    cutoff_24h = now - timedelta(hours=24)
+    issues = await _generate_issues(db)
+
+    risks = [
+        OpenRiskOut(
+            id=issue["id"],
+            source_id=issue["source_id"],
+            source_name=CATALOG_BY_ID[issue["source_id"]].name,
+            severity=issue["severity"],
+            category=issue["category"],
+            title=issue["title"],
+            description=issue["description"],
+            first_seen_at=issue["first_seen_at"],
+            last_seen_at=issue["last_seen_at"],
+            occurrences=issue["occurrences"],
+            suggested_action=issue["suggested_action"],
+        )
+        for issue in issues
+        if issue["severity"] in ("critical", "high")
+        and (issue["first_seen_at"] >= cutoff_24h or issue["last_seen_at"] >= cutoff_24h)
+    ]
+    # Most severe first (critical before high), then most recently seen
+    # within each -- the ones a human should look at first, first.
+    risks.sort(key=lambda r: (r.severity != "critical", -r.last_seen_at.timestamp()))
+
+    response = OpenRisksListResponse(as_of=now, data=risks)
+    await redis.set(cache_key, response.model_dump_json(), ex=OPEN_RISKS_CACHE_TTL)
+    return response

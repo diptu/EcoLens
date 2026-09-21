@@ -1,8 +1,9 @@
 -- Row-level carbon intensity + emissions, one row per (ts, network_code,
--- region) at OpenElectricity's own reporting cadence (5-min NEM, 30-min
--- WEM — the "5min" in this mart's name is NEM's cadence and the name
--- README documents; WEM rows land here too at their own 30-min cadence,
--- not literally every 5 minutes).
+-- region) at OpenElectricity's own reporting cadence (5-min for both
+-- NEM and WEM as of WEM's post-Oct-2023-reform move to 5-min dispatch --
+-- see int_fuel_emissions.sql's own comment for the real WEM-cadence bug
+-- fixed 2026-08-15 elsewhere in this pipeline. "5min" in this mart's
+-- name is now accurate for every region it carries, not NEM-only.)
 --
 -- Incremental, not `table` — see `fct_energy_demand.sql`'s header for
 -- why (`TODO.md` Phase 1: `table` + `raw.*`'s 60-day pruning silently

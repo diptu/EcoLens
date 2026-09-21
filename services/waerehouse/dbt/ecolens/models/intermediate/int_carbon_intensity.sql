@@ -1,6 +1,8 @@
 -- Per-(ts, network_code, region) carbon intensity: each fuel's MW
--- converted to MWh over its reporting interval (5-min NEM, 30-min WEM --
--- task.md's cadence table), weighted by ecoLens's own
+-- converted to MWh over its reporting interval (5-min for both NEM and
+-- WEM -- see int_fuel_emissions.sql's own comment for the real bug this
+-- used to carry, WEM hardcoded to 30-min here too until fixed
+-- 2026-08-15), weighted by ecoLens's own
 -- seeds/emissions_factors.csv. This is README's "live_mix_weighted"
 -- method -- deliberately not the same number as
 -- stg_openelectricity_mix.intensity_kg_per_mwh (OpenElectricity's own
@@ -37,10 +39,10 @@ provider as (
         network_code,
         region,
         total_generation_mw
-            * (case network_code when 'NEM' then 5.0 / 60 when 'WEM' then 30.0 / 60 else 30.0 / 60 end)
+            * (case network_code when 'NEM' then 5.0 / 60 when 'WEM' then 5.0 / 60 else 5.0 / 60 end)
             as provider_generation_mwh,
         total_generation_mw
-            * (case network_code when 'NEM' then 5.0 / 60 when 'WEM' then 30.0 / 60 else 30.0 / 60 end)
+            * (case network_code when 'NEM' then 5.0 / 60 when 'WEM' then 5.0 / 60 else 5.0 / 60 end)
             * intensity_kg_per_mwh
             as provider_emissions_kgco2e
     from {{ ref('stg_openelectricity_mix') }}

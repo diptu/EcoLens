@@ -124,6 +124,7 @@ def _build_bundle(lookback: int = 8, horizon: int = 4) -> object:
         pass
 
     bundle = _Bundle()
+    bundle.architecture = "lstm"
     bundle.model = model
     bundle.feature_scalers = {
         r: feature_scaler for r in ("NSW1", "QLD1", "VIC1", "SA1", "TAS1")

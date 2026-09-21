@@ -93,12 +93,13 @@ class Settings(BaseSettings):
     redis_db: int = 0
 
     # How long `raw_marts.*` rows stay in the *primary* database before
-    # being archived to `raw_marts_database_url` and pruned. Defaults to
-    # `retention_days` for consistency with `raw.*`'s own window, but
-    # kept as its own field since marts rows are much smaller
-    # individually (aggregated, not raw per-reading) -- an operator may
-    # reasonably want to keep more days of marts locally than raw.
-    marts_local_retention_days: int = 60
+    # being archived to `raw_marts_database_url` and pruned. Was 60
+    # (matching `retention_days`, `raw.*`'s own window); lowered to 30
+    # (2026-09-12, explicit request) -- kept as its own field since
+    # marts rows are much smaller individually (aggregated, not raw
+    # per-reading) -- an operator may reasonably want to keep more days
+    # of marts locally than raw.
+    marts_local_retention_days: int = 30
 
     # `app.core.response_cache` (2026-08-11, real fix: `GET /v1/dbt/
     # build/last`/`/build/runs` confirmed live at ~2.3-2.7s/call with no

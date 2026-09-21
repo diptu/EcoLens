@@ -3,6 +3,8 @@ from __future__ import annotations
 from app.schemas.data_quality.response import (
     BySourceSummary,
     DataQualitySummaryResponse,
+    OpenRiskOut,
+    OpenRisksListResponse,
     OverallSummary,
     PublicDataQualitySummaryResponse,
 )
@@ -10,6 +12,8 @@ from app.schemas.data_quality.response import (
 __all__ = [
     "BySourceSummary",
     "DataQualitySummaryResponse",
+    "OpenRiskOut",
+    "OpenRisksListResponse",
     "OverallSummary",
     "PublicDataQualitySummaryResponse",
 ]

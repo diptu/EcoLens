@@ -42,6 +42,30 @@ RUN pip install --no-cache-dir \
         psycopg2-binary==2.9.10 \
         boto3==1.35.99
 
+# Real, hard blocker hit deploying to a Namecheap Quasar VPS
+# (2026-09-21): its hypervisor exposes only a generic `QEMU Virtual CPU
+# version 2.5+` to the guest -- missing sse4_2/popcnt/etc, below the
+# "x86-64-v2" baseline every PyPI numpy wheel has required since numpy's
+# meson-based build (~2.x). `mlflow` pulls in pandas -> numpy
+# transitively (`mlflow.data.pandas_dataset`), and crashed on this same
+# box with `RuntimeError: NumPy was built with baseline optimizations:
+# (X86_V2) but your machine doesn't support: (X86_V2)` -- not a
+# runtime-togglable dispatch feature, the *compiled minimum* the
+# prebuilt wheel targets. Rebuilding from source with
+# `-Dcpu-baseline=none -Dcpu-dispatch=none` (pure portable x86-64, no
+# SIMD requirement) fixes it, same as `forecast-api`/`ingestion`/
+# `warehouse`'s own Dockerfiles. Version isn't hardcoded -- read back
+# whatever pip actually resolved above, since this image doesn't pin
+# numpy directly (mlflow's own transitive constraint decides it).
+RUN NUMPY_VERSION=$(python -c "import numpy; print(numpy.__version__)") \
+    && apt-get update && apt-get install -y --no-install-recommends \
+         build-essential gfortran pkg-config libopenblas-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --force-reinstall --no-deps --no-binary numpy \
+         --config-settings=setup-args=-Dcpu-baseline=none \
+         --config-settings=setup-args=-Dcpu-dispatch=none \
+         numpy==${NUMPY_VERSION}
+
 
 FROM python:3.12-slim AS runtime
 
@@ -51,8 +75,14 @@ FROM python:3.12-slim AS runtime
 # real init process, a worker that dies gets silently reparented with no
 # reaper, and a real deploy/restart's `SIGTERM` has no guaranteed correct
 # forwarding to the whole process tree.
+# `libopenblas0` -- the source-rebuilt numpy above (builder stage)
+# links against OpenBLAS at import time; only `libopenblas-dev` was
+# installed there, and multi-stage `COPY --from=builder` never carries
+# apt packages across, just the venv itself. Without the runtime shared
+# lib in *this* stage too, numpy import fails with `libopenblas.so.0:
+# cannot open shared object file`.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tini \
+    && apt-get install -y --no-install-recommends tini libopenblas0 \
     && rm -rf /var/lib/apt/lists/*
 
 # Real, unprivileged runtime user -- nothing here needs root once the

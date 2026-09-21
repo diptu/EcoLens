@@ -82,7 +82,7 @@ export default function ResourcesPage() {
           <div className="relative">
             <GlobeVisual />
             <div className="mt-6">
-              <StatGrid stats={RESOURCE_STATS.map(toStat)} variant="sidebar" />
+              <StatGrid stats={RESOURCE_STATS.map(toStat)} />
             </div>
           </div>
         </div>
@@ -132,7 +132,6 @@ export default function ResourcesPage() {
 
       {/* Join community banner */}
       <CtaBanner
-        variant="minimal"
         heading="Join a global community"
         highlight={<span className="block text-lime-100">of sustainability leaders.</span>}
         body="Share knowledge. Exchange ideas. Create impact together."

@@ -17,8 +17,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { m, AnimatePresence, useReducedMotion } from "framer-motion";
 import {
-  Calendar, ChevronDown, Clock, FileText, Plus, Sparkles,
-  Eye, Download, Trash2, X, Check, Copy, Mail, Globe, Lock,
+  ChevronDown, Clock, FileText, Plus, Sparkles,
+  Eye, Download, Trash2, X, Check, Copy, Mail, Lock,
   FileDown, FileSpreadsheet, FileText as FilePdf, Search, Filter,
 } from "lucide-react";
 
@@ -29,9 +29,8 @@ import {
 
 import { Card } from "@/components/dashboard/card";
 import { KpiCard } from "@/components/dashboard/kpi-card";
-import { Pill, NameCell, ActionsMenu } from "@/components/dashboard/data-table";
+import { Pill, NameCell } from "@/components/dashboard/data-table";
 import { DonutChart, BarChart } from "@/components/dashboard/charts";
-import { DetailModal } from "@/components/dashboard/detail-modal";
 
 const TYPE_ICON: Record<string, string> = {
   ghg:   "🌿",
@@ -42,17 +41,6 @@ const TYPE_ICON: Record<string, string> = {
   csrd:  "🌱",
   custom:"🛠️",
   audit: "🔒",
-};
-
-const FRAMEWORK_COLORS: Record<string, string> = {
-  ESG:            "rgba(16,185,129,0.95)",
-  "GHG Protocol": "rgba(132,204,22,0.95)",
-  "Scope 1/2/3":  "rgba(56,189,248,0.95)",
-  CDP:            "rgba(244,63,94,0.95)",
-  TCFD:           "rgba(168,85,247,0.95)",
-  CSRD:           "rgba(245,158,11,0.95)",
-  Custom:         "rgba(148,163,184,0.6)",
-  "Audit Package":"rgba(245,158,11,0.95)",
 };
 
 type ReportFormat = "PDF" | "Excel" | "CSV";
@@ -400,7 +388,7 @@ export default function ReportsPage() {
                 thickness={20}
                 centerLabel={`${REPORT_FRAMEWORK_BREAKDOWN.reduce((s, f) => s + f.value, 0)}`}
                 centerSub="Total"
-                formatTooltip={(label, value, pct) => (
+                formatTooltip={(_label, value, pct) => (
                   <div className="space-y-0.5">
                     <div className="flex items-center gap-2">
                       <span className="text-white/65">Reports</span>
@@ -609,7 +597,7 @@ export default function ReportsPage() {
             labels={["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]}
             height={200}
             color="rgba(132,204,22,0.95)"
-            formatTooltip={(label, value) => (
+            formatTooltip={(_label, value) => (
               <div className="flex items-center gap-2">
                 <span className="text-white/65">Reports generated</span>
                 <span className="ml-auto font-mono font-medium text-white">{value}</span>

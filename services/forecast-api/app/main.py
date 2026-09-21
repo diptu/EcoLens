@@ -57,6 +57,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     energy_registry = EnergyModelRegistry(settings.energy_forecast_model_name)
     app.state.energy_model_registry = energy_registry
 
+    # `lstm_demand_tft` (TFT) is a real, trained/evaluated architecture
+    # (`ml/train_tft.py`, `ml/evaluate.py`, `GET /v1/model/versions?
+    # model_name=lstm_demand_tft`) but is never polled/served live --
+    # this service serves exactly one architecture in production (LSTM,
+    # `registry` above). See `api/v1/forecast/routes.py`'s module
+    # docstring for the decision.
+
     # Loads whatever's in Production *before* accepting traffic (so the
     # very first request doesn't 503 with "model not loaded" just because
     # the poll hadn't run yet), then keeps polling in the background —

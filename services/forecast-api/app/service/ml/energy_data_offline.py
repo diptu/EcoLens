@@ -54,8 +54,6 @@ _INGESTION_ENV = _INGESTION_DIR / ".env"
 _LOCAL_CACHE = _INGESTION_DIR / "data" / "training" / "master.duckdb"
 _R2_KEY = "training/master.duckdb"
 
-REGIONS_ALL: tuple[str, ...] = ("NSW1", "QLD1", "SA1", "TAS1", "VIC1", "WEM")
-
 
 def _parse_env_file(path: Path) -> dict[str, str]:
     """Minimal `KEY=VALUE` `.env` parser -- avoids adding a

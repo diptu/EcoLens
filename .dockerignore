@@ -18,13 +18,24 @@
 .claude/
 
 # Python
-__pycache__/
-*.pyc
-.mypy_cache/
-.ruff_cache/
-.pytest_cache/
-.coverage
-*.egg-info/
+# `**/` prefix required on every one of these -- real, confirmed-live gap
+# (2026-08-19): Docker's `.dockerignore` matching, unlike `.gitignore`,
+# does NOT match a bare pattern at arbitrary depth -- `.coverage` alone
+# only excludes a file literally at the context root
+# (`docker-compose.yml`'s `context: .`), never
+# `services/ingestion/.coverage`, which is where every one of these
+# actually lives (each service's own `COPY services/<name> .` copies
+# from its own subdirectory). Confirmed live: `services/ingestion/
+# .coverage`/`.mypy_cache`/`.pytest_cache`/`.ruff_cache` were all still
+# landing in the built `ingestion` image despite this section
+# "excluding" them by name.
+**/__pycache__/
+**/*.pyc
+**/.mypy_cache/
+**/.ruff_cache/
+**/.pytest_cache/
+**/.coverage
+**/*.egg-info/
 
 # Per-service virtualenvs -- each Dockerfile runs its own `uv sync`
 # inside its own build stage; a locally-synced `.venv` must never be
@@ -61,6 +72,16 @@ services/dashboard/.next/
 *.ipynb
 
 # Celery Beat's local schedule file / Redis dump -- local runtime state
-# from `make dev`, not source.
-celerybeat-schedule*
-dump.rdb
+# from `make dev`, not source. `**/` prefix required -- same real,
+# confirmed-live gap this file's own Python section above now documents
+# (a bare pattern only matches at the context root, never
+# `services/ingestion/celerybeat-schedule*`, where this actually lives).
+# Confirmed live: a host-written, macOS-native GNU-dbm-format
+# `celerybeat-schedule` file (from a local `make ingestion` run) baked
+# straight into the `ingestion-beat` image via this exact gap, and the
+# container's own Celery Beat process crash-looped on it every single
+# start with `dbm.error: db type could not be determined` -- a stale
+# host artifact silently overriding whatever fresh schedule file the
+# container would otherwise have started from cleanly.
+**/celerybeat-schedule*
+**/dump.rdb

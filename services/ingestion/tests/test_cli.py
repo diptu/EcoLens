@@ -140,7 +140,7 @@ class TestBackfillCommand:
 
         captured = {}
 
-        async def fake_backfill(sources, start, end, lookback_minutes):
+        async def fake_backfill(sources, start, end, lookback_minutes, duckdb_only=False):
             captured["sources"] = sources
             return {}
 
@@ -158,7 +158,7 @@ class TestBackfillCommand:
     ):
         from datetime import date
 
-        async def fake_backfill(sources, start, end, lookback_minutes):
+        async def fake_backfill(sources, start, end, lookback_minutes, duckdb_only=False):
             return {("bom", date(2026, 1, 1)): "failed: upstream down"}
 
         monkeypatch.setattr(cli, "run_backfill_range", fake_backfill)

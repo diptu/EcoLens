@@ -160,8 +160,25 @@ def ingest_holidays_cmd(year: int | None, triggered_by: str) -> None:
     help="Repeatable. Defaults to all backfillable sources.",
 )
 @click.option("--lookback-minutes", type=int, default=DEFAULT_LOOKBACK_MINUTES)
+@click.option(
+    "--duckdb-only",
+    is_flag=True,
+    default=False,
+    help=(
+        "Stage every fetched row into the local shared DuckDB staging "
+        "file only -- no R2 upload, no RabbitMQ landed-event publish, so "
+        "the real Neon-backed raw.* tables are never touched. Also has "
+        "no 90-day range cap, unlike POST /v1/data-sources/{id}/backfill "
+        "(that cap only exists in the HTTP layer's Redis-lock TTL math, "
+        "not in this function)."
+    ),
+)
 def backfill(
-    from_: datetime, to_: datetime, sources: tuple[str, ...], lookback_minutes: int
+    from_: datetime,
+    to_: datetime,
+    sources: tuple[str, ...],
+    lookback_minutes: int,
+    duckdb_only: bool,
 ) -> None:
     """Backfill missing days for one or more ingestion sources (same path
     `POST /v1/data-sources/{id}/backfill` uses). No `--skip-dbt` flag,
@@ -174,7 +191,9 @@ def backfill(
 
     selected = sources or BACKFILLABLE_SOURCES
 
-    results = asyncio.run(run_backfill_range(selected, start, end, lookback_minutes))
+    results = asyncio.run(
+        run_backfill_range(selected, start, end, lookback_minutes, duckdb_only=duckdb_only)
+    )
     for (source, day), outcome in results.items():
         click.echo(f"{day} {source}: {outcome}")
 

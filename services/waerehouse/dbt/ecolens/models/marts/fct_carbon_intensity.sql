@@ -2,7 +2,7 @@
 -- from fct_emissions_5min's row-level detail: this is the "time-weighted
 -- average intensity" README's Emissions model section describes the
 -- footprint calculator using, pre-aggregated so `/v1/footprint` doesn't
--- have to re-weight raw 5-/30-min rows on every request. Table-materialized
+-- have to re-weight raw 5-min rows on every request. Table-materialized
 -- (dbt_project.yml).
 --
 -- `todo-model-training.md` Phase 7: `live_provider_intensity_kgco2e_per_mwh`

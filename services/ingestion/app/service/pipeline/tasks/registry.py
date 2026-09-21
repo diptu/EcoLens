@@ -77,6 +77,7 @@ async def run_source(
     *,
     triggered_by: str = "manual",
     bypass_breaker: bool = False,
+    duckdb_only: bool = False,
     **kwargs: Any,
 ) -> int:
     """Run the named ingestion source. Returns rows staged (see
@@ -121,5 +122,6 @@ async def run_source(
         bypass_breaker=bypass_breaker,
         window_start=window_start,
         window_end=window_end,
+        duckdb_only=duckdb_only,
     )(entry.run)
     return await wrapped(**kwargs)

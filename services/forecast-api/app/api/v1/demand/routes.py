@@ -1,9 +1,14 @@
 """`GET /v1/demand/summary` — all-region period aggregate over
 `raw_marts.fct_energy_demand`, backing the Executive Dashboard's
-"Renewable Share" KPI and its "Avg Wholesale Price (YTD)" KPI (the
-honestly-scoped replacement for the old mock "Cost Savings" figure --
-see `TODO.md`'s Frontend TODO for why "savings" itself isn't computable
-without a baseline/tariff model this platform doesn't have)."""
+"Renewable Share" KPI (default YTD-to-now period, no `since`/`until`)
+and its "Avg Wholesale Price (MTD)" KPI (renamed from "(YTD)"
+2026-09-12 -- that call now passes an explicit `since` at the real
+calendar month's start, same `monthStartIso` the "Total CO₂e (MTD)" KPI
+already uses, so the label matches what's actually queried). Real
+wholesale price is the honestly-scoped replacement for the old mock
+"Cost Savings" figure -- see `TODO.md`'s Frontend TODO for why "savings"
+itself isn't computable without a baseline/tariff model this platform
+doesn't have."""
 
 from __future__ import annotations
 

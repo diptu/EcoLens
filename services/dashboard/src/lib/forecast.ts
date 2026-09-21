@@ -251,24 +251,3 @@ export function summarize(forecast: Forecast): ForecastSummary {
     uncertaintyGrowth: firstBand > 0 ? round1(lastBand / firstBand) : 0,
   };
 }
-
-/** Format a 30-min step's timestamp as "14:30 AEST" or "Sat 09:00". */
-export function formatStepLabel(tsIso: string, stepIndex: number, total: number): string {
-  const d = new Date(tsIso);
-  // Show time for short horizons, date for long ones
-  if (total <= 48) {
-    const aest = new Date(d.getTime() + 10 * 60 * 60 * 1000);
-    const hh = aest.getUTCHours().toString().padStart(2, "0");
-    const mm = aest.getUTCMinutes().toString().padStart(2, "0");
-    // Only label every ~6th step to keep it sparse
-    return stepIndex === 1 || stepIndex === total || stepIndex % Math.max(1, Math.floor(total / 6)) === 0
-      ? `${hh}:${mm}`
-      : "";
-  }
-  // Long horizons: show date
-  if (stepIndex === 1 || stepIndex === total || stepIndex % Math.max(1, Math.floor(total / 8)) === 0) {
-    const aest = new Date(d.getTime() + 10 * 60 * 60 * 1000);
-    return `${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][aest.getUTCDay()]} ${aest.getUTCDate()}/${aest.getUTCMonth() + 1}`;
-  }
-  return "";
-}

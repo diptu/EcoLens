@@ -21,7 +21,7 @@ Run from `services/ingestion/`:
 from __future__ import annotations
 
 import asyncio
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import click

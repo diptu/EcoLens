@@ -17,6 +17,7 @@ deliberately aren't (see that workflow's own header comment).
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 
 import click
 
@@ -114,7 +115,7 @@ def vacuum() -> None:
     "--days",
     type=int,
     default=None,
-    help="Override Settings.marts_local_retention_days (60).",
+    help="Override Settings.marts_local_retention_days (30).",
 )
 def archive_marts(days: int | None) -> None:
     """Archive raw_marts.* rows older than --days to the second database
@@ -130,18 +131,33 @@ def archive_marts(days: int | None) -> None:
         click.echo("RAW_MARTS_DATABASE_URL is not configured -- nothing to do.")
         return
 
-    results, cutoff = asyncio.run(archive_and_prune_marts(days))
+    # Archive+prune and the conditional vacuum below both need a real
+    # DB connection off `app.db.session.get_engine()` -- an `lru_cache`d
+    # singleton engine whose pooled connections are bound to whichever
+    # event loop created them. Two separate top-level `asyncio.run()`
+    # calls each spin up (and tear down) their own loop, so the second
+    # call would check out a connection created under the first
+    # (already-closed) loop -- asyncpg's real, reproducible "attached to
+    # a different loop" `RuntimeError` (confirmed live 2026-09-12, not
+    # hypothetical). One `asyncio.run()` over both steps keeps every
+    # connection this command uses on the same loop for its whole run.
+    async def _archive_and_vacuum() -> tuple[dict[str, dict[str, int]], datetime, list[str] | None]:
+        results, cutoff = await archive_and_prune_marts(days)
+        vacuumed = None
+        if results and sum(c["pruned"] for c in results.values()) > 0:
+            from app.retention.vacuum import vacuum_analyze_marts_tables
+
+            vacuumed = await vacuum_analyze_marts_tables()
+        return results, cutoff, vacuumed
+
+    results, cutoff, vacuumed = asyncio.run(_archive_and_vacuum())
     click.echo(f"Cutoff: {cutoff.isoformat()}")
     if not results:
         click.echo("Nothing eligible to archive/prune.")
         return
     for table, counts in sorted(results.items()):
         click.echo(f"{table}: archived {counts['archived']}, pruned {counts['pruned']}")
-
-    if sum(c["pruned"] for c in results.values()) > 0:
-        from app.retention.vacuum import vacuum_analyze_marts_tables
-
-        vacuumed = asyncio.run(vacuum_analyze_marts_tables())
+    if vacuumed:
         click.echo(f"Vacuumed: {', '.join(vacuumed)}")
 
 

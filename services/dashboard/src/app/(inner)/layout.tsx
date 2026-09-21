@@ -1,7 +1,7 @@
 /**
- * Inner layout — wraps /product, /resources, /solutions with the
- * site Navbar and Footer (which the home page renders inline because
- * it has its own hero composition).
+ * Inner layout — wraps /resources with the site Navbar and Footer
+ * (which the home page renders inline because it has its own hero
+ * composition).
  *
  * Wraps in <MotionProvider> so the navbar's `m.header` initial state
  * (`initial={{ y: -20, opacity: 0 }}` → `animate={{ y: 0, opacity: 1 }}`)

@@ -95,6 +95,33 @@ converts the response's `ts` back to real UTC before returning it --
 both directions of the same fixed, network-specific offset. Live-
 verified against the real OE API this session (200 OK, real per-region
 records returned for NEM/WEM alike).
+
+**Real unit bug found + fixed (2026-09-12)**: `fetch_emissions()`'s raw
+OE values were silently 1000x too small -- OE reports its `emissions`
+metric in tonnes CO2e per interval, not kg as this module always
+documented/assumed. See that function's own docstring for the live
+cross-check (real generation MW vs. implied intensity) that confirmed
+it, and the real downstream symptom it caused (Executive Dashboard
+"Carbon Intensity" KPI showing `0`).
+
+**Second real bug found + fixed the same day**: every OE-derived `ts`
+was landing hours in the *future* -- `GET /v1/emissions/current`'s
+`as_of` (and every mart hour downstream of `raw.openelectricity_mix`)
+consistently showed a timestamp ~10h ahead of real time for NEM, ~8h
+ahead for WEM, i.e. exactly each network's own UTC offset. Root cause:
+`_to_records_linear` (below) built each record's `"interval"` via the
+installed SDK's `TimeSeriesResponse._create_network_date`, on the
+2026-08-13 assumption that `point.timestamp` is naive UTC needing a
+`+offset` shift into local time. Live-confirmed today that assumption
+doesn't hold for the real API -- `point.timestamp` already comes back
+correctly tz-aware in the network's own local offset (e.g.
+`2026-09-12 22:05:00+10:00` for NEM), so `_create_network_date` was
+adding a second, spurious `+offset` on top of an already-correct value,
+and `_fetch_metric`'s `tz_localize(tz).tz_convert("UTC")` reversal
+below only ever removed one of the two. Net effect: the local clock
+digits ended up mislabeled as UTC untouched, i.e. every timestamp was
+off by exactly the network's own UTC offset. See `_to_records_linear`'s
+own docstring for the fix.
 """
 
 from __future__ import annotations
@@ -137,6 +164,29 @@ def _to_records_linear(self: TimeSeriesResponse) -> list[dict]:
     need this). Same output shape/semantics, just an O(1) dict lookup
     (keyed by the same `(timestamp, sorted groupings)` identity) instead
     of a linear scan, making the whole merge O(n).
+
+    **Real tz bug found + fixed (2026-09-12)**: this used to build
+    `"interval"` via the SDK's own `_create_network_date(point.timestamp,
+    series.network_timezone_offset)`, on the assumption (module
+    docstring, 2026-08-13 entry) that `point.timestamp` is a naive UTC
+    value needing a `+offset` shift into local time -- `_create_network_
+    date`'s own docstring agrees ("Args: timestamp: The UTC timestamp").
+    Live-confirmed today that assumption is wrong for the real API:
+    `point.timestamp` already comes back correctly **tz-aware in the
+    network's own local offset** (e.g. `2026-09-12 22:05:00+10:00` for
+    NEM, `+08:00` for WEM -- checked across both POWER and EMISSIONS
+    metrics, both networks). Calling `_create_network_date` on an
+    already-correct aware value strips that correct tzinfo and adds the
+    offset *again*, so `_fetch_metric`'s subsequent `tz_localize(tz).
+    tz_convert("UTC")` (which only removes one offset's worth) left
+    every `ts` with the local clock digits mislabeled as UTC -- every
+    row exactly `network's UTC offset` hours in the future (NEM +10h,
+    WEM +8h), silently confirmed live as the cause of `GET
+    /v1/emissions/current`'s `as_of` (and every mart hour derived from
+    OE data) appearing hours ahead of real time. Fixed by using
+    `point.timestamp` as-is (already the correct local instant) and just
+    dropping its tzinfo, matching the naive-local contract `_fetch_
+    metric` already expects and correctly reverses.
     """
     if not self.data:
         return []
@@ -161,9 +211,10 @@ def _to_records_linear(self: TimeSeriesResponse) -> list[dict]:
                     existing_record[series.metric] = point.value
                 else:
                     record = {
-                        "interval": self._create_network_date(
-                            point.timestamp, series.network_timezone_offset
-                        ),
+                        # Already tz-aware in the network's own local
+                        # offset (see docstring above) -- just drop the
+                        # tzinfo, don't shift it again.
+                        "interval": point.timestamp.replace(tzinfo=None),
                         **groupings,
                         series.metric: point.value,
                     }
@@ -286,7 +337,30 @@ async def fetch_emissions(
     Same `network_region`/`until` scoping as `fetch_network_data`.
 
     Long-form: one row per `(ts, fuel_type)`, `value` in kgCO2e.
+
+    **Real unit bug found + fixed (2026-09-12)**: OE's raw `emissions`
+    metric is reported in *tonnes* CO2e per interval, not kg as this
+    docstring already claimed -- confirmed live against the real API,
+    cross-checked against real concurrent generation MW for the same
+    region/interval (NSW1, a real coal-heavy region): the raw value
+    treated as kg implied ~0.6 kgCO2e/MWh grid intensity (physically
+    impossible -- that's a near-zero-emissions grid), while the same
+    value ×1000 implied ~602 kgCO2e/MWh, a realistic NSW1 figure. This
+    silently made every `resolve_intensity_method`-selected
+    `"live_provider"` reading (`fct_carbon_intensity.
+    live_provider_intensity_kgco2e_per_mwh`, `GET /v1/emissions/current`
+    whenever it picks that method) 1000x too small -- confirmed live as
+    the root cause of the Executive Dashboard's "Carbon Intensity" KPI
+    showing `0` (`round(0.4985)`) while its independently-computed
+    "vs yesterday" delta (a different code path, `live_mix_weighted`-
+    based) looked fine, the exact contradiction that surfaced this.
+    Converted here, once, so `_fetch_metric` itself (shared with
+    `fetch_network_data`'s real MW values, never in tonnes) stays
+    metric-agnostic and this function's own "value in kgCO2e" contract
+    finally holds.
     """
-    return await _fetch_metric(
+    df = await _fetch_metric(
         network_code, since, DataMetric.EMISSIONS, network_region, until
     )
+    df["value"] = df["value"] * 1000
+    return df

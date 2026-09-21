@@ -3,7 +3,6 @@
  * per-row icon, badges, and an actions column (the "..." menu
  * in every dashboard table).
  */
-import { MoreHorizontal } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
@@ -151,17 +150,5 @@ export function Pill({
     >
       {children}
     </span>
-  );
-}
-
-export function ActionsMenu() {
-  return (
-    <button
-      type="button"
-      className="grid h-7 w-7 place-items-center rounded-full text-white/40 transition-colors hover:bg-white/5 hover:text-white"
-      aria-label="Actions"
-    >
-      <MoreHorizontal className="h-4 w-4" />
-    </button>
   );
 }

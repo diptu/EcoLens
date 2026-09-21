@@ -201,6 +201,24 @@ export function RecentBacktestChart({
   }));
   const labelEvery = sorted.length > 60 ? 12 : sorted.length > 30 ? 6 : sorted.length > 16 ? 3 : 1;
 
+  // Real fix (2026-09-12): this tooltip previously had no edge-clamping
+  // at all (raw `left: hover.x`), so hovering near either edge of the
+  // chart pushed roughly half the box outside this card's own bounds --
+  // same bug class `RealEmissionsTrend`'s tooltip already had fixed
+  // (2026-08-11) and `DemandForecastChart`'s got fixed alongside it
+  // (2026-09-12). Clamped the same way, against a real fixed
+  // `w-[220px]` (matches this tooltip's own fixed width below, not a
+  // `min-w` -- the assumed width used for the clamp math must always
+  // match what's actually rendered).
+  const TOOLTIP_WIDTH_PX = 220;
+  const tooltipContainerWidth = wrapRef.current?.clientWidth ?? w;
+  const tooltipLeft = hover
+    ? Math.min(
+        Math.max(hover.x, TOOLTIP_WIDTH_PX / 2),
+        Math.max(TOOLTIP_WIDTH_PX / 2, tooltipContainerWidth - TOOLTIP_WIDTH_PX / 2),
+      )
+    : 0;
+
   return (
     <div ref={wrapRef} className="relative" data-testid={testId}>
       <svg
@@ -304,47 +322,77 @@ export function RecentBacktestChart({
         )}
       </svg>
 
+      {/* Real fix (2026-09-12): the positioning transform
+          (`-translate-x-1/2 -translate-y-[...]`, what the clamp math
+          above assumes keeps this centered on the cursor) lived on the
+          same element as framer-motion's `animate`. Framer Motion takes
+          over the whole CSS `transform` property once any of
+          `x`/`y`/`scale`/`rotate` is animated, silently dropping the
+          Tailwind transform classes -- confirmed live via
+          `getComputedStyle`, `transform` reads back as `none` despite
+          the classes being present. Static positioning now lives on
+          this plain outer div (real CSS transform, never touched by
+          motion); the inner `m.div` only handles the entrance
+          animation, its own independent transform. */}
       <AnimatePresence>
         {hover && hoverPoint && (
+          <div
+            className="pointer-events-none absolute z-20 w-[220px] -translate-x-1/2 -translate-y-[calc(100%+10px)]"
+            style={{ left: tooltipLeft, top: hover.y }}
+            data-testid={`${testId}-tooltip`}
+          >
           <m.div
             initial={reduced ? false : { opacity: 0, y: 4, scale: 0.95 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={reduced ? undefined : { opacity: 0, y: 4, scale: 0.95 }}
             transition={{ duration: 0.12, ease: "easeOut" }}
-            className="pointer-events-none absolute z-20 min-w-[180px] -translate-x-1/2 -translate-y-[calc(100%+10px)] rounded-md border border-white/10 bg-[#0a1410]/95 px-3 py-2 text-xs shadow-2xl backdrop-blur"
-            style={{ left: hover.x, top: hover.y }}
-            data-testid={`${testId}-tooltip`}
+            className="rounded-md border border-white/10 bg-[#0a1410]/95 px-3 py-2 text-xs shadow-2xl backdrop-blur"
           >
             <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-white/50">
               {fullLabel(hoverPoint.ts)}
             </div>
+            {/* `justify-between` + `min-w-0` on each value span (not
+                plain `ml-auto`, 2026-09-12 real fix -- same flexbox
+                gotcha `RealEmissionsTrend`'s tooltip had): a bare
+                `ml-auto` flex item keeps the browser's default
+                `min-width: auto`, refusing to shrink/wrap below its own
+                content width. */}
             {hoverPoint.actualMw !== null ? (
-              <div className="flex items-center gap-2 py-0.5">
-                <span className="h-1.5 w-3 rounded-full bg-white" />
-                <span className="text-white/65">Actual</span>
-                <span className="ml-auto font-mono font-semibold text-white">
+              <div className="flex items-start justify-between gap-2 py-0.5">
+                <span className="flex shrink-0 items-center gap-2">
+                  <span className="h-1.5 w-3 rounded-full bg-white" />
+                  <span className="text-white/65">Actual</span>
+                </span>
+                <span className="min-w-0 text-right font-mono font-semibold text-white">
                   {hoverPoint.actualMw.toLocaleString()} MW
                 </span>
               </div>
             ) : (
               <div className="py-0.5 text-white/40">Actual — not landed yet</div>
             )}
-            <div className="flex items-center gap-2 py-0.5">
-              <span className="h-1.5 w-3 rounded-full border border-dashed border-sky-300/60" />
-              <span className="text-white/65">Predicted P10</span>
-              <span className="ml-auto font-mono text-white/80">{hoverPoint.p10Mw.toLocaleString()} MW</span>
+            <div className="flex items-start justify-between gap-2 py-0.5">
+              <span className="flex shrink-0 items-center gap-2">
+                <span className="h-1.5 w-3 rounded-full border border-dashed border-sky-300/60" />
+                <span className="text-white/65">Predicted P10</span>
+              </span>
+              <span className="min-w-0 text-right font-mono text-white/80">{hoverPoint.p10Mw.toLocaleString()} MW</span>
             </div>
-            <div className="flex items-center gap-2 py-0.5">
-              <span className="h-1.5 w-3 rounded-full bg-sky-300" />
-              <span className="text-white/65">Predicted P50</span>
-              <span className="ml-auto font-mono font-semibold text-white">{hoverPoint.p50Mw.toLocaleString()} MW</span>
+            <div className="flex items-start justify-between gap-2 py-0.5">
+              <span className="flex shrink-0 items-center gap-2">
+                <span className="h-1.5 w-3 rounded-full bg-sky-300" />
+                <span className="text-white/65">Predicted P50</span>
+              </span>
+              <span className="min-w-0 text-right font-mono font-semibold text-white">{hoverPoint.p50Mw.toLocaleString()} MW</span>
             </div>
-            <div className="flex items-center gap-2 py-0.5">
-              <span className="h-1.5 w-3 rounded-full border border-dashed border-sky-300/60" />
-              <span className="text-white/65">Predicted P90</span>
-              <span className="ml-auto font-mono text-white/80">{hoverPoint.p90Mw.toLocaleString()} MW</span>
+            <div className="flex items-start justify-between gap-2 py-0.5">
+              <span className="flex shrink-0 items-center gap-2">
+                <span className="h-1.5 w-3 rounded-full border border-dashed border-sky-300/60" />
+                <span className="text-white/65">Predicted P90</span>
+              </span>
+              <span className="min-w-0 text-right font-mono text-white/80">{hoverPoint.p90Mw.toLocaleString()} MW</span>
             </div>
           </m.div>
+          </div>
         )}
       </AnimatePresence>
 

@@ -171,3 +171,9 @@ out/
 
 # TypeScript cache
 *.tsbuildinfo
+# Databases & Local Data
+*.duckdb
+*.zip
+
+# Celery schedules
+celerybeat-schedule-*

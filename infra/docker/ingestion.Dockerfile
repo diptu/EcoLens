@@ -40,6 +40,35 @@ RUN uv sync --no-dev --frozen --no-install-project
 COPY services/ingestion .
 RUN uv sync --no-dev --frozen
 
+# Real, hard blocker hit deploying to a Namecheap Quasar VPS
+# (2026-09-21): its hypervisor exposes only a generic `QEMU Virtual CPU
+# version 2.5+` to the guest -- missing sse4_2/popcnt/etc, below the
+# "x86-64-v2" baseline every PyPI numpy/scipy wheel has required since
+# numpy's meson-based build (~2.x). Importing numpy on that box aborted
+# immediately with `RuntimeError: NumPy was built with baseline
+# optimizations: (X86_V2) but your machine doesn't support: (X86_V2)` --
+# not a runtime-togglable dispatch feature, the *compiled minimum* the
+# prebuilt wheel targets, confirmed by reading numpy's own CPU dispatch
+# init code, not guessed. Rebuilding from source with
+# `-Dcpu-baseline=none -Dcpu-dispatch=none` (pure portable x86-64, no
+# SIMD requirement) fixes it -- verified directly on that VPS (~3 min
+# extra build time). scipy's own *prebuilt* wheel was separately
+# verified fine once numpy alone was fixed (scipy has no equivalent
+# `cpu-baseline`/`cpu-dispatch` meson option of its own -- tried it,
+# `ERROR: Unknown option: "cpu-baseline"` -- and doesn't need one; its
+# compiled extensions don't hard-abort on this CPU the way numpy's do).
+# So numpy is the only package that actually needs this. No effect on
+# modern CPUs (this rebuild is functionally a no-op there beyond build
+# time), so unconditional here rather than gated behind a build arg.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential gfortran pkg-config libopenblas-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && uv pip install pip \
+    && .venv/bin/pip install --force-reinstall --no-deps --no-binary numpy \
+         --config-settings=setup-args=-Dcpu-baseline=none \
+         --config-settings=setup-args=-Dcpu-dispatch=none \
+         numpy==2.5.1
+
 
 FROM python:3.12-slim AS runtime
 
@@ -54,8 +83,25 @@ FROM python:3.12-slim AS runtime
 # makes `worker` correctly reap zombies and propagate a real Railway
 # restart/redeploy's `SIGTERM` instead of relying on the app process
 # happening to behave correctly as PID 1 by accident.
+#
+# `wget` -- docker-compose.yml's own healthcheck for this role (`CMD
+# wget -qO- http://localhost:8003/v1/healthz`) needs it on PATH;
+# `python:3.12-slim` doesn't ship it. Real bug, confirmed live
+# 2026-08-19: `/v1/healthz` answered fine over the published port the
+# whole time, but Docker's own healthcheck never once succeeded (`exec:
+# "wget": executable file not found in $PATH`, `FailingStreak` climbing
+# forever) -- same fix `forecast-api.Dockerfile`/`warehouse.Dockerfile`
+# already carry for the identical gap.
+#
+# `libopenblas0` -- the source-rebuilt numpy above (builder stage)
+# links against OpenBLAS at import time; only `libopenblas-dev` was
+# installed there, and multi-stage `COPY --from=builder` never carries
+# apt packages across, just the venv itself. Without the runtime shared
+# lib in *this* stage too, numpy import fails with `libopenblas.so.0:
+# cannot open shared object file` -- real bug, hit immediately after
+# the CPU-baseline fix above on the same VPS.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tini \
+    && apt-get install -y --no-install-recommends tini wget libopenblas0 \
     && rm -rf /var/lib/apt/lists/*
 
 # Real, unprivileged runtime user -- the `builder` stage above still
@@ -66,6 +112,19 @@ RUN apt-get update \
 RUN groupadd --gid 10001 app && useradd --uid 10001 --gid app --no-create-home --shell /usr/sbin/nologin app
 
 WORKDIR /app/services/ingestion
+
+# `WORKDIR` creates this directory as root *before* anything below runs
+# -- the `COPY --chown=app:app` two lines down only stamps ownership on
+# what it copies IN, never on the parent directory it lands inside, so
+# without this the directory itself stays `root:root` (mode 755: not
+# writable by `app`). Real bug, confirmed live 2026-08-19: Celery Beat
+# (`ingestion-beat`, which writes its `celerybeat-schedule` file
+# straight into this WORKDIR, the CWD it runs from) crash-looped on
+# every single start with `PermissionError: [Errno 13] Permission
+# denied: 'celerybeat-schedule'` -- reproduced directly with `touch
+# celerybeat-schedule` as the `app` user before this fix, confirmed
+# fixed after it.
+RUN chown app:app /app/services/ingestion
 
 # Only the finished venv + source tree from `builder` -- no `uv`/`uvx`
 # binaries, no apt/uv package cache layers, no dependency-resolution

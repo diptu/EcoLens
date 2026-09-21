@@ -106,13 +106,17 @@ with demand_all as (
     select ts, region, demand_mw, price_mwh from {{ ref('stg_aemo_wem_dispatch') }}
 ),
 
--- Priming buffer for the lag(...,336)/roll_7d window functions below --
--- 336 rows needs 7 full days of *prior* context at WEM's 30-min grain
--- (the binding constraint; NEM's 5-min grain needs far less for the
--- same row count). 12 days = that 7-day requirement + ~40% margin +
--- the 2-day output-retention window itself, so this stays small and
--- flat regardless of total raw history -- not a fixed cost that grows
--- forever the way the old unbounded scan did.
+-- Priming buffer for the lag(...,2016)/roll_7d window functions below --
+-- 2016 rows needs 7 full days of *prior* context at AEMO's real 5-min
+-- grain (both NEM and WEM -- real bug, confirmed live 2026-08-15: this
+-- used to assume WEM was 30-min, so `lag_1d`/`lag_7d`/`roll_7d` were
+-- fixed at 48/336 rows, actually only 4h/28h at the real 5-min grain
+-- both networks report at, not the intended 1/7 days -- see
+-- int_fuel_emissions.sql's own comment for the same WEM-grain mixup
+-- elsewhere in this pipeline). 12 days = the 7-day requirement + ~70%
+-- margin + the 2-day output-retention window itself, so this stays
+-- small and flat regardless of total raw history -- not a fixed cost
+-- that grows forever the way the old unbounded scan did.
 demand as (
     select * from demand_all
     {% if is_incremental() %}
@@ -189,10 +193,10 @@ select
     w.cloud_oktas,
     extract(hour from d.ts) as hour,
     extract(dow from d.ts) as dow,
-    lag(d.demand_mw, 48) over (partition by d.region order by d.ts) as lag_1d,
-    lag(d.demand_mw, 336) over (partition by d.region order by d.ts) as lag_7d,
+    lag(d.demand_mw, 288) over (partition by d.region order by d.ts) as lag_1d,
+    lag(d.demand_mw, 2016) over (partition by d.region order by d.ts) as lag_7d,
     avg(d.demand_mw) over (
-        partition by d.region order by d.ts rows between 335 preceding and current row
+        partition by d.region order by d.ts rows between 2015 preceding and current row
     ) as roll_7d
 from demand d
 left join lateral (

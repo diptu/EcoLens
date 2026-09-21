@@ -7,8 +7,6 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
-import { cn } from "@/lib/utils";
-
 interface Crumb {
   label: string;
   href?: string;
@@ -18,11 +16,11 @@ function buildCrumbs(pathname: string): Crumb[] {
   const path = pathname.replace(/^\/+/, "").replace(/\/+$/, "");
   if (!path) return [];
   const segments = path.split("/");
-  // Always start with "Home" -> /dashboard
-  const crumbs: Crumb[] = [{ label: "Home", href: "/dashboard/executive" }];
+  // Always start with "Home" -> /
+  const crumbs: Crumb[] = [{ label: "Home", href: "/" }];
   if (segments[0] === "dashboard") {
     if (segments[1]) {
-      crumbs.push({ label: "Dashboard", href: "/dashboard/executive" });
+      crumbs.push({ label: "Dashboard", href: "/" });
       const label = segments[1]
         .replace(/-/g, " ")
         .replace(/\b\w/g, (c) => c.toUpperCase());

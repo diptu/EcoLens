@@ -5,61 +5,9 @@
  * input always produces the same output across page loads and tests.
  *
  * Sections:
- *   - Executive Dashboard   (KPIs, initiatives, scope breakdown)
- *   - Operations Dashboard  (KPIs, pipelines, services)
- *   - Data Sources          (sources, categories)
- *   - Data Ingestion        (pipelines, runs, failed jobs)
- *   - Data Quality          (checks, schema)
- *   - Warehouse             (tables, dbt runs)
- *   - AI / Recommendations
- *   - ML Models             (registry, training, deployments)
- *   - MLflow                (experiments, runs)
- *   - Compliance, Audit, Users, Settings
+ *   - Executive Dashboard   (KPIs, emissions by source)
+ *   - Users, Settings, Integrations, Google Sheets export
  */
-
-// ────────────────────────────────────────────────────────────────────
-// Re-exports from admin-dashboard.ts (existing)
-// ────────────────────────────────────────────────────────────────────
-
-import {
-  getAdminKpis,
-  getEmissionsTrend,
-  getEmissionsByScope,
-  getGenerationMix,
-  getCarbonIntensityForecast,
-  getIngestionStatus,
-  getRecentReports,
-  getRecentAlerts,
-  getRecentUsers,
-  getUpcomingDeadlines,
-  getComplianceItems,
-  getActiveTasks,
-  getTrainingConfigOptions,
-  getRecentTrainingRuns,
-  getScheduledOps,
-  getSystemCommands,
-  getOperationalKpis,
-} from "./admin-dashboard";
-
-export {
-  getAdminKpis,
-  getEmissionsTrend,
-  getEmissionsByScope,
-  getGenerationMix,
-  getCarbonIntensityForecast,
-  getIngestionStatus,
-  getRecentReports,
-  getRecentAlerts,
-  getRecentUsers,
-  getUpcomingDeadlines,
-  getComplianceItems,
-  getActiveTasks,
-  getTrainingConfigOptions,
-  getRecentTrainingRuns,
-  getScheduledOps,
-  getSystemCommands,
-  getOperationalKpis,
-};
 
 // ────────────────────────────────────────────────────────────────────
 // Executive Dashboard
@@ -83,15 +31,9 @@ export function getExecutiveKpis(): ExecutiveKpi[] {
     { label: "Total CO₂e (MTD)", value: "—",  unit: "tCO₂e", delta_pct: null, trend: "flat", good_when: "down" },
     { label: "Carbon Intensity",  value: "—",    unit: "g/kWh", delta_pct: null, trend: "flat", good_when: "down" },
     { label: "Renewable Share",   value: "—",   unit: "%",     delta_pct: null, trend: "flat",   good_when: "up"   },
-    { label: "Avg Wholesale Price (YTD)", value: "—", unit: "$/MWh",   delta_pct: null,  trend: "flat",   good_when: "down"   },
-    { label: "Data Quality Score", value: "—",     unit: "%",  delta_pct: null,  trend: "flat",   good_when: "up"   },
-    { label: "Open Risks",        value: "—",      unit: "high+",  delta_pct: null, trend: "flat", good_when: "down" },
+    { label: "Avg Wholesale Price (MTD)", value: "—", unit: "$/MWh",   delta_pct: null,  trend: "flat",   good_when: "down"   },
   ];
 }
-
-// Aliases for executive page
-export const getExecutiveTrend = getEmissionsTrend;
-export const getExecutiveScope = getEmissionsByScope;
 
 // ────────────────────────────────────────────────────────────────────
 // Emissions by Source (where the emissions come from)
@@ -112,137 +54,6 @@ export function getEmissionsBySource(): SourceSlice[] {
     { name: "Refrigerants (Scope 1)",     pct:  4.1, tco2e:  5_140, color: "#a78bfa" },
     { name: "Supply Chain (Scope 3)",     pct:  5.0, tco2e:  6_280, color: "#22d3ee" },
     { name: "Travel (Scope 3)",           pct:  2.7, tco2e:  3_360, color: "#f472b6" },
-  ];
-}
-
-// ────────────────────────────────────────────────────────────────────
-// Data Quality
-// ────────────────────────────────────────────────────────────────────
-
-export interface QualityCheck {
-  id: string;
-  name: string;
-  rule: string;
-  severity: "low" | "medium" | "high" | "critical";
-  pass_rate: number;
-  failing_records: number;
-  last_evaluated: string;
-}
-
-export function getQualityChecks(): QualityCheck[] {
-  return [
-    { id: "q-1", name: "Demand ≥ 0",            rule: "ts.demand_mw >= 0",          severity: "critical", pass_rate: 99.98, failing_records:  18, last_evaluated: "5 min ago" },
-    { id: "q-2", name: "Region in NEM",         rule: "ts.region IN ('NSW1',...)",  severity: "high",     pass_rate: 100,   failing_records:   0, last_evaluated: "5 min ago" },
-    { id: "q-3", name: "ts not in future",      rule: "ts.ts <= now()",             severity: "critical", pass_rate: 99.95, failing_records:  48, last_evaluated: "5 min ago" },
-    { id: "q-4", name: "Unique (ts, region)",   rule: "COUNT(DISTINCT) == COUNT()", severity: "high",     pass_rate: 100,   failing_records:   0, last_evaluated: "5 min ago" },
-    { id: "q-5", name: "Renewable ≤ 100",       rule: "renewable_pct <= 100",       severity: "medium",   pass_rate: 100,   failing_records:   0, last_evaluated: "5 min ago" },
-    { id: "q-6", name: "Temperature -40..60",   rule: "temp_c BETWEEN -40 AND 60",  severity: "low",      pass_rate: 99.99, failing_records:   2, last_evaluated: "5 min ago" },
-    { id: "q-7", name: "No NULL prices",        rule: "price IS NOT NULL",          severity: "high",     pass_rate: 99.91, failing_records: 102, last_evaluated: "5 min ago" },
-    { id: "q-8", name: "Interconnector balance",rule: "ABS(flow) <= 1500",          severity: "medium",   pass_rate: 99.85, failing_records:  18, last_evaluated: "5 min ago" },
-  ];
-}
-
-export interface SchemaField {
-  name: string;
-  type: string;
-  nullable: boolean;
-  description: string;
-}
-
-export function getSchemaFields(): SchemaField[] {
-  return [
-    { name: "ts",            type: "TIMESTAMPTZ", nullable: false, description: "Interval end timestamp" },
-    { name: "region",        type: "TEXT",        nullable: false, description: "NEM region (NSW1, QLD1, ...)" },
-    { name: "demand_mw",     type: "NUMERIC",     nullable: false, description: "Total demand (MW)" },
-    { name: "price",         type: "NUMERIC",     nullable: true,  description: "Spot price ($/MWh)" },
-    { name: "renewable_pct", type: "NUMERIC",     nullable: true,  description: "Renewable share %" },
-    { name: "intensity",     type: "NUMERIC",     nullable: true,  description: "Carbon intensity g/kWh" },
-  ];
-}
-
-// ────────────────────────────────────────────────────────────────────
-// ML & Feature Store & MLflow
-// ────────────────────────────────────────────────────────────────────
-
-export type ModelStage = "production" | "staging" | "archived" | "experiment";
-
-export interface MLModel {
-  id: string;
-  name: string;
-  version: string;
-  type: "LSTM" | "XGBoost" | "Transformer" | "RandomForest" | "Linear";
-  stage: ModelStage;
-  framework: "PyTorch" | "scikit-learn" | "XGBoost" | "JAX";
-  trained_at: string;
-  performance: { mape?: number; rmse?: number; mae?: number; r2?: number };
-  features: number;
-  training_duration: string;
-}
-
-export function getMLModels(): MLModel[] {
-  return [
-    { id: "m-1", name: "Demand Forecast LSTM",  version: "v8",  type: "LSTM",         stage: "production", framework: "PyTorch",      trained_at: "May 12, 2026", performance: { mape: 2.34, rmse: 184.2, mae: 142.1, r2: 0.954 }, features: 42, training_duration: "12m" },
-    { id: "m-2", name: "Demand Forecast LSTM",  version: "v8c", type: "LSTM",         stage: "staging",    framework: "PyTorch",      trained_at: "May 18, 2026", performance: { mape: 2.18, rmse: 178.1, mae: 138.0, r2: 0.961 }, features: 48, training_duration: "14m" },
-    { id: "m-3", name: "Carbon Intensity XGB",  version: "v3",  type: "XGBoost",      stage: "production", framework: "XGBoost",      trained_at: "Apr 28, 2026", performance: { rmse: 41.2, mae: 32.1, r2: 0.882 },                        features: 18, training_duration: "8m"  },
-    { id: "m-4", name: "Renewable Share Transformer", version: "v2", type: "Transformer", stage: "staging", framework: "PyTorch",    trained_at: "May 14, 2026", performance: { mape: 4.12, rmse: 88.4, r2: 0.901 },                        features: 36, training_duration: "32m" },
-    { id: "m-5", name: "Price Forecast RF",     version: "v1",  type: "RandomForest", stage: "archived",   framework: "scikit-learn", trained_at: "Feb 12, 2026", performance: { mape: 5.18, rmse: 42.1 },                                           features: 22, training_duration: "2m"  },
-  ];
-}
-
-export interface TrainingJob {
-  id: string;
-  model: string;
-  type: "train" | "fine-tune" | "hparam-search";
-  started_at: string;
-  duration: string;
-  state: "running" | "finished" | "failed" | "queued";
-  progress_pct: number;
-  experiment: string;
-}
-
-export function getTrainingJobs(limit = 8): TrainingJob[] {
-  return [
-    { id: "tj-1", model: "Demand Forecast LSTM",     type: "hparam-search", started_at: "yesterday",  duration: "4h 12m", state: "finished", progress_pct: 100, experiment: "lstm_demand_v8_hptune" },
-    { id: "tj-2", model: "Carbon Intensity XGB",     type: "fine-tune",     started_at: "2 days ago", duration: "8m 22s",  state: "finished", progress_pct: 100, experiment: "carbon_intensity_xgb" },
-    { id: "tj-3", model: "Demand Forecast LSTM",     type: "train",         started_at: "May 12",     duration: "12m",     state: "finished", progress_pct: 100, experiment: "lstm_demand_v8" },
-    { id: "tj-4", model: "Renewable Share Transformer", type: "train",     started_at: "May 14",     duration: "32m",     state: "finished", progress_pct: 100, experiment: "renewable_xformer_v2" },
-    { id: "tj-5", model: "Demand Forecast LSTM",     type: "train",         started_at: "now",        duration: "—",        state: "running",  progress_pct:  42, experiment: "lstm_demand_v9" },
-  ];
-}
-
-export interface MlflowExperiment {
-  id: string;
-  name: string;
-  runs: number;
-  best_metric: string;
-  best_value: number;
-  owner: string;
-}
-
-export function getMlflowExperiments(): MlflowExperiment[] {
-  return [
-    { id: "exp-1", name: "lstm_demand_v8",        runs: 24, best_metric: "MAPE", best_value: 2.34, owner: "diptu" },
-    { id: "exp-2", name: "lstm_demand_v8_hptune", runs: 48, best_metric: "MAPE", best_value: 2.18, owner: "diptu" },
-    { id: "exp-3", name: "rf_baseline",           runs:  6, best_metric: "MAPE", best_value: 3.42, owner: "demo"  },
-    { id: "exp-4", name: "carbon_intensity_xgb",  runs: 12, best_metric: "RMSE", best_value: 41.2, owner: "diptu" },
-  ];
-}
-
-export interface MlflowRun {
-  id: string;
-  experiment: string;
-  status: "running" | "finished" | "failed" | "killed";
-  started: string;
-  duration: string;
-  metrics: Record<string, number>;
-}
-
-export function getMlflowRuns(limit = 8): MlflowRun[] {
-  return [
-    { id: "run-a1b2", experiment: "lstm_demand_v8",        status: "finished", started: "2 hr ago",  duration: "12m", metrics: { mape: 2.34, rmse: 184.2 } },
-    { id: "run-c3d4", experiment: "lstm_demand_v8_hptune", status: "finished", started: "yesterday", duration: "4h",  metrics: { mape: 2.18, rmse: 178.1 } },
-    { id: "run-e5f6", experiment: "carbon_intensity_xgb",  status: "finished", started: "1 day ago", duration: "8m",  metrics: { rmse: 41.2 } },
-    { id: "run-g7h8", experiment: "rf_baseline",           status: "finished", started: "3 day ago", duration: "2m",  metrics: { mape: 3.42 } },
   ];
 }
 

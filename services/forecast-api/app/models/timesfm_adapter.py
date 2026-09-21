@@ -35,6 +35,7 @@ full day of history, WEM's 30-min cadence needs `>= 48` for the same.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -130,6 +131,7 @@ def _round_up_to_output_patch(max_horizon: int) -> int:
     ) * _OUTPUT_PATCH_SIZE
 
 
+@lru_cache(maxsize=1)
 def load_timesfm_forecaster(
     max_context: int = DEFAULT_MAX_CONTEXT,
     max_horizon: int = DEFAULT_MAX_HORIZON,
@@ -139,6 +141,34 @@ def load_timesfm_forecaster(
     torch-compile step every time) — call once and reuse the returned
     `TimesFMForecaster` across every `evaluate_walk_forward` origin,
     exactly like `LSTMForecaster` reuses one loaded `DemandLSTM`.
+
+    `@lru_cache`-backed (real OOM, confirmed live 2026-08-15: `train-
+    worker` killed by the OOM reaper mid-download of a *second* 200M-
+    param checkpoint for the next incremental `timesfm_correction`
+    trigger, immediately after finishing the previous one). This
+    function's own docstring already documented "call once and reuse" as
+    the contract, but its real callers (`timesfm_correction.
+    train_and_register_correction` and `.load_registered_correction_
+    model`) each called it fresh on every invocation instead -- and
+    `train-worker` is a single long-running process consuming one
+    training-trigger message at a time (`db.rabbitmq.
+    consume_training_trigger_events`'s `prefetch_count=1`, strictly
+    sequential), so every automatic post-dbt-build `timesfm_correction`
+    trigger downloaded+compiled a brand-new checkpoint that the previous
+    one's memory was never reclaimed for -- the frozen base model never
+    changes between calls (this module's own docstring: "no training
+    loop, no MLflow-registered weights"), so there was never a
+    correctness reason to reload it. Caching here, at the one real
+    loader both call sites already funnel through, fixes both without
+    touching either caller. `maxsize=1` (tightened from an initial `4`,
+    2026-08-21): every real call site inside `train-worker` passes the
+    same `(max_context, max_horizon)` pair in normal automatic
+    operation, so a higher `maxsize` bought no real cache-hit benefit
+    there while still permitting multiple 200M-param compiled models
+    (several GB combined) to stay resident at once if anything ever did
+    call with a different pair -- `1` caps this function's own
+    worst-case memory contribution to exactly one resident copy, at the
+    cost of a recompile (slow, not wrong) on a genuine param change.
     """
     import timesfm
 

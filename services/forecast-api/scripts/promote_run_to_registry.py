@@ -78,10 +78,24 @@ def main() -> None:
         feature_scalers = joblib.load(Path(local_dir) / "feature_scalers.joblib")
         target_scaler = joblib.load(Path(local_dir) / "target_scaler.joblib")
 
+        # Real bug, hit live 2026-09-21 promoting into a fresh VPS
+        # MLflow: `mlflow.artifacts.load_dict` has no `tracking_uri`
+        # kwarg at all (unlike `download_artifacts`, which does) --
+        # passing one raised `TypeError`, silently swallowed by the
+        # bare `except Exception` below, leaving `calibration_dict`
+        # `None` even when the source run genuinely has the file.
+        # `load_bundle` (services/forecast-api's own model loader)
+        # treats a missing `conformal_calibration.json` as a hard
+        # error, unlike `demand_bias_correction.json` (deliberately
+        # optional) -- so this silently produced a promoted model
+        # version that could never actually be loaded. Fixed by relying
+        # on the ambient `MLFLOW_TRACKING_URI` env var `_set_env("SRC")`
+        # already set above, same as `download_artifacts` does one
+        # level up without needing the kwarg either.
         calibration_dict = None
         try:
             calibration_dict = mlflow.artifacts.load_dict(
-                f"runs:/{run_id}/conformal_calibration.json", tracking_uri=src_uri
+                f"runs:/{run_id}/conformal_calibration.json"
             )
         except Exception:
             pass
@@ -89,7 +103,7 @@ def main() -> None:
         bias_dict = None
         try:
             bias_dict = mlflow.artifacts.load_dict(
-                f"runs:/{run_id}/demand_bias_correction.json", tracking_uri=src_uri
+                f"runs:/{run_id}/demand_bias_correction.json"
             )
         except Exception:
             pass

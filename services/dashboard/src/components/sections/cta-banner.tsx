@@ -1,29 +1,23 @@
 /**
- * CtaBanner — the bottom-of-page CTA with a forest background.
- * Used on /product and /solutions.
+ * CtaBanner — the bottom-of-page CTA banner. Used on /resources and /blog.
  */
 "use client";
 
-import Image from "next/image";
-import { m, useReducedMotion } from "framer-motion";
-import { useEffect, useRef, type ReactNode } from "react";
+import { m } from "framer-motion";
+import type { ReactNode } from "react";
 
 import { MotionButton } from "@/components/motion/motion-button";
 import { StaggerContainer, MotionItem } from "@/components/motion/motion-section";
 import { fadeUp } from "@/lib/animations";
-import { ensureGsapRegistered, prefersReducedMotion } from "@/lib/gsap";
-import gsap from "gsap/dist/gsap.js";
 
 export interface CtaBannerProps {
   badge?: string;
   heading: ReactNode;
   highlight?: ReactNode;
   body?: string;
-  primary: { label: string; onClick?: () => void; href?: string };
+  primary?: { label: string; onClick?: () => void; href?: string };
   secondary?: { label: string; onClick?: () => void; href?: string };
   features?: string[];
-  /** "hero" uses a full-bleed forest bg; "minimal" is plain. */
-  variant?: "hero" | "minimal";
 }
 
 export function CtaBanner({
@@ -34,53 +28,9 @@ export function CtaBanner({
   primary,
   secondary,
   features,
-  variant = "hero",
 }: CtaBannerProps) {
-  const bgRef = useRef<HTMLDivElement>(null);
-  const reduce = useReducedMotion();
-
-  // Subtle parallax on the forest background
-  useEffect(() => {
-    if (!bgRef.current || reduce || prefersReducedMotion() || variant !== "hero") return;
-    ensureGsapRegistered();
-    const tween = gsap.to(bgRef.current, {
-      yPercent: 8,
-      ease: "none",
-      scrollTrigger: { trigger: bgRef.current, start: "top bottom", end: "bottom top", scrub: true },
-    });
-    return () => {
-      tween.kill();
-    };
-  }, [reduce, variant]);
-
   return (
     <section className="relative isolate overflow-hidden py-20 md:py-28">
-      {variant === "hero" && (
-        <>
-          <div
-            ref={bgRef}
-            aria-hidden="true"
-            className="absolute inset-0 -z-10 will-change-transform"
-          >
-            <Image
-              src="/images/forest.webp"
-              alt=""
-              width={1400}
-              height={900}
-              className="h-full w-full object-cover opacity-50"
-            />
-            <div
-              aria-hidden="true"
-              className="absolute inset-0"
-              style={{
-                background:
-                  "linear-gradient(180deg, rgba(5,10,8,0.6) 0%, rgba(5,10,8,0.92) 70%, #050a08 100%)",
-              }}
-            />
-          </div>
-        </>
-      )}
-
       <StaggerContainer className="relative z-10 mx-auto grid max-w-7xl items-center gap-10 px-6 md:grid-cols-2">
         <MotionItem variant="fadeUp">
           {badge && <CenterBadge>{badge}</CenterBadge>}
@@ -94,14 +44,16 @@ export function CtaBanner({
         </MotionItem>
 
         <MotionItem variant="fadeUp" className="flex flex-col items-start gap-6 md:items-end">
-          <div className="flex flex-col gap-3 sm:flex-row">
-            <MotionButton size="lg" iconAfter={<ArrowRight />}>{primary.label}</MotionButton>
-            {secondary && (
-              <MotionButton size="lg" variant="secondary" iconAfter={<PlayIcon />}>
-                {secondary.label}
-              </MotionButton>
-            )}
-          </div>
+          {primary && (
+            <div className="flex flex-col gap-3 sm:flex-row">
+              <MotionButton size="lg" iconAfter={<ArrowRight />}>{primary.label}</MotionButton>
+              {secondary && (
+                <MotionButton size="lg" variant="secondary" iconAfter={<PlayIcon />}>
+                  {secondary.label}
+                </MotionButton>
+              )}
+            </div>
+          )}
           {features && features.length > 0 && (
             <ul className="grid gap-2 text-sm text-white/70 md:text-right">
               {features.map((f) => (

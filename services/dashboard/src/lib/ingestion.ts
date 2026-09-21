@@ -261,11 +261,23 @@ export async function fetchPublicPipelines(): Promise<PipelinesList> {
  * dbt row once, on load (`services/waerehouse/TODO.md`'s own note on
  * this gap). Reads the single latest run rather than the full list --
  * cheaper for "is a build in flight right now", same reasoning
- * `GET /v1/dbt/build/last` already existed for. */
+ * `GET /v1/dbt/build/last` already existed for.
+ *
+ * Deliberately does **not** stop polling once the latest run reaches a
+ * terminal status the way `pollLatestRun` does for a single triggered
+ * run -- this is the only caller (the page's mount-time rehydration
+ * effect, kept alive for the component's whole lifetime and torn down
+ * via the returned cancel function), and its whole point is to notice
+ * the *next* build too, including one the event-driven scheduler fires
+ * on its own with nobody watching this tab. Stopping after the first
+ * (near-certainly already-terminal) tick silently froze the "Next
+ * Retrain" KPI at whatever it read on page load -- real bug, confirmed
+ * 2026-09-18: `GET /v1/dbt/build/runs` kept returning fresh builds the
+ * whole time, the poll just never asked again to find out. */
 export function pollLatestDbtBuild(
   onUpdate: (run: DbtBuildRun | null) => void,
-  intervalMs = 3000,
-  timeoutMs = 300_000,
+  intervalMs = 15_000,
+  timeoutMs = Infinity,
 ): () => void {
   let cancelled = false;
   const deadline = Date.now() + timeoutMs;
@@ -275,8 +287,7 @@ export function pollLatestDbtBuild(
       if (cancelled) return;
       const run = runs[0] ?? null;
       onUpdate(run);
-      const terminal = run != null && run.status !== "running";
-      if (!terminal && Date.now() < deadline) {
+      if (Date.now() < deadline) {
         setTimeout(tick, intervalMs);
       }
     } catch {

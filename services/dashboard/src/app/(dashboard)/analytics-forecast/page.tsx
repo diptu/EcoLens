@@ -88,7 +88,6 @@ import { getCached, setCached } from "@/lib/local-cache";
 import { ALL_REGIONS, summarize, type Forecast, type Region } from "@/lib/forecast";
 import {
   ALL_EMISSION_REGIONS,
-  fetchCurrentEmissions,
   fetchDemandForecast,
   fetchDemandSummary,
   fetchEmissionsTimeseries,
@@ -101,7 +100,6 @@ import {
   formatFuelType,
   formatTco2e,
   fuelColor,
-  type CurrentEmissions,
   type DemandForecast,
   type DemandSummary,
   type EmissionRegion,
@@ -284,7 +282,23 @@ export default function AnalyticsForecastPage() {
     };
   }, [region]);
 
-  const forecast = useMemo(() => (live ? toForecast(live) : null), [live]);
+  // Guarded on `live.region === region` (2026-09-17 fix, reported:
+  // "Region filter doesn't work"): `fetchDemandForecast` is a genuinely
+  // slow real cold-path call (documented above at 20-45s), and this
+  // effect doesn't clear `live` while a new region's fetch is in
+  // flight. Confirmed live: switching NSW1 -> QLD1 within that window
+  // showed IDENTICAL Forecast Demand/Peak Demand numbers under the
+  // QLD1 label -- not a broken filter, just NSW1's still-stale response
+  // being displayed as if it were QLD1's. `DemandForecast.region` is
+  // the response's own real region, so this is an honest staleness
+  // check, not a guess: while it disagrees with the selected filter,
+  // treat the KPIs as not-yet-loaded (same "—" state as a fresh fetch)
+  // rather than show a real number under the wrong region.
+  const liveMatchesRegion = live?.region === region;
+  const forecast = useMemo(
+    () => (live && liveMatchesRegion ? toForecast(live) : null),
+    [live, liveMatchesRegion],
+  );
   const summary = useMemo(() => (forecast ? summarize(forecast) : null), [forecast]);
   const peakIdx = useMemo(() => {
     if (!forecast || !summary) return undefined;
@@ -305,7 +319,11 @@ export default function AnalyticsForecastPage() {
   // caption below the chart -- the *values* are real, the *dates*
   // are not, and that distinction is never allowed to go unstated.
   const forecastChartPoints: DemandForecastPoint[] = useMemo(() => {
-    if (!live || !demandActual || demandActual.length === 0) return [];
+    // Same `liveMatchesRegion` staleness guard as the KPIs above -- a
+    // still-in-flight region switch would otherwise overlay one
+    // region's real actual-demand history with a different (stale)
+    // region's forecast band.
+    if (!live || !liveMatchesRegion || !demandActual || demandActual.length === 0) return [];
     const actualEndMs = Math.max(...demandActual.map((p) => p.tMs));
     const m = /^(\d+)([mh])$/.exec(live.interval);
     const intervalMs = m
@@ -315,18 +333,25 @@ export default function AnalyticsForecastPage() {
       const tMs = actualEndMs + (i + 1) * intervalMs;
       return { ts: new Date(tMs).toISOString(), tMs, p10: p.p10, p50: p.p50, p90: p.p90 };
     });
-  }, [live, demandActual]);
+  }, [live, liveMatchesRegion, demandActual]);
 
   // ── Recent backtest (Actual vs Predicted chart + Total Demand KPI) ──
+  // Period-scoped (2026-09-17): previously hardcoded to a fixed 7-day
+  // window regardless of the Period selector above, so the Total Demand
+  // KPI (and this chart) silently ignored it. Now uses `periodDef.days`
+  // like every other period-scoped fetch on this page -- backend caps
+  // this at 30 days (`_RECENT_BACKTEST_MAX_DAYS` in forecast-api's
+  // `forecast/routes.py`), which is exactly this page's largest Period
+  // option, so every Period value is a valid request.
   const [recentBacktest, setRecentBacktest] = useState<RecentBacktest | null>(null);
   const [recentBacktestFailed, setRecentBacktestFailed] = useState(false);
   useEffect(() => {
     let cancelled = false;
     setRecentBacktestFailed(false);
-    const cacheKey = `analytics-forecast:backtest:${region}`;
+    const cacheKey = `analytics-forecast:backtest:${region}:${period}`;
     const cached = getCached<RecentBacktest>(cacheKey, CACHE_MAX_AGE_MS);
     if (cached) setRecentBacktest(cached);
-    fetchRecentBacktest(region, RECENT_BACKTEST_DAYS)
+    fetchRecentBacktest(region, periodDef.days)
       .then((r) => {
         if (cancelled) return;
         setRecentBacktest(r);
@@ -338,7 +363,7 @@ export default function AnalyticsForecastPage() {
     return () => {
       cancelled = true;
     };
-  }, [region]);
+  }, [region, period, periodDef.days]);
 
   const recentBacktestPoints: RecentBacktestPoint[] = useMemo(
     () =>
@@ -354,18 +379,80 @@ export default function AnalyticsForecastPage() {
         : [],
     [recentBacktest],
   );
-  const latestActualDemand = useMemo(() => {
-    if (!recentBacktest) return null;
-    for (let i = recentBacktest.points.length - 1; i >= 0; i--) {
-      const p = recentBacktest.points[i];
-      if (p.actual !== null) return p.actual;
+  // Real total energy (MWh) over the selected period+region, not just an
+  // average MW reading (2026-09-17 fix, reported: "24h ~19k so 7d should
+  // be ~19*7k" -- the previous pass here averaged the MW readings, which
+  // is correct as an average but never scales with period length the way
+  // a "Total" figure should; that's what read as "not correct" per
+  // filter). Demand points are power (MW, an instantaneous rate), not
+  // directly summable -- this integrates each real reading over the real
+  // time it covers to get an honest additive energy total, same units
+  // `formatEnergy` already renders elsewhere on this page (Generation
+  // Mix). NB: `RecentBacktestPoint.step_hours` looks like an hours field
+  // but is actually a per-origin walk-forward step index (cycles 1..48
+  // repeatedly, confirmed live against real timestamps) -- multiplying
+  // by it directly, as an earlier draft of this fix did, silently
+  // produced numbers ~1000x too large.
+  //
+  // The window itself is anchored to the most recent REAL actual
+  // reading in `recentBacktest`, not wall-clock `since`/`until` -- an
+  // earlier draft of this fix used `since`/`until` and broke worse:
+  // confirmed live, real AEMO/OE ingestion currently lags "now" by
+  // ~2 days, so a wall-clock "last 24 hours" window landed entirely
+  // before any real data existed, silently showing "—" for a value
+  // that (per `avgActualDemand`, the previous version of this KPI) was
+  // known-good. Anchoring to the data's own latest point instead is the
+  // same fix `DemandForecastChart`'s "Now" boundary already uses
+  // elsewhere on this page, for the identical real-lag reason (see that
+  // component's header comment). This also incidentally fixes a second
+  // bug: `days=1` on this endpoint doesn't return exactly 24h of real
+  // points -- confirmed live it returns ~47h (every origin's full 48h
+  // horizon can extend past the nominal window) -- so without this
+  // anchored window, summing every returned point counted ~2x too many
+  // real hours for a 24h request.
+  // Same staleness guard as `liveMatchesRegion` above, and for the same
+  // reason: this endpoint's response carries its own real `region`, so
+  // while a region switch's fetch is still in flight this correctly
+  // shows "—" instead of the previous region's now-stale total.
+  const recentBacktestMatchesRegion = recentBacktest?.region === region;
+  const totalActualEnergyMwh = useMemo(() => {
+    if (!recentBacktest || !recentBacktestMatchesRegion) return null;
+    const readings = recentBacktest.points
+      .filter((p): p is typeof p & { actual: number } => p.actual !== null)
+      .map((p) => ({ tMs: new Date(p.ts).getTime(), mw: p.actual }))
+      .sort((a, b) => a.tMs - b.tMs);
+    if (readings.length === 0) return null;
+    const anchorMs = readings[readings.length - 1].tMs;
+    const windowStartMs = anchorMs - periodDef.days * 86_400_000;
+    const windowed = readings.filter((r) => r.tMs > windowStartMs && r.tMs <= anchorMs);
+    if (windowed.length === 0) return null;
+    const gapsHours = windowed.slice(1).map((r, i) => (r.tMs - windowed[i].tMs) / 3_600_000);
+    const sortedGaps = [...gapsHours].sort((a, b) => a - b);
+    const medianGapHours = sortedGaps.length > 0 ? sortedGaps[Math.floor(sortedGaps.length / 2)] : 1;
+    // Cap any one gap's weight so a real ingestion outage (an unusually
+    // long stretch between two readings) can't get silently counted as
+    // if demand held steady across the whole gap.
+    const maxGapHours = medianGapHours * 3;
+    let totalMwh = 0;
+    for (let i = 0; i < windowed.length; i++) {
+      const hours = i < gapsHours.length ? Math.min(gapsHours[i], maxGapHours) : medianGapHours;
+      totalMwh += windowed[i].mw * hours;
     }
-    return null;
-  }, [recentBacktest]);
-  const demandSparkline = useMemo(
-    () => recentBacktest?.points.filter((p) => p.actual !== null).map((p) => p.actual!) ?? [],
-    [recentBacktest],
-  );
+    return totalMwh;
+  }, [recentBacktest, recentBacktestMatchesRegion, periodDef.days]);
+  // Same real-data-anchored window and staleness guard as the total above,
+  // so the sparkline shape matches what the headline number represents.
+  const demandSparkline = useMemo(() => {
+    if (!recentBacktest || !recentBacktestMatchesRegion) return [];
+    const readings = recentBacktest.points
+      .filter((p): p is typeof p & { actual: number } => p.actual !== null)
+      .map((p) => ({ tMs: new Date(p.ts).getTime(), mw: p.actual }))
+      .sort((a, b) => a.tMs - b.tMs);
+    if (readings.length === 0) return [];
+    const anchorMs = readings[readings.length - 1].tMs;
+    const windowStartMs = anchorMs - periodDef.days * 86_400_000;
+    return readings.filter((r) => r.tMs > windowStartMs && r.tMs <= anchorMs).map((r) => r.mw);
+  }, [recentBacktest, recentBacktestMatchesRegion, periodDef.days]);
 
   // ── Model info (LSTM, currently served) + registry versions (both architectures) ──
   const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null);
@@ -519,38 +606,76 @@ export default function AnalyticsForecastPage() {
   const displayMix = region === "NEM" ? nemMix : (regionMixes?.[region] ?? null);
 
   // ── Demand summary (Renewable Share KPI, this period vs prior) ──
+  // Cached like every other fetch on this page (2026-09-17 fix): this was
+  // the one fetch here with no `getCached` instant-fallback, so on first
+  // load -- or every Period switch, since that changes `since`/`until`
+  // and re-fires this effect -- the KPI blanked to "—" for the full
+  // network round trip with no loading indication, easily mistaken for
+  // the filter itself being broken (it wasn't -- the value was correct
+  // once the fetch actually resolved).
   const [demandSummary, setDemandSummary] = useState<DemandSummary | null>(null);
   const [prevDemandSummary, setPrevDemandSummary] = useState<DemandSummary | null>(null);
+  const [demandSummaryFailed, setDemandSummaryFailed] = useState(false);
   useEffect(() => {
     let cancelled = false;
+    setDemandSummaryFailed(false);
+    const cacheKey = `analytics-forecast:demand-summary:${period}`;
+    const cached = getCached<DemandSummary>(cacheKey, CACHE_MAX_AGE_MS);
+    if (cached) setDemandSummary(cached);
     fetchDemandSummary(since, until)
       .then((d) => {
-        if (!cancelled) setDemandSummary(d);
+        if (cancelled) return;
+        setDemandSummary(d);
+        setCached(cacheKey, d);
       })
-      .catch(() => {});
+      .catch(() => {
+        if (!cancelled) {
+          if (!cached) setDemandSummary(null);
+          setDemandSummaryFailed(true);
+        }
+      });
+    const prevCacheKey = `analytics-forecast:demand-summary-prev:${period}`;
+    const prevCached = getCached<DemandSummary>(prevCacheKey, CACHE_MAX_AGE_MS);
+    if (prevCached) setPrevDemandSummary(prevCached);
     fetchDemandSummary(prevSince, prevUntil)
       .then((d) => {
-        if (!cancelled) setPrevDemandSummary(d);
+        if (cancelled) return;
+        setPrevDemandSummary(d);
+        setCached(prevCacheKey, d);
       })
-      .catch(() => {});
+      .catch(() => {
+        if (!cancelled && !prevCached) setPrevDemandSummary(null);
+      });
     return () => {
       cancelled = true;
     };
-  }, [since, until, prevSince, prevUntil]);
+  }, [since, until, prevSince, prevUntil, period]);
 
-  // ── Current emissions snapshot (Carbon Intensity KPI) ──
-  const [currentEmissions, setCurrentEmissions] = useState<CurrentEmissions | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    fetchCurrentEmissions()
-      .then((c) => {
-        if (!cancelled) setCurrentEmissions(c);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  // ── Carbon Intensity KPI ──
+  // Period+region-scoped (2026-09-17 fix, reported: "Carbon Intensity not
+  // working when Period filter is changed"): an earlier pass here (fixing
+  // a *region*-filter report on the same KPI) made this call forecast-
+  // api's live "current" snapshot endpoints (`/emissions/current`,
+  // `/emissions?region=`) per selected region -- real data, but a live
+  // "as of <time>" reading has no period to speak of, so it correctly
+  // never moved when Period was changed, which is exactly what read as
+  // "not working" here. `/dashboard/carbon`'s own pre-consolidation
+  // "Grid intensity" KPI (this metric's real prior home -- see that
+  // route's now-disabled page.tsx) never used a snapshot endpoint either:
+  // it derived intensity from the period-scoped generation-mix totals
+  // (`emissions / generation`) already being fetched for its donut chart.
+  // `displayMix` below is that exact same real, period+region-scoped
+  // fetch (`fetchGenerationMix(region, since, until)`, keyed on the
+  // Period AND Region selectors, already backing the Generation Mix /
+  // Fuel Mix panels on this page) -- reusing it here, with the same
+  // `total_emissions_kgco2e / total_generation_mwh` formula `regionRows`
+  // above already uses per-region, makes this KPI honestly respond to
+  // both filters with one real fetch already in flight, not a second
+  // live call that structurally can't.
+  const carbonIntensity = useMemo(() => {
+    if (!displayMix || displayMix.total_generation_mwh <= 0) return null;
+    return displayMix.total_emissions_kgco2e / displayMix.total_generation_mwh;
+  }, [displayMix]);
 
   const renewableDeltaPct =
     demandSummary?.renewable_share_pct != null && prevDemandSummary?.renewable_share_pct != null
@@ -676,8 +801,14 @@ export default function AnalyticsForecastPage() {
         <Kpi
           icon={Zap}
           label="Total Demand (Actual)"
-          value={latestActualDemand != null ? `${Math.round(latestActualDemand).toLocaleString()} MW` : "—"}
-          hint={recentBacktestFailed ? "unavailable" : "most recent real reading"}
+          value={formatEnergy(totalActualEnergyMwh)}
+          hint={
+            recentBacktestFailed
+              ? "unavailable"
+              : recentBacktest && !recentBacktestMatchesRegion
+                ? "updating…"
+                : `total · ${periodDef.label.toLowerCase()} · ${region}`
+          }
           sparkline={demandSparkline}
           sparkColor="rgba(52,211,153,0.9)"
         />
@@ -685,7 +816,15 @@ export default function AnalyticsForecastPage() {
           icon={TrendingUp}
           label="Forecast Demand (P50)"
           value={forecast && forecast.points.length > 0 ? `${forecast.points[0].p50.toLocaleString()} MW` : "—"}
-          hint={live ? `next ${live.interval}` : liveFailed ? "unavailable" : undefined}
+          hint={
+            live && liveMatchesRegion
+              ? `next ${live.interval} · ${region}`
+              : liveFailed
+                ? "unavailable"
+                : live && !liveMatchesRegion
+                  ? "updating…"
+                  : undefined
+          }
           sparkline={forecast?.points.slice(0, 12).map((p) => p.p50)}
           sparkColor="rgba(56,189,248,0.9)"
         />
@@ -695,10 +834,12 @@ export default function AnalyticsForecastPage() {
           value={summary ? `${summary.peak.value.toLocaleString()} MW` : "—"}
           hint={
             summary && forecast && peakIdx
-              ? `at step ${peakIdx} of ${forecast.points.length}`
+              ? `at step ${peakIdx} of ${forecast.points.length} · ${region}`
               : liveFailed
                 ? "unavailable"
-                : undefined
+                : live && !liveMatchesRegion
+                  ? "updating…"
+                  : undefined
           }
         />
         <Kpi
@@ -708,17 +849,19 @@ export default function AnalyticsForecastPage() {
           deltaPct={renewableDeltaPct}
           deltaIsPoints
           goodWhen="up"
-          hint={`vs previous ${periodDef.days}d`}
+          hint={demandSummaryFailed && !demandSummary ? "unavailable" : `NEM-wide · vs previous ${periodDef.days}d`}
         />
         <Kpi
           icon={GaugeIcon}
           label="Carbon Intensity"
-          value={
-            currentEmissions?.intensity_kgco2e_per_mwh != null
-              ? `${Math.round(currentEmissions.intensity_kgco2e_per_mwh)} gCO₂e/kWh`
-              : "—"
+          value={carbonIntensity != null ? `${Math.round(carbonIntensity)} gCO₂e/kWh` : "—"}
+          hint={
+            mixFailed && !displayMix
+              ? "unavailable"
+              : displayMix
+                ? `${region === "NEM" ? "NEM-wide" : region} · ${periodDef.label.toLowerCase()} avg`
+                : undefined
           }
-          hint={currentEmissions ? `as of ${new Date(currentEmissions.as_of).toLocaleTimeString("en-AU", { timeZone: "Australia/Sydney", hour: "2-digit", minute: "2-digit" })}` : undefined}
         />
       </div>
 
@@ -926,6 +1069,33 @@ export default function AnalyticsForecastPage() {
                   </div>
                 )}
               />
+              {/* Real per-fuel emissions share -- "Generation Mix" above
+                  has always had this same list (generation-weighted);
+                  this donut never did, so a real but tiny slice (wind,
+                  solar -- near-zero emissions factors, unlike their
+                  real double-digit generation share) had no readable
+                  number anywhere, just an unclickable sliver of the
+                  ring. `.toFixed(1)` (not Generation Mix's `.toFixed(0)`)
+                  so a real ~0.1-0.3% share reads as present, not
+                  rounded down to an indistinguishable "0%". */}
+              <div className="mt-3 w-full space-y-1 text-[11px]">
+                {[...displayMix.items]
+                  .sort((a, b) => b.total_emissions_kgco2e - a.total_emissions_kgco2e)
+                  .map((i) => (
+                    <div key={i.fuel_type} className="flex items-center justify-between">
+                      <span className="flex items-center gap-1.5">
+                        <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: fuelColor(i.fuel_type) }} />
+                        <span className="text-white/70">{formatFuelType(i.fuel_type)}</span>
+                      </span>
+                      <span className="text-white">
+                        {displayMix.total_emissions_kgco2e > 0
+                          ? ((i.total_emissions_kgco2e / displayMix.total_emissions_kgco2e) * 100).toFixed(1)
+                          : "0.0"}
+                        %
+                      </span>
+                    </div>
+                  ))}
+              </div>
             </div>
           ) : (
             <p className="py-8 text-center text-xs text-white/40">
@@ -957,7 +1127,7 @@ export default function AnalyticsForecastPage() {
                 icon={renewableDeltaPct >= 0 ? TrendingUp : Activity}
                 tone={renewableDeltaPct >= 0 ? "positive" : "negative"}
                 title={`Renewable share ${renewableDeltaPct >= 0 ? "growing" : "shrinking"}`}
-                body={`${renewableDeltaPct >= 0 ? "+" : ""}${renewableDeltaPct.toFixed(1)} pts vs the previous ${periodDef.label.toLowerCase()}.`}
+                body={`${renewableDeltaPct >= 0 ? "+" : ""}${renewableDeltaPct.toFixed(1)} percentage points vs the previous ${periodDef.days}-day period.`}
               />
             )}
             {live && (
@@ -982,8 +1152,9 @@ export default function AnalyticsForecastPage() {
         <Card className="lg:col-span-2" title={`Actual vs Predicted — ${region}`}>
           <p className="mb-3 text-xs text-white/50">
             A real walk-forward re-forecast of the currently-served model: what it actually would
-            have predicted (P10–P50–P90) at each of several real points over the last{" "}
-            {RECENT_BACKTEST_DAYS} days, against real actual demand for those same real timestamps.
+            have predicted (P10–P50–P90) at each of several real points over the{" "}
+            {periodDef.label.toLowerCase()}, against real actual demand for those same real
+            timestamps.
           </p>
           {recentBacktest === null ? (
             <p className="py-8 text-center text-xs text-white/40">

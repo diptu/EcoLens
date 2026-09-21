@@ -242,6 +242,76 @@ dev-all: up ## Run every local service together (infra + all app processes) in t
 	( $(MAKE) web             2>&1 | sed -u 's/^/[web] /' ) & \
 	wait
 
+# ── Start/Stop All (detached) ───────────────────────────────────────────────
+# Same ~11 processes `dev-all` runs, but detached (backgrounded, one log
+# file + one PID file per process under $(RUN_DIR)) instead of blocking
+# the terminal with interleaved output. Use this pair across separate
+# terminal sessions / when you want your shell back; `dev-all` stays the
+# interactive, single-terminal, Ctrl+C-stops-everything pair for active
+# development.
+#
+# Killing is best-effort by design, not process-group-based: each
+# service is `$(MAKE) <target>` (itself wrapping a `$(UV) run ...`
+# invocation), and macOS's stock userland has no `setsid` to cleanly put
+# the whole make->uv->real-process chain in its own process group (Linux
+# has one; not assumed present here). `stop-all` below sends TERM to the
+# recorded PID *and* to its direct children (`pkill -P`) -- covers every
+# service target above (each is a single `$(UV) run` exec chain, one
+# child deep), but a target that forks further grandchildren of its own
+# could leave an orphan. Real, disclosed limitation, not silently papered
+# over -- `status-all` after `stop-all` is how you'd notice one.
+RUN_DIR := .run
+LOG_DIR := $(RUN_DIR)/logs
+PID_DIR := $(RUN_DIR)/pids
+ALL_SERVICES := api pipeline train-worker ingestion ingestion-worker ingestion-beat \
+	warehouse warehouse-worker warehouse-beat warehouse-consume web
+
+.PHONY: start-all
+start-all: up ## Start infra + every local app process, detached in the background. Logs: $(LOG_DIR)/<name>.log. Pairs with `stop-all`/`status-all`/`logs-all`.
+	@mkdir -p $(LOG_DIR) $(PID_DIR)
+	@for svc in $(ALL_SERVICES); do \
+		if [ -f $(PID_DIR)/$$svc.pid ] && kill -0 "$$(cat $(PID_DIR)/$$svc.pid)" 2>/dev/null; then \
+			echo "already running: $$svc (pid $$(cat $(PID_DIR)/$$svc.pid))"; \
+			continue; \
+		fi; \
+		nohup $(MAKE) $$svc > $(LOG_DIR)/$$svc.log 2>&1 & \
+		echo $$! > $(PID_DIR)/$$svc.pid; \
+		echo "started: $$svc (pid $$(cat $(PID_DIR)/$$svc.pid)) -> $(LOG_DIR)/$$svc.log"; \
+	done
+
+.PHONY: stop-all
+stop-all: ## Stop every process `start-all` started, then stop infra (`make down`). Safe to run even if nothing's running.
+	@for svc in $(ALL_SERVICES); do \
+		if [ ! -f $(PID_DIR)/$$svc.pid ]; then \
+			echo "not running: $$svc"; \
+			continue; \
+		fi; \
+		pid=$$(cat $(PID_DIR)/$$svc.pid); \
+		if kill -0 "$$pid" 2>/dev/null; then \
+			pkill -TERM -P "$$pid" 2>/dev/null || true; \
+			kill -TERM "$$pid" 2>/dev/null || true; \
+			echo "stopped: $$svc (pid $$pid)"; \
+		else \
+			echo "not running: $$svc (stale pid $$pid)"; \
+		fi; \
+		rm -f $(PID_DIR)/$$svc.pid; \
+	done
+	@$(MAKE) down
+
+.PHONY: status-all
+status-all: ## Show which `start-all`-managed processes are currently running.
+	@for svc in $(ALL_SERVICES); do \
+		if [ -f $(PID_DIR)/$$svc.pid ] && kill -0 "$$(cat $(PID_DIR)/$$svc.pid)" 2>/dev/null; then \
+			echo "up:   $$svc (pid $$(cat $(PID_DIR)/$$svc.pid))"; \
+		else \
+			echo "down: $$svc"; \
+		fi; \
+	done
+
+.PHONY: logs-all
+logs-all: ## Tail logs from every `start-all`-managed process (Ctrl+C to stop tailing -- doesn't stop the services).
+	@tail -f $(LOG_DIR)/*.log
+
 # ── dbt ─────────────────────────────────────────────────────────────────────
 .PHONY: dbt-build
 dbt-build: ## Run `dbt build` against the warehouse (services/data-pipeline/dbt/ecolens). Pass TARGET=dev to override.

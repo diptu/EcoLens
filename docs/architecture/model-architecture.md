@@ -169,21 +169,50 @@ from the Data Ingestion page's "Fine-tune" action), `ml/prune.py`
 (structured pruning + fine-tune recovery), `ml/tune.py` (grid search over
 hidden_size/lr), `adaptive_calibration.py` (re-widens conformal intervals
 against what was actually served, not the raw pre-scale width),
-`bias_correction.py`/`divergence.py`/`blend.py` (post-hoc correction
-layers), `onnx_import.py`/`model_import.py` (importing an externally
-trained bundle straight into the registry).
+`bias_correction.py`/`divergence.py` (post-hoc correction layers),
+`onnx_import.py`/`model_import.py` (importing an externally trained
+bundle straight into the registry). `blend.py` (inverse-recent-error
+ensemble across whichever experts were loaded) was removed 2026-09-12 --
+it had zero real callers anywhere in this codebase, and the decision
+below settled on serving exactly one architecture live rather than
+wiring a runtime ensemble up.
 
 ---
 
 ## 3. Real model architectures registered
 
+![DemandLSTM computational graph — 2-layer LSTM into AttentionPool into P10/P50/P90 quantile heads](demand-lstm-architecture.png)
+
+Diagram generated straight from a real, instantiated `DemandLSTMSkeleton`
+module by `services/forecast-api/scripts/model_skeleton.py` (structurally
+identical to `DemandLSTM`, `app/models/ml.py` -- see that script's own
+docstring for why it's a code-generated copy rather than a hand-drawn
+image). Regenerate with `uv run python scripts/model_skeleton.py` from
+`services/forecast-api/` whenever `DemandLSTM.forward` changes, and
+re-copy the output here, so this doc can't silently drift from the real
+model the way a hand-transcribed diagram can.
+
+**Single served architecture (2026-09-12):** `GET /v1/forecast` and `GET
+/v1/forecast/recent-actual-vs-predicted` read from exactly one
+`ModelRegistry` (LSTM, `lstm_demand`) — there is no `architecture` query
+param, no second live-polled registry, and no runtime ensemble/blend
+across architectures (see §2's note on `blend.py`'s removal). TFT and
+TimesFM remain real, trained/evaluated architectures — reachable through
+`ml/evaluate.py`'s walk-forward harness and `GET /v1/model/versions?
+model_name=...` for offline comparison — just never live-served. LSTM was
+kept as the sole served model because it was already the one marked
+Production; no logged walk-forward comparison against TFT/TimesFM exists
+yet to justify picking a different one (`todo-model-training.md`'s own
+"a real product decision once both have honest numbers" note, still
+open).
+
 | Model (MLflow registered name) | Class | Type | Real status |
 | --- | --- | --- | --- |
-| `lstm_demand` | `DemandLSTM` (`app/models/ml.py`) | LSTM + attention pooling, P10/P50/P90 quantile heads | **Production** — the demand forecast every dashboard page reads |
-| `lstm_demand_tft` | `DemandTFT` (`app/models/tft.py`) | Temporal Fusion Transformer (GRN, variable selection, interpretable multi-head attention) | Registered, evaluated alongside LSTM in the Model Comparison view — experimental, not the default served architecture |
+| `lstm_demand` | `DemandLSTM` (`app/models/ml.py`) | LSTM + attention pooling, P10/P50/P90 quantile heads | **Production** — the only architecture `GET /v1/forecast` ever serves |
+| `lstm_demand_tft` | `DemandTFT` (`app/models/tft.py`) | Temporal Fusion Transformer (GRN, variable selection, interpretable multi-head attention) | Registered, evaluated alongside LSTM in the Model Comparison view — trainable/evaluable, not reachable from live serving at all |
 | `energy_forecast_multi_task` | `EnergyForecastLSTM` (`app/models/energy_forecast_lstm.py`) | Multi-task LSTM, monotonic + generation quantile heads | Real training/serving code exists; no version has been registered in this environment yet (`RESOURCE_DOES_NOT_EXIST` on lookup) |
-| — (no registry entry) | `TimesFMForecaster` (`app/models/timesfm_adapter.py`) | Zero-shot foundation model adapter | Zero-shot by design — never has MLflow Model Registry versions of its own to promote |
-| — (no registry entry) | `BaselineForecaster` (`app/models/baseline.py`) | Seasonal-naive | Not a trained model — the real comparison baseline every walk-forward evaluation scores candidates against |
+| — (no registry entry) | `TimesFMForecaster` (`app/models/timesfm_adapter.py`) | Zero-shot foundation model adapter | Zero-shot by design — never has MLflow Model Registry versions of its own to promote; not reachable from live serving |
+| — (no registry entry) | `BaselineForecaster` (`app/models/baseline.py`) | Seasonal-naive | Not a trained model — the real comparison baseline every walk-forward evaluation scores candidates against, and the circuit-breaker fallback `GET /v1/forecast` itself serves when LSTM's own forecast quality trips open |
 
 ---
 

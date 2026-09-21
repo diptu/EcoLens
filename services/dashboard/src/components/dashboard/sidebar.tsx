@@ -28,7 +28,8 @@
  *   2. Analytics & Forecast           /analytics-forecast            — analysts (combines
  *                                       Forecast Explorer/Carbon Intelligence/Energy Analytics)
  *   3. Data Ingestion                 /data-ingestion                — platform eng
- *   4. Architecture                   /architecture                  — all users (about)
+ *   4. Model Architecture             /architecture                  — all users (about)
+ *   5. Engineering Blog               /blog                          — all users (marketing/engineering write-ups)
  */
 "use client";
 
@@ -36,7 +37,7 @@ import { useState } from "react";
 import { AnimatePresence, m } from "framer-motion";
 import {
   Gauge, LayoutDashboard, Leaf, Menu,
-  Workflow, X, Zap,
+  Newspaper, Workflow, X, Zap,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -59,7 +60,8 @@ const NAV_ITEMS: NavItem[] = [
   { label: "Overview",               href: "/",                             icon: Gauge },
   { label: "Analytics & Forecast",   href: "/analytics-forecast",           icon: LayoutDashboard },
   { label: "Data Ingestion",         href: "/data-ingestion",              icon: Zap },
-  { label: "Architecture",           href: "/architecture",                icon: Workflow },
+  { label: "Model Architecture",     href: "/architecture",                icon: Workflow },
+  { label: "Engineering Blog",       href: "/blog",                        icon: Newspaper },
 ];
 
 function NavLink({ item, active, accent }: { item: NavItem; active: boolean; accent?: "emerald" }) {

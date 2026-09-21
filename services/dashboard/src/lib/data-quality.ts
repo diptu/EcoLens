@@ -1,80 +1,19 @@
 /**
  * Data-quality client for the ecoLens dashboard.
  *
- * **Cutover**: `fetchPublicDataQualitySummary()` -- the only one of
- * these four functions anything actually calls (Executive Dashboard's
- * "Data Quality Score"/"Open Risks" KPIs) -- now talks to
- * `services/ingestion`'s `GET /v1/data-quality/summary/public`
- * (`app/api/v1/data_quality/routes.py` there), not data-pipeline's.
- * Field-for-field identical response shape (ingestion's
- * `PublicDataQualitySummaryResponse` is a direct port). No auth
- * required — this route is deliberately open, and none of this
- * response carries anything sensitive.
- *
  * `fetchPublicIssues`/`fetchPublicOutliers`/`fetchPublicSchemaReport`
- * below still point at data-pipeline — they back routes nothing in this
+ * below point at data-pipeline — they back routes nothing in this
  * dashboard calls yet (see each function's own docstring: they exist
  * for whoever wires up the Data Quality & Anomalies page next, which
- * needs a page redesign first, not a swap-in). Not ported to ingestion
- * for the same reason they were never a priority on data-pipeline
- * either — no live consumer to migrate.
+ * needs a page redesign first, not a swap-in).
+ *
+ * The Executive Dashboard's former "Data Quality Score"/"Open Risks"
+ * KPIs (and the `fetchPublicDataQualitySummary`/`fetchOpenRisks`
+ * functions that backed them, talking to `services/ingestion`'s
+ * `GET /v1/data-quality/summary/public`/`/open-risks`) were removed
+ * 2026-09-12 (explicit request) along with those two functions.
  */
-import { DATA_PIPELINE_API_URL, INGESTION_API_URL } from "./env";
-
-/** Shape of ingestion's `PublicDataQualitySummaryResponse`. */
-export type PublicDataQualitySummary = {
-  as_of: string;
-  data_quality_score_pct: number | null;
-  open_risks_high_plus: number;
-};
-
-/** Live call to `GET /v1/data-quality/summary/public` (ingestion) --
- * throws on any non-2xx or network failure so callers (e.g. the
- * Executive Dashboard KPIs) can fall back to a placeholder rather than
- * show a wrong number. */
-export async function fetchPublicDataQualitySummary(): Promise<PublicDataQualitySummary> {
-  const res = await fetch(`${INGESTION_API_URL}/data-quality/summary/public`);
-  if (!res.ok) {
-    throw new Error(`GET /v1/data-quality/summary/public failed: ${res.status}`);
-  }
-  return res.json();
-}
-
-/** Shape of ingestion's `OpenRiskOut` (`GET /v1/data-quality/open-risks`)
- * -- the real per-issue detail behind `PublicDataQualitySummary.
- * open_risks_high_plus` (2026-08-20): which service, what kind of
- * problem, and why, not just a bare count. */
-export type OpenRisk = {
-  id: string;
-  source_id: string;
-  source_name: string;
-  severity: string;
-  category: string;
-  title: string;
-  description: string;
-  first_seen_at: string;
-  last_seen_at: string;
-  occurrences: number;
-  suggested_action: string;
-};
-
-export type OpenRisksList = {
-  as_of: string;
-  data: OpenRisk[];
-};
-
-/** Live call to `GET /v1/data-quality/open-risks` (ingestion) -- always
- * the exact same `critical`/`high`-severity, 24h-recent issues
- * `open_risks_high_plus` counts, just named instead of only counted.
- * Throws on any non-2xx/network failure, same "let the caller decide
- * the fallback" convention as `fetchPublicDataQualitySummary` above. */
-export async function fetchOpenRisks(): Promise<OpenRisksList> {
-  const res = await fetch(`${INGESTION_API_URL}/data-quality/open-risks`);
-  if (!res.ok) {
-    throw new Error(`GET /v1/data-quality/open-risks failed: ${res.status}`);
-  }
-  return res.json();
-}
+import { DATA_PIPELINE_API_URL } from "./env";
 
 export type IssueSeverity = "critical" | "high" | "medium" | "low";
 export type IssueCategory =

@@ -44,6 +44,37 @@ RUN uv sync --no-dev --frozen --no-install-project
 COPY services/forecast-api .
 RUN uv sync --no-dev --frozen
 
+# Real, hard blocker hit deploying to a Namecheap Quasar VPS
+# (2026-09-21): its hypervisor exposes only a generic `QEMU Virtual CPU
+# version 2.5+` to the guest -- missing sse4_2/popcnt/etc, below the
+# "x86-64-v2" baseline every PyPI numpy/scipy wheel has required since
+# numpy's meson-based build (~2.x). Importing numpy on that box aborted
+# immediately with `RuntimeError: NumPy was built with baseline
+# optimizations: (X86_V2) but your machine doesn't support: (X86_V2)` --
+# not a runtime-togglable dispatch feature, the *compiled minimum* the
+# prebuilt wheel targets, confirmed by reading numpy's own CPU dispatch
+# init code, not guessed. Rebuilding from source with
+# `-Dcpu-baseline=none -Dcpu-dispatch=none` (pure portable x86-64, no
+# SIMD requirement) fixes it -- verified directly on that VPS (~3 min
+# extra build time). torch itself was separately verified fine on that
+# same CPU (its wheel has no such baseline requirement), and so was
+# scipy's own *prebuilt* wheel once numpy alone was fixed (scipy has no
+# equivalent `cpu-baseline`/`cpu-dispatch` meson option of its own --
+# tried it, `ERROR: Unknown option: "cpu-baseline"` -- and doesn't need
+# one; its compiled extensions don't hard-abort on this CPU the way
+# numpy's do). So numpy is the only package that actually needs this.
+# No effect on modern CPUs (this rebuild is functionally a no-op there
+# beyond build time), so unconditional here rather than gated behind a
+# build arg.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential gfortran pkg-config libopenblas-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && uv pip install pip \
+    && .venv/bin/pip install --force-reinstall --no-deps --no-binary numpy \
+         --config-settings=setup-args=-Dcpu-baseline=none \
+         --config-settings=setup-args=-Dcpu-dispatch=none \
+         numpy==2.5.1
+
 # Split the largest site-packages entries out of the venv into their own
 # directories so the runtime stage's COPY below can ship them as
 # separate, smaller layers -- a single ~1GB `COPY` blob (and, it turned
@@ -86,8 +117,16 @@ FROM python:3.12-slim AS runtime
 # `warehouse.Dockerfile`'s own comment named this file for ("ingestion/
 # forecast-api install neither wget nor curl") -- fixed here now that
 # this file's being touched anyway.
+#
+# `libopenblas0` -- the source-rebuilt numpy above (builder stage)
+# links against OpenBLAS at import time; only `libopenblas-dev` was
+# installed there, and multi-stage `COPY --from=builder` never carries
+# apt packages across, just the venv itself. Without the runtime shared
+# lib in *this* stage too, numpy import fails with `libopenblas.so.0:
+# cannot open shared object file` -- real bug, hit immediately after
+# the CPU-baseline fix above on the same VPS.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tini wget \
+    && apt-get install -y --no-install-recommends tini wget libopenblas0 \
     && rm -rf /var/lib/apt/lists/*
 
 # Real, unprivileged runtime user -- the `builder` stage above still runs

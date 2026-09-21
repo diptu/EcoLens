@@ -4,7 +4,7 @@
  */
 import { test, expect } from "@playwright/test";
 
-const PAGES = ["/product", "/resources", "/solutions", "/about"];
+const PAGES = ["/resources"];
 
 for (const route of PAGES) {
   test(`navbar is visible on ${route}`, async ({ page }) => {
@@ -28,23 +28,10 @@ for (const route of AUTH_PAGES) {
   });
 }
 
-test("about → product link works", async ({ page }) => {
-  await page.goto("/about");
-  await page.getByRole("link", { name: "Product", exact: true }).first().click();
-  await page.waitForURL(/\/product/);
-  await expect(page).toHaveURL(/\/product/);
-});
-
-test("about → solutions link works", async ({ page }) => {
-  await page.goto("/about");
-  await page.getByRole("link", { name: "Solutions", exact: true }).first().click();
-  await page.waitForURL(/\/solutions/);
-});
-
-test("about → resources link works", async ({ page }) => {
-  await page.goto("/about");
-  await page.getByRole("link", { name: "Resources", exact: true }).first().click();
-  await page.waitForURL(/\/resources/);
+test("resources → blog link works", async ({ page }) => {
+  await page.goto("/resources");
+  await page.getByRole("link", { name: "Blog", exact: true }).first().click();
+  await page.waitForURL(/\/blog/);
 });
 
 test("/ renders the Executive Dashboard directly", async ({ page }) => {
@@ -58,7 +45,7 @@ test("/dashboard/executive redirects to /", async ({ page }) => {
 });
 
 test("logo goes to /", async ({ page }) => {
-  await page.goto("/product");
+  await page.goto("/resources");
   await page.getByRole("link", { name: /EcoLens/i }).first().click();
   await page.waitForURL((url) => url.pathname === "/");
 });

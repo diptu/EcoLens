@@ -1,14 +1,21 @@
 """`GET /v1/forecast` (`README.md` § API reference) — live serving.
 
-**`architecture` query param** (`"lstm"` default | `"tft"`) selects which
-independently-polled `ModelRegistry` (`app.state.model_registry` /
-`.tft_model_registry`, `app/main.py`'s lifespan) and real MLflow
-registered-model name serves the request -- see `_resolve_registry`.
-Both share every mechanism below (NEM aggregation, circuit-breaker
-fallback, adaptive calibration, caching, forecast reconciliation) via the
-same `Forecaster` protocol (`ml/evaluate.py`) TimesFM-correction doesn't
-implement yet (`docs/onnx-model-import.md`'s Phase 0 note) -- it isn't
-reachable from this route.
+**Single served architecture, LSTM (`lstm_demand`)** -- the one
+`ModelRegistry` (`app.state.model_registry`, `app/main.py`'s lifespan)
+this route reads from. TFT (`lstm_demand_tft`) and TimesFM remain real,
+trained/evaluated architectures (`ml/train_tft.py`, `ml/evaluate.py`,
+`GET /v1/model/versions?model_name=...`) that can still be compared
+offline, but neither is reachable from live serving -- there is no
+`architecture` query param, no second polled registry, and no runtime
+ensemble/blend across them (a prior `ml/blend.py` inverse-recent-error
+blend existed but had zero real callers -- removed rather than kept as
+dead code; see `docs/architecture/model-architecture.md` for the
+decision). Picking LSTM over TFT/TimesFM as the sole served model isn't
+based on a logged walk-forward comparison -- none exists yet -- it's LSTM
+because that was already the one actually marked Production before this
+change; a future comparison could justify switching every reader of this
+route to a different single model, but never to serving more than one at
+once.
 
 **v0 doesn't resample to an arbitrary requested `horizon`/`interval`.**
 The model was trained on, and only ever predicts, its source region's
@@ -47,7 +54,6 @@ from app.api.v1.deps import (
     get_db,
     get_model_registry,
     get_redis_client,
-    get_tft_model_registry,
 )
 from app.core.errors import ApiError
 from app.core.local_cache import TTLCache
@@ -68,7 +74,6 @@ from app.service.ml.evaluate import (
     Forecaster,
     LSTMForecaster,
     RecentBacktestPoint,
-    TFTForecaster,
     _infer_period_steps,
     evaluate_recent_actual_vs_predicted,
 )
@@ -77,11 +82,9 @@ from app.service.ml.features import (
     build_features,
 )
 from app.models.ml import DemandLSTM
-from app.models.tft import DemandTFT
 from app.service.ml.forecast_breaker import OPEN, ForecastCircuitBreaker
 from app.service.ml.forecast_reconciliation import breaker_name, record_served_forecast
 from app.service.ml.registry import ModelBundle, ModelRegistry
-from app.service.ml.train_tft import TFT_MODEL_NAME
 
 router = APIRouter(prefix="/v1", tags=["forecast"])
 log = get_logger(__name__)
@@ -115,57 +118,16 @@ _FEATURE_WARMUP_ROWS = 24
 forecast_local_cache: TTLCache[ForecastResponse] = TTLCache(maxsize=64)
 
 
-#: `architecture` query param -> which `app.state` registry to read and
-#: which real MLflow registered-model name it serves. "lstm" (the
-#: default, unchanged behavior) uses `settings.mlflow_registry_model_name`
-#: directly since that's user-configurable; "tft" is fixed to
-#: `TFT_MODEL_NAME` the same way `training_worker.py`'s own architecture
-#: dispatch already resolves it -- not user-configurable, there's only
-#: ever one TFT registry name in this codebase today.
-def _resolve_registry(
-    architecture: str,
-    settings: Settings,
-    registry: ModelRegistry,
-    tft_registry: ModelRegistry,
-) -> tuple[ModelRegistry, str]:
-    if architecture == "tft":
-        return tft_registry, TFT_MODEL_NAME
-    if architecture == "lstm":
-        return registry, settings.mlflow_registry_model_name
-    raise ApiError(
-        422,
-        "unknown_architecture",
-        f"architecture must be 'lstm' or 'tft', got {architecture!r}",
-    )
-
-
-def _build_forecaster(bundle: ModelBundle, holidays: pd.DataFrame) -> Forecaster:
-    """One `Forecaster` per `bundle.architecture` -- the same real
-    `LSTMForecaster`/`TFTForecaster` classes `ml/evaluate.py`'s
-    walk-forward backtest harness already uses, not a separate live-
-    serving-only implementation. `holidays` is only actually consumed by
-    `TFTForecaster` (to synthesize `DECODER_COLUMNS` calendar features
-    for the horizon steps ahead -- see that class's own docstring); passed
-    unconditionally so callers don't need to know which architectures
-    care about it."""
-    if bundle.architecture == "tft":
-        return TFTForecaster(
-            # `bundle.model`'s static type is `DemandLSTM | DemandTFT` --
-            # `load_bundle` (`ml/registry.py`) guarantees it's a real
-            # `DemandTFT` whenever `bundle.architecture == "tft"` (it's
-            # the one place that constructs `model` from `architecture`
-            # in the first place), a correlation mypy can't see across
-            # two separate dataclass fields. `cast`, not `isinstance`,
-            # since this is a real, already-enforced invariant, not a
-            # runtime check worth repeating on every request.
-            model=cast(DemandTFT, bundle.model),
-            feature_scalers=bundle.feature_scalers,
-            target_scaler=bundle.target_scaler,
-            lookback=bundle.lookback,
-            calibration=bundle.calibration,
-            bias_correction=bundle.bias_correction,
-            holidays=holidays,
-        )
+def _build_forecaster(bundle: ModelBundle) -> Forecaster:
+    """The one real `Forecaster` this service ever serves live --
+    `LSTMForecaster`, the same class `ml/evaluate.py`'s walk-forward
+    backtest harness already uses, not a separate live-serving-only
+    implementation. `bundle.architecture` is always `"lstm"` here since
+    `app.state.model_registry` (`app/main.py`'s lifespan) only ever polls
+    `settings.mlflow_registry_model_name` -- TFT/TimesFM stay real,
+    trained/evaluated architectures reachable through `ml/evaluate.py`
+    and `GET /v1/model/versions?model_name=...` directly, just not this
+    route (see this module's own docstring)."""
     return LSTMForecaster(
         model=cast(DemandLSTM, bundle.model),
         feature_scalers=bundle.feature_scalers,
@@ -257,7 +219,7 @@ async def _run_inference(
     # `forecaster.predict` below (it re-derives the same per-region
     # scaler from `bundle.feature_scalers` itself, on the full engineered
     # history it slices its own `lookback` window from).
-    forecaster = _build_forecaster(bundle, holidays)
+    forecaster = _build_forecaster(bundle)
     region_history = engineered[engineered["region"] == region].reset_index(drop=True)
     p10, p50, p90 = forecaster.predict(region_history, horizon=bundle.horizon)
 
@@ -468,7 +430,7 @@ async def _run_recent_backtest_single_region(
     engineered = build_features(raw_df, holidays=holidays)
     region_df = engineered[engineered["region"] == region].reset_index(drop=True)
 
-    forecaster = _build_forecaster(bundle, holidays)
+    forecaster = _build_forecaster(bundle)
     return evaluate_recent_actual_vs_predicted(
         forecaster, region_df, bundle.horizon, days_back=days_back
     )
@@ -528,10 +490,10 @@ def recent_backtest_cache_key(
     exact key this route reads from -- same convention `model_drift_
     cache_key` (`app/api/v1/model/routes.py`) already establishes.
 
-    `model_name` (added alongside `architecture` dispatch) keeps LSTM's
-    and TFT's own cache entries from colliding on the same `(region,
-    days)` -- both are independently-versioned MLflow models, so
-    `model_version="1"` means two different things for each."""
+    `model_name` is always `settings.mlflow_registry_model_name` (LSTM)
+    now that this route only ever serves one architecture -- kept as its
+    own parameter (rather than inlined) since `cache_warmer.py` writes
+    to the exact same key independently."""
     return f"forecast:recent_backtest:v1:{model_name}:{region}:{days}:{model_version}"
 
 
@@ -541,11 +503,9 @@ def recent_backtest_cache_key(
 async def get_recent_actual_vs_predicted(
     region: str,
     days: int = Query(default=7, ge=1, le=_RECENT_BACKTEST_MAX_DAYS),
-    architecture: str = Query(default="lstm"),
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis_client),
     registry: ModelRegistry = Depends(get_model_registry),
-    tft_registry: ModelRegistry = Depends(get_tft_model_registry),
     settings: Settings = Depends(get_app_settings),
 ) -> RecentBacktestResponse:
     """Real walk-forward re-forecast of the currently-served Production
@@ -573,10 +533,8 @@ async def get_recent_actual_vs_predicted(
     depends on this staying warm to honestly cover its full real 30-day
     period, not just a narrower recent slice.
     """
-    resolved_registry, model_name = _resolve_registry(
-        architecture, settings, registry, tft_registry
-    )
-    bundle = resolved_registry.bundle
+    model_name = settings.mlflow_registry_model_name
+    bundle = registry.bundle
     if bundle is None:
         raise ApiError(
             503, "model_not_loaded", "No Production model version is loaded yet"
@@ -631,17 +589,13 @@ async def get_forecast(
     region: str,
     horizon: str | None = None,
     interval: str | None = None,
-    architecture: str = Query(default="lstm"),
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis_client),
     registry: ModelRegistry = Depends(get_model_registry),
-    tft_registry: ModelRegistry = Depends(get_tft_model_registry),
     settings: Settings = Depends(get_app_settings),
 ) -> ForecastResponse:
-    resolved_registry, model_name = _resolve_registry(
-        architecture, settings, registry, tft_registry
-    )
-    bundle = resolved_registry.bundle
+    model_name = settings.mlflow_registry_model_name
+    bundle = registry.bundle
     if bundle is None:
         raise ApiError(
             503, "model_not_loaded", "No Production model version is loaded yet"

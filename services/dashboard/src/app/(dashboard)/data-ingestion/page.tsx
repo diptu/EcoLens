@@ -297,13 +297,17 @@ export default function OperationalTasksPage() {
   // already had (that button's real call, `fetchAllServicesHealth()`,
   // is reused here so both surfaces agree). Fetches on mount and every
   // 60s after that -- frequent enough to catch a service dying between
-  // visits without hammering 5 real `/readyz` endpoints on every render.
+  // visits without hammering the 4 real `/readyz`-shaped endpoints on
+  // every render.
   //
   // IAM (services/iam) is no longer building, so it's filtered out of
   // this page's grid + "Check System Health" result rather than
   // permanently reading as unhealthy. `lib/health.ts`'s
   // `fetchAllServicesHealth` is left as-is -- system-health/ now applies
-  // this same filter too; operations/ still surfaces IAM.
+  // this same filter too; operations/ still surfaces IAM. That leaves 3
+  // services actually shown here: forecast-api, ingestion, warehouse
+  // (`data-pipeline` removed 2026-09-12 -- no such service exists in
+  // this monorepo any more).
   const fetchOperationalServicesHealth = () =>
     fetchAllServicesHealth().then((results) => results.filter((r) => r.service !== "iam"));
 
@@ -1015,8 +1019,8 @@ export default function OperationalTasksPage() {
             <h2 className="text-base font-semibold text-white">System Diagnostics</h2>
             <p className="text-xs text-white/50">
               Real <code className="rounded bg-black/30 px-1 font-mono">/v1/readyz</code> checks
-              across all 5 services — reachability, readiness, and per-component detail
-              (database/redis/rabbitmq/model), not a fabricated status list.
+              across forecast-api, ingestion, and warehouse — reachability, readiness, and
+              per-component detail (database/redis/rabbitmq/model), not a fabricated status list.
             </p>
           </div>
           <div className="flex items-center gap-2">

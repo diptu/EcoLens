@@ -31,9 +31,7 @@ export function getExecutiveKpis(): ExecutiveKpi[] {
     { label: "Total CO₂e (MTD)", value: "—",  unit: "tCO₂e", delta_pct: null, trend: "flat", good_when: "down" },
     { label: "Carbon Intensity",  value: "—",    unit: "g/kWh", delta_pct: null, trend: "flat", good_when: "down" },
     { label: "Renewable Share",   value: "—",   unit: "%",     delta_pct: null, trend: "flat",   good_when: "up"   },
-    { label: "Avg Wholesale Price (YTD)", value: "—", unit: "$/MWh",   delta_pct: null,  trend: "flat",   good_when: "down"   },
-    { label: "Data Quality Score", value: "—",     unit: "%",  delta_pct: null,  trend: "flat",   good_when: "up"   },
-    { label: "Open Risks",        value: "—",      unit: "high+",  delta_pct: null, trend: "flat", good_when: "down" },
+    { label: "Avg Wholesale Price (MTD)", value: "—", unit: "$/MWh",   delta_pct: null,  trend: "flat",   good_when: "down"   },
   ];
 }
 

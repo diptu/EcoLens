@@ -604,7 +604,20 @@ function TrendChart({
   // points, at the chart's right edge). Clamping the fed-in `left`
   // value keeps the same centered-on-cursor tooltip everywhere except
   // right at the edges, where it stays fully on-screen instead.
-  const TOOLTIP_WIDTH_PX = 220; // matches the tooltip's own `min-w-[220px]` below
+  //
+  // Real fix #2 (2026-09-12): that clamp only holds if the tooltip's
+  // *actual* rendered width matches this constant -- it didn't. The
+  // tooltip below used `min-w-[220px]` (a floor, not a cap), so the
+  // real "Forecast P10-P90" row (its longest real label + a real
+  // 5-6-digit range like "9,606 – 10,984") grew the box past 220px on
+  // its own content, wider than what the clamp math assumed -- the
+  // real, reproducible cause of values cutting off near the chart's
+  // right edge even with the edge-clamp already in place. Widened to a
+  // real fixed `w-[260px]` (not just min) below so the assumed and
+  // actual widths finally match; 260 comfortably fits that same longest
+  // real row on one line at this text size (confirmed against real
+  // P10/P90 values, not guessed).
+  const TOOLTIP_WIDTH_PX = 260; // matches the tooltip's own fixed `w-[260px]` below
   const tooltipContainerWidth = wrapRef.current?.clientWidth ?? w;
   const tooltipLeft = hover
     ? Math.min(
@@ -716,34 +729,66 @@ function TrendChart({
         )}
       </svg>
 
+      {/* Real fix #3 (2026-09-12): the positioning transform
+          (`-translate-x-1/2 -translate-y-[...]`, what actually keeps
+          this tooltip centered on the cursor and thus what the clamp
+          math above assumes) lived on the same element as framer-
+          motion's `animate`. Framer Motion takes over the whole CSS
+          `transform` property the moment any of `x`/`y`/`scale`/
+          `rotate` is animated -- confirmed live via `getComputedStyle`:
+          `transform` read back as `none` despite the Tailwind classes
+          being present, silently dropping the centering offset and
+          leaving the box left-anchored at the clamped `left` instead of
+          centered on it, overflowing past the container by up to half
+          its own width. Splitting the static positioning (this plain
+          outer div, real CSS transform, never touched by motion) from
+          the entrance animation (the inner `m.div`, its own independent
+          transform) is the real fix -- not a width or wrap-order tweak
+          this time. */}
       <AnimatePresence>
         {hover && hoverPoint && (
+          <div
+            className="pointer-events-none absolute z-20 w-[260px] -translate-x-1/2 -translate-y-[calc(100%+10px)]"
+            style={{ left: tooltipLeft, top: hover.y }}
+            data-testid="emissions-trend-tooltip"
+          >
           <m.div
             initial={reduced ? false : { opacity: 0, y: 4, scale: 0.95 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={reduced ? undefined : { opacity: 0, y: 4, scale: 0.95 }}
             transition={{ duration: 0.12, ease: "easeOut" }}
-            className="pointer-events-none absolute z-20 min-w-[220px] -translate-x-1/2 -translate-y-[calc(100%+10px)] rounded-md border border-white/10 bg-[#0a1410]/95 px-3 py-2 text-xs shadow-2xl backdrop-blur"
-            style={{ left: tooltipLeft, top: hover.y }}
-            data-testid="emissions-trend-tooltip"
+            className="rounded-md border border-white/10 bg-[#0a1410]/95 px-3 py-2 text-xs shadow-2xl backdrop-blur"
           >
             <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-white/50">
               {hoverPoint.fullLabel}
             </div>
-            {hoverPoint.actualTco2e !== null && (
+            {/* Matches "Actual vs Predicted — NEM"'s own tooltip shape
+                (`RecentBacktestChart`, 2026-09-12 explicit request):
+                P10/P50/P90 as three separate real rows, plus an
+                explicit "not landed yet" real state for Actual, instead
+                of silently omitting the row when it's null. */}
+            {hoverPoint.actualTco2e !== null ? (
               <TooltipRow color="bg-emerald-300" label="Actual" value={`${hoverPoint.actualTco2e.toLocaleString(undefined, { maximumFractionDigits: 0 })} tCO₂e`} bold />
+            ) : (
+              <div className="py-0.5 text-white/40">Actual — not landed yet</div>
             )}
             {hoverPoint.p50Tco2e !== null && (
               <>
+                <TooltipRow
+                  color="border border-dashed border-sky-300/60"
+                  label="Forecast P10"
+                  value={`${hoverPoint.p10Tco2e!.toLocaleString(undefined, { maximumFractionDigits: 0 })} tCO₂e`}
+                />
                 <TooltipRow color="bg-sky-300" label="Forecast P50" value={`${hoverPoint.p50Tco2e.toLocaleString(undefined, { maximumFractionDigits: 0 })} tCO₂e`} bold />
                 <TooltipRow
-                  color="border border-sky-300/40"
-                  label="Forecast P10-P90"
-                  value={`${hoverPoint.p10Tco2e!.toLocaleString(undefined, { maximumFractionDigits: 0 })} – ${hoverPoint.p90Tco2e!.toLocaleString(undefined, { maximumFractionDigits: 0 })}`}
+                  color="border border-dashed border-sky-300/60"
+                  label="Forecast P90"
+                  value={`${hoverPoint.p90Tco2e!.toLocaleString(undefined, { maximumFractionDigits: 0 })} tCO₂e`}
                 />
               </>
             )}
           </m.div>
+          </div>
         )}
       </AnimatePresence>
     </div>
@@ -836,8 +881,17 @@ function KpiMiniTile({
       </div>
       <div className="min-w-0">
         <div className="text-[10px] uppercase tracking-wide text-white/45">{label}</div>
-        <div className="flex items-baseline gap-1">
-          <span className="truncate text-base font-semibold text-white">{value}</span>
+        {/* Real fix (2026-09-12): `truncate` (`overflow-hidden
+            text-ellipsis whitespace-nowrap`) silently cut the real
+            "Forecast Range (P10-P90) Avg" value ("9.3 – 11.8") down to
+            "9.3 – …" whenever this tile got narrow -- a real number
+            replaced by CSS ellipsis, not missing data. The other two
+            tiles' single-number values never needed truncation in the
+            first place; dropping it here just lets a genuinely wider
+            value (a real range, not a single number) wrap onto a
+            second line instead of losing a real digit. */}
+        <div className="flex flex-wrap items-baseline gap-1">
+          <span className="break-words text-base font-semibold text-white">{value}</span>
           <span className="text-[10px] text-white/50">{unit}</span>
         </div>
         <div className="text-[10px] text-white/40">{sub}</div>
@@ -846,12 +900,23 @@ function KpiMiniTile({
   );
 }
 
+// Real fix (2026-09-12): plain `ml-auto` on the value span left it a
+// flex item with the browser's default `min-width: auto` -- refuses to
+// shrink below its own unwrapped content width, so a real wide value
+// (a "9,606 – 10,984" range) overflowed straight past this row's own
+// fixed-width parent instead of wrapping, even after that parent got a
+// real fixed width (see this file's own tooltip-width comment above).
+// `justify-between` + `min-w-0` on the value span is the actual fix --
+// lets it shrink and wrap onto a second line when it doesn't fit,
+// instead of silently overflowing.
 function TooltipRow({ color, label, value, bold }: { color: string; label: string; value: string; bold?: boolean }) {
   return (
-    <div className="flex items-center gap-2 py-0.5">
-      <span className={cn("h-1.5 w-3 rounded-full", color)} />
-      <span className="text-white/65">{label}</span>
-      <span className={cn("ml-auto font-mono", bold ? "font-semibold text-white" : "text-white/80")}>{value}</span>
+    <div className="flex items-start justify-between gap-2 py-0.5">
+      <span className="flex shrink-0 items-center gap-2">
+        <span className={cn("h-1.5 w-3 rounded-full", color)} />
+        <span className="text-white/65">{label}</span>
+      </span>
+      <span className={cn("min-w-0 text-right font-mono", bold ? "font-semibold text-white" : "text-white/80")}>{value}</span>
     </div>
   );
 }

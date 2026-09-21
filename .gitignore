@@ -210,3 +210,8 @@ dump.rdb
 # copies with `git rm --cached`; this only stops *new* ones from being
 # added.
 *.duckdb
+
+# `make start-all`'s per-process PID files + logs (see root Makefile) --
+# local runtime state, regenerated on every start, never meant to be
+# tracked.
+/.run/

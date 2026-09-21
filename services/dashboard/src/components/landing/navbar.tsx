@@ -21,10 +21,8 @@ import { MotionButton } from "@/components/motion/motion-button";
 import { cn } from "@/lib/utils";
 
 const NAV_LINKS: Array<{ label: string; href: string; hasMenu?: boolean }> = [
-  { label: "Product",   href: "/product",   hasMenu: true },
-  { label: "Solutions", href: "/solutions", hasMenu: true },
   { label: "Resources", href: "/resources", hasMenu: true },
-  { label: "About",     href: "/about" },
+  { label: "Blog",      href: "/blog" },
 ];
 
 export function Navbar() {

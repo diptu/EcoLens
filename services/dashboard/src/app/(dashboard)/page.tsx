@@ -15,8 +15,8 @@ import { useState, useEffect, useMemo, useRef, useId } from "react";
 import Link from "next/link";
 import { m, AnimatePresence, useReducedMotion } from "framer-motion";
 import {
-  AlertCircle, AlertTriangle, ArrowDownRight, ArrowUpRight, Briefcase, ChevronRight, Cloud, Database,
-  DollarSign, Gauge as GaugeIcon, Info, Leaf, ShieldCheck, TrendingUp, Wind, Zap,
+  ArrowDownRight, ArrowUpRight, Briefcase, ChevronRight, Cloud,
+  DollarSign, Gauge as GaugeIcon, Info, Leaf, Wind, Zap,
 } from "lucide-react";
 
 import { Card } from "@/components/dashboard/card";
@@ -30,11 +30,9 @@ import { getCached, getCachedAgeMs, setCached } from "@/lib/local-cache";
 import {
   fetchCurrentEmissions, fetchEmissionsTimeseries,
   fetchGenerationMix, fetchDemandSummary, fetchDemandForecast,
-  fetchRecentBacktest,
+  fetchRecentBacktest, fetchEmissionsForecast,
   fuelColor, formatFuelType, type GenerationMix,
 } from "@/lib/emissions";
-import { fetchOpenRisks, fetchPublicDataQualitySummary, type OpenRisk } from "@/lib/data-quality";
-import { fetchAnomalies, type Anomaly, type AnomalySeverity } from "@/lib/anomalies";
 
 function formatHourLabel(iso: string): string {
   return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -140,6 +138,17 @@ type LiveGridStatus = {
 // not a fabricated one. See `historicalForecastByDate`'s own comment
 // for why this only ever covers a bounded recent real window, not
 // whichever period (7D/15D/30D) is currently selected.
+//
+// `forecastSource` (2026-09-12, real user request: "the backtest band
+// trails Actual by ~2 days, splice in the near-term live forecast for
+// the tail") -- `"backtest"` days come from the walk-forward
+// reconstruction above; `"live"` days are real `GET /v1/emissions/
+// forecast` output instead (demand forecast × *current* intensity,
+// anchored to the model's own real lookback window, not wall-clock
+// "now" -- see `nearTermForecastByDate`'s own comment) for whichever
+// trailing real days the backtest doesn't reach yet. Never both for the
+// same day -- backtest wins whenever it has real data for a day, `live`
+// only fills days it doesn't.
 type CompactTrendPoint = {
   date: string;
   ts: string;
@@ -147,6 +156,7 @@ type CompactTrendPoint = {
   forecastP10Tco2e?: number;
   forecastP50Tco2e?: number;
   forecastP90Tco2e?: number;
+  forecastSource?: "backtest" | "live";
 };
 
 // Icon + accent color per KPI, keyed by label -- purely presentational
@@ -157,23 +167,7 @@ const KPI_ICONS: Record<string, { icon: React.ComponentType<{ className?: string
   "Total CO₂e (MTD)":              { icon: Cloud,       className: "bg-emerald-200/10 text-emerald-100" },
   "Carbon Intensity":              { icon: Leaf,        className: "bg-lime-200/10 text-lime-100" },
   "Renewable Share":               { icon: Wind,        className: "bg-sky-300/10 text-sky-200" },
-  "Avg Wholesale Price (YTD)":     { icon: DollarSign,  className: "bg-amber-300/10 text-amber-200" },
-  "Data Quality Score":            { icon: ShieldCheck, className: "bg-violet-300/10 text-violet-200" },
-  "Open Risks":                    { icon: AlertTriangle, className: "bg-rose-300/10 text-rose-200" },
-};
-
-// Sparkline stroke color per KPI -- matches each card's own icon accent
-// above. Only KPIs with a real fetchable trend series get an entry (see
-// `ExecutiveDashboardPage`'s own comments on `dailySummary`/
-// `compactTrend`/`emissionsSnapshot.intensitySparkline` for exactly
-// which four); Data Quality Score/Open Risks have no historical
-// endpoint to build one from, so they're deliberately absent rather than
-// backed by a fabricated flat line.
-const KPI_SPARK_COLOR: Record<string, string> = {
-  "Total CO₂e (MTD)":          "#6ee7b7",
-  "Carbon Intensity":          "#bef264",
-  "Renewable Share":           "#7dd3fc",
-  "Avg Wholesale Price (YTD)": "#fcd34d",
+  "Avg Wholesale Price (MTD)":     { icon: DollarSign,  className: "bg-amber-300/10 text-amber-200" },
 };
 
 // "Total CO₂e (MTD)" has no real prior-period comparison available (a
@@ -183,7 +177,7 @@ const KPI_SPARK_COLOR: Record<string, string> = {
 const KPI_COMPARISON_LABEL: Record<string, string> = {
   "Carbon Intensity": "vs yesterday",
   "Renewable Share": "vs yesterday",
-  "Avg Wholesale Price (YTD)": "vs yesterday",
+  "Avg Wholesale Price (MTD)": "vs yesterday",
 };
 
 /** Small, non-interactive draw-on trendline for a KPI card footer --
@@ -231,8 +225,8 @@ function MiniTrendline({ data, color }: { data: number[]; color: string }) {
 }
 
 function KpiCard({
-  k, live, sparkline, openRisks,
-}: { k: ExecutiveKpi; live: boolean; sparkline?: number[]; openRisks?: OpenRisk[] | null }) {
+  k, live,
+}: { k: ExecutiveKpi; live: boolean }) {
   const isGood = (k.trend === k.good_when) || (k.trend === "flat");
   const { icon: Icon, className: iconClassName } = KPI_ICONS[k.label] ?? {
     icon: GaugeIcon,
@@ -241,14 +235,7 @@ function KpiCard({
   const trendColor = isGood ? "text-emerald-300" : "text-rose-300";
   return (
     <m.div
-      className={cn(
-        "rounded-xl border border-white/10 bg-white/[0.02] p-4",
-        // `openRisks !== undefined` only for the "Open Risks" card --
-        // makes the whole card (not just the tiny info icon) the hover
-        // target for `OpenRisksTooltip` below, so a real reader finds
-        // the risk detail without having to spot a 12px icon first.
-        openRisks !== undefined && "group relative",
-      )}
+      className="rounded-xl border border-white/10 bg-white/[0.02] p-4"
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3, ease: "easeOut" }}
@@ -259,7 +246,6 @@ function KpiCard({
             <Icon className="h-3.5 w-3.5" />
           </span>
           <h3 className="text-xs font-medium uppercase tracking-wide text-white/60">{k.label}</h3>
-          {openRisks !== undefined && <OpenRisksTooltip risks={openRisks} />}
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
           {k.delta_pct !== null && (
@@ -291,88 +277,13 @@ function KpiCard({
           <span className="text-white/40">{KPI_COMPARISON_LABEL[k.label] ?? "vs last period"}</span>
         </div>
       )}
-      {sparkline && sparkline.length >= 2 && (
-        <MiniTrendline data={sparkline} color={KPI_SPARK_COLOR[k.label] ?? "#6ee7b7"} />
-      )}
     </m.div>
-  );
-}
-
-const RISK_SEVERITY_COLOR: Record<string, string> = {
-  critical: "text-rose-300",
-  high: "text-rose-200",
-};
-
-/** Hover-only breakdown of the real per-service risks behind the "Open
- * Risks" KPI's bare count (2026-08-20) -- same read-only, anchored-to-a-
- * fixed-icon pattern the Models page's `ScoreCalculationTooltip` already
- * establishes for this codebase (not a mouse-tracked tooltip -- those
- * relocate out from under the cursor before a click/read can land).
- * `risks === null` means the fetch hasn't resolved yet (still loading or
- * failed); `[]` is a real, honest "nothing open right now", not treated
- * the same as "don't know yet". */
-function OpenRisksTooltip({ risks }: { risks: OpenRisk[] | null }) {
-  return (
-    <>
-      <Info className="h-3 w-3 cursor-help text-white/40 group-hover:text-white/70" />
-      {/* `right-0`, not `left-0` -- this card sits rightmost in the KPI
-          row (`xl:grid-cols-6`'s last slot), so a `left`-anchored panel
-          this wide would overflow past the viewport's right edge on
-          most screens. Anchoring to the card's right edge and growing
-          leftward keeps it fully on-screen regardless of card position.
-          `group-hover` now fires off the whole card (see `KpiCard`'s own
-          `group relative` above), not just this icon -- hovering
-          anywhere on the card reveals it. */}
-      <div className="pointer-events-none absolute right-0 top-full z-30 mt-2 w-96 rounded-md border border-white/10 bg-[#0a1410]/95 p-3 text-[11px] leading-relaxed text-white/70 opacity-0 shadow-2xl backdrop-blur transition-opacity duration-150 group-hover:opacity-100">
-        <p className="mb-1.5 font-semibold text-white">
-          Open Risks = open issues rated high or critical severity, seen in the last 24h
-        </p>
-        {risks === null ? (
-          <p className="text-white/50">Loading…</p>
-        ) : risks.length === 0 ? (
-          <p className="text-white/50">No high+ severity risks currently open.</p>
-        ) : (
-          <ul className="space-y-2.5">
-            {risks.map((r) => (
-              <li key={r.id} className="border-t border-white/10 pt-2.5 first:border-0 first:pt-0">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="font-semibold text-white">{r.source_name}</span>
-                  <span className={cn("text-[10px] font-medium uppercase tracking-wider", RISK_SEVERITY_COLOR[r.severity] ?? "text-white/50")}>
-                    {r.severity}
-                  </span>
-                </div>
-                <p className="mt-0.5 text-white/80">{r.title}</p>
-                <p className="mt-0.5 text-white/45">{r.description}</p>
-                <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[10px] text-white/35">
-                  <span className="capitalize">{r.category}</span>
-                  <span>·</span>
-                  <span>{r.occurrences} occurrence{r.occurrences === 1 ? "" : "s"}</span>
-                  <span>·</span>
-                  <span>last seen {formatRelativeTime(r.last_seen_at)}</span>
-                </div>
-                <p className="mt-1 rounded border border-white/10 bg-white/[0.03] px-1.5 py-1 text-[10px] text-emerald-100/80">
-                  → {r.suggested_action}
-                </p>
-              </li>
-            ))}
-          </ul>
-        )}
-        <p className="mt-1.5 border-t border-white/10 pt-1.5 text-white/40">
-          Real ingest failures, flagged anomalies (`meta.anomalies`), and actionable schema drift.
-        </p>
-      </div>
-    </>
   );
 }
 
 export default function ExecutiveDashboardPage() {
   const [kpis, setKpis] = useState<ExecutiveKpi[]>(() => getExecutiveKpis());
   const [liveKpiLabels, setLiveKpiLabels] = useState<Set<string>>(new Set());
-  // Real per-issue detail behind the "Open Risks" KPI's bare count
-  // (2026-08-20) -- `null` while loading/never fetched, `[]` once a real
-  // fetch confirms there are none, so the tooltip can tell "still
-  // loading" apart from "genuinely zero risks right now".
-  const [openRisks, setOpenRisks] = useState<OpenRisk[] | null>(null);
 
   // Every section below starts genuinely empty (`null`/`[]`), not a
   // fabricated placeholder -- this is the platform's primary landing
@@ -389,12 +300,10 @@ export default function ExecutiveDashboardPage() {
   // the formerly-mock `getEmissionsTrend()`/`getEmissionsBySource()`)
   // are real fetches, tracked the same "own error, own honest empty
   // state" way every other section on this page already is.
-  const [compactTrend, setCompactTrend] = useState<CompactTrendPoint[] | null>(null);
-
-  // "Emission History"'s own 7D/15D/30D period toggle -- kept
-  // separate from `compactTrend` above (always a fixed real 8 days) so
-  // switching this period never changes the "Total CO₂e (MTD)" KPI
-  // card's own sparkline out from under it.
+  // "Emission History"'s own 7D/15D/30D period toggle. The "Total CO₂e
+  // (MTD)" KPI card shows only its real number (no sparkline, per
+  // request 2026-09-12) -- it no longer needs its own separate fixed
+  // 8-day series.
   const PERIOD_DAYS = { "7D": 7, "15D": 15, "30D": 30 } as const;
   type TrendPeriod = keyof typeof PERIOD_DAYS;
   const [trendPeriod, setTrendPeriod] = useState<TrendPeriod>("7D");
@@ -514,20 +423,119 @@ export default function ExecutiveDashboardPage() {
     };
   }, []);
 
-  // `periodTrend` (real actual, whichever period is selected) + the
-  // real derived band above, joined by real calendar date -- the band
-  // only attaches to days actually inside its own bounded real window;
-  // every other day keeps its real actual-only point, unchanged.
+  // Real near-term live forecast (`GET /v1/emissions/forecast`, same
+  // demand-forecast × intensity methodology `RealEmissionsTrend` already
+  // uses) -- fills in whichever trailing real days `historicalForecast
+  // ByDate` above doesn't reach yet, requested explicitly (2026-09-12)
+  // after the walk-forward backtest's own real ~2-day lag left a
+  // visible gap before Actual's own latest real day. Anchored to the
+  // model's real recent lookback window, not wall-clock "now" -- its
+  // real horizon (`generated_at` params.horizon, 48h/1h-step for NEM)
+  // extends from the same last-real-AEMO-hour the backtest above is
+  // itself capped by, so it reaches however far past that the model's
+  // real 48h horizon allows, not necessarily all the way to today.
+  // `"now"'s intensity held constant` (this fetch's own real
+  // methodology, unlike the backtest band's per-hour historical
+  // intensity) is why this is tagged a distinct `forecastSource` rather
+  // than silently extending the same band.
+  const [nearTermForecastByDate, setNearTermForecastByDate] = useState<
+    Map<string, { p10: number; p50: number; p90: number }>
+  >(new Map());
+  useEffect(() => {
+    let cancelled = false;
+    fetchEmissionsForecast("NEM")
+      .then((forecast) => {
+        if (cancelled) return;
+        const byDate = new Map<string, { p10: number; p50: number; p90: number }>();
+        for (const pt of forecast.points) {
+          const dateKey = pt.ts.slice(0, 10);
+          const existing = byDate.get(dateKey) ?? { p10: 0, p50: 0, p90: 0 };
+          existing.p10 += pt.p10_kgco2e / 1000; // kgCO2e -> tCO2e
+          existing.p50 += pt.p50_kgco2e / 1000;
+          existing.p90 += pt.p90_kgco2e / 1000;
+          byDate.set(dateKey, existing);
+        }
+        setNearTermForecastByDate(byDate);
+      })
+      .catch(() => {
+        if (!cancelled) setNearTermForecastByDate(new Map());
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // `periodTrend` (real actual, whichever period is selected) + the two
+  // real derived bands above, joined by real calendar date -- backtest
+  // wins whenever it has real data for a day; `nearTermForecastByDate`
+  // only fills a day the backtest doesn't reach (in practice just the
+  // most recent 1-2 real days); every other day keeps its real
+  // actual-only point, unchanged.
   const periodTrendWithBand = useMemo(() => {
     if (!periodTrend) return null;
-    if (historicalForecastByDate.size === 0) return periodTrend;
+    if (historicalForecastByDate.size === 0 && nearTermForecastByDate.size === 0) return periodTrend;
     return periodTrend.map((d) => {
-      const band = historicalForecastByDate.get(d.ts.slice(0, 10));
-      return band
-        ? { ...d, forecastP10Tco2e: band.p10, forecastP50Tco2e: band.p50, forecastP90Tco2e: band.p90 }
+      const dateKey = d.ts.slice(0, 10);
+      const backtestBand = historicalForecastByDate.get(dateKey);
+      if (backtestBand) {
+        return {
+          ...d,
+          forecastP10Tco2e: backtestBand.p10,
+          forecastP50Tco2e: backtestBand.p50,
+          forecastP90Tco2e: backtestBand.p90,
+          forecastSource: "backtest" as const,
+        };
+      }
+      const liveBand = nearTermForecastByDate.get(dateKey);
+      return liveBand
+        ? {
+            ...d,
+            forecastP10Tco2e: liveBand.p10,
+            forecastP50Tco2e: liveBand.p50,
+            forecastP90Tco2e: liveBand.p90,
+            forecastSource: "live" as const,
+          }
         : d;
     });
-  }, [periodTrend, historicalForecastByDate]);
+  }, [periodTrend, historicalForecastByDate, nearTermForecastByDate]);
+
+  // Real disclosure for the gap real users kept flagging as "broken":
+  // the backtest band's own last scored day is routinely 1-2 real days
+  // behind Actual's latest day -- not a join bug, a real property of
+  // `fetchRecentBacktest`'s walk-forward methodology (`GET /v1/
+  // forecast/recent-actual-vs-predicted`): a day can only be *scored*
+  // once its own real outcome already happened, so "today" (and often
+  // "yesterday", since `region=NEM` also needs all 5 real NEM regions
+  // to have independently scored the same real hour) can never have a
+  // backtest band yet. `nearTermForecastByDate` (above) fills most of
+  // that gap with the real near-term live forecast instead (2026-09-12,
+  // explicit request) -- `forecastLiveInfo` reports which real days
+  // ended up live-sourced so the caption below can say so; `
+  // forecastBandGap` now only reports whatever real gap remains *after*
+  // that splice (in practice small or none, but the live forecast's own
+  // real 48h horizon is anchored to the same last-real-AEMO-hour the
+  // backtest is, so it isn't guaranteed to reach all the way to
+  // wall-clock "today" either).
+  const forecastLiveInfo = useMemo(() => {
+    if (!periodTrendWithBand) return null;
+    const liveDays = periodTrendWithBand.filter((d) => d.forecastSource === "live");
+    if (liveDays.length === 0) return null;
+    return { firstLiveDate: liveDays[0].date, lastLiveDate: liveDays[liveDays.length - 1].date };
+  }, [periodTrendWithBand]);
+
+  const forecastBandGap = useMemo(() => {
+    if (!periodTrendWithBand || periodTrendWithBand.length === 0) return null;
+    const lastActual = periodTrendWithBand[periodTrendWithBand.length - 1];
+    let lastBanded: CompactTrendPoint | null = null;
+    for (let i = periodTrendWithBand.length - 1; i >= 0; i--) {
+      if (periodTrendWithBand[i].forecastP50Tco2e !== undefined) {
+        lastBanded = periodTrendWithBand[i];
+        break;
+      }
+    }
+    if (!lastBanded || lastBanded.ts === lastActual.ts) return null;
+    return { lastActualDate: lastActual.date, lastBandedDate: lastBanded.date };
+  }, [periodTrendWithBand]);
 
   const periodTrendStats = useMemo(() => {
     if (!periodTrend || periodTrend.length === 0) return null;
@@ -625,15 +633,6 @@ export default function ExecutiveDashboardPage() {
       .sort((a, b) => b.mw - a.mw);
   }, [liveGrid]);
 
-  // Real `meta.anomalies` (ingestion), not a fabricated alerts feed --
-  // this platform has no unified cross-domain alerting system, so this
-  // is the closest honest substitute (same "closest real signal"
-  // reasoning as "Data Quality Score"/"Open Risks" above). Labeled
-  // "Recent Alerts" to match the reference layout, but scoped honestly
-  // in its own subtitle.
-  const [alerts, setAlerts] = useState<Anomaly[] | null>(null);
-  const [alertsError, setAlertsError] = useState<string | null>(null);
-
   // Mount-only `localStorage` hydration for the Demand Forecast Preview
   // card (`forecastPreview`/`demandActual`/`forecastCachedAgeMs` all
   // start `null` above specifically so this runs after the same first
@@ -660,13 +659,7 @@ export default function ExecutiveDashboardPage() {
     if (cachedActual) setDemandActual(cachedActual);
   }, []);
 
-  // Every fetch below hits a real backend endpoint (forecast-api, plus
-  // data-pipeline's one unauthenticated data-quality summary). "Data
-  // Quality Score"/"Open Risks" are real ingestion/data-quality signals,
-  // not sustainability-regulatory compliance or a risk register -- no
-  // such domain exists anywhere in this platform, so those numbers are
-  // the closest honest substitute, not what the KPI's old "Compliance
-  // Score" label implied. See TODO.md's Frontend TODO.
+  // Every fetch below hits a real backend endpoint (forecast-api).
   useEffect(() => {
     let cancelled = false;
 
@@ -713,23 +706,36 @@ export default function ExecutiveDashboardPage() {
     fetchDemandSummary()
       .then((summary) => {
         if (cancelled) return;
+        if (summary.renewable_share_pct == null) return;
         setKpis((prev) =>
-          prev.map((k) => {
-            if (k.label === "Renewable Share" && summary.renewable_share_pct != null) {
-              return { ...k, value: summary.renewable_share_pct.toFixed(1) };
-            }
-            if (k.label === "Avg Wholesale Price (YTD)" && summary.avg_price_mwh != null) {
-              return { ...k, value: `$${summary.avg_price_mwh.toFixed(2)}` };
-            }
-            return k;
-          }),
+          prev.map((k) =>
+            k.label === "Renewable Share"
+              ? { ...k, value: summary.renewable_share_pct!.toFixed(1) }
+              : k,
+          ),
         );
-        setLiveKpiLabels((prev) => {
-          const next = new Set(prev);
-          if (summary.renewable_share_pct != null) next.add("Renewable Share");
-          if (summary.avg_price_mwh != null) next.add("Avg Wholesale Price (YTD)");
-          return next;
-        });
+        setLiveKpiLabels((prev) => new Set(prev).add("Renewable Share"));
+      })
+      .catch(() => {});
+
+    // Real month-to-date average, not YTD (renamed from "(YTD)"
+    // 2026-09-12) -- same `monthStartIso` the "Total CO₂e (MTD)" KPI
+    // above already uses, so both real "this month so far" KPIs share
+    // one honest definition of "MTD". A separate call from the one
+    // above (kept YTD, still backing "Renewable Share") rather than
+    // reusing it, so this rename doesn't silently change what
+    // "Renewable Share" itself is scoped to.
+    fetchDemandSummary(monthStartIso)
+      .then((summary) => {
+        if (cancelled || summary.avg_price_mwh == null) return;
+        setKpis((prev) =>
+          prev.map((k) =>
+            k.label === "Avg Wholesale Price (MTD)"
+              ? { ...k, value: `$${summary.avg_price_mwh!.toFixed(2)}` }
+              : k,
+          ),
+        );
+        setLiveKpiLabels((prev) => new Set(prev).add("Avg Wholesale Price (MTD)"));
       })
       .catch(() => {});
 
@@ -778,7 +784,7 @@ export default function ExecutiveDashboardPage() {
           const d = ((today.priceMwh - yesterday.priceMwh) / yesterday.priceMwh) * 100;
           setKpis((prev) =>
             prev.map((k) =>
-              k.label === "Avg Wholesale Price (YTD)"
+              k.label === "Avg Wholesale Price (MTD)"
                 ? { ...k, delta_pct: d, trend: d === 0 ? "flat" : d > 0 ? "up" : "down" }
                 : k,
             ),
@@ -786,39 +792,6 @@ export default function ExecutiveDashboardPage() {
         }
       });
     }
-
-    fetchPublicDataQualitySummary()
-      .then((dq) => {
-        if (cancelled) return;
-        setKpis((prev) =>
-          prev.map((k) => {
-            if (k.label === "Data Quality Score" && dq.data_quality_score_pct != null) {
-              return { ...k, value: dq.data_quality_score_pct.toFixed(1) };
-            }
-            if (k.label === "Open Risks") {
-              return { ...k, value: dq.open_risks_high_plus.toLocaleString() };
-            }
-            return k;
-          }),
-        );
-        setLiveKpiLabels((prev) => {
-          const next = new Set(prev);
-          if (dq.data_quality_score_pct != null) next.add("Data Quality Score");
-          next.add("Open Risks");
-          return next;
-        });
-      })
-      .catch(() => {});
-
-    fetchOpenRisks()
-      .then((r) => {
-        if (!cancelled) setOpenRisks(r.data);
-      })
-      .catch(() => {
-        // Real fetch failure -- leave `openRisks` at `null` so the
-        // tooltip can say "couldn't load detail" rather than falsely
-        // implying zero real risks.
-      });
 
     // Emissions Snapshot's 3 mini-stats: `totalTco2e`/sparkline come from
     // the last 24 of a real 48h timeseries fetch; `gridIntensity` is a
@@ -926,53 +899,62 @@ export default function ExecutiveDashboardPage() {
     // the Emissions Trend forecast band falls back below) -- scope is
     // shown in the card so a narrower NSW1-only forecast is never
     // presented as if it were the full NEM.
-    fetchDemandForecast("NEM")
-      .then((forecast) => ({ forecast, scope: "NEM" }))
-      .catch(() =>
-        fetchDemandForecast("NSW1").then((forecast) => ({ forecast, scope: "NSW1" })),
-      )
-      .then(({ forecast, scope }) => {
-        if (cancelled || forecast.points.length === 0) return;
-        const p50s = forecast.points.map((p) => p.p50);
-        const freshForecastPreview: ForecastPreview = {
-          current: Math.round(p50s[0]),
-          peak: Math.round(Math.max(...p50s)),
-          min: Math.round(Math.min(...p50s)),
-          points: forecast.points.map((p) => ({
-            ts: p.ts,
-            tMs: new Date(p.ts).getTime(),
-            p10: p.p10,
-            p50: p.p50,
-            p90: p.p90,
-          })),
-          horizonLabel: `next ${forecast.horizon}`,
-          scope,
-        };
-        setForecastPreview(freshForecastPreview);
-        setCached(DEMAND_FORECAST_CACHE_KEY, freshForecastPreview);
-        setForecastCachedAgeMs(null);
-      })
-      .catch((err) => {
-        if (!cancelled) setForecastError(err instanceof Error ? err.message : "failed to load");
-      });
-
-    // "Emissions Trend (compact)" -- real daily-bucketed actual
-    // emissions, last 8 days, NEM-wide. No forecast band (see
-    // `CompactTrendPoint`'s own comment).
-    fetchEmissionsTimeseries("day", 8)
-      .then((series) => {
+    //
+    // Retried up to 3x on a real `TypeError` ("Failed to fetch") --
+    // the browser's own connection-refused error, distinct from a real
+    // HTTP error response -- with backoff, since this effect only ever
+    // runs once per mount: a `docker compose up` forecast-api container
+    // that's still binding its port when this page first loads would
+    // otherwise fail once and stay "Unavailable" forever, even after the
+    // backend comes up a few seconds later, with no way out short of a
+    // manual reload. A real non-network error (e.g. a 503) still fails
+    // immediately, same as before -- only "can't reach it at all" retries.
+    async function loadForecastPreview() {
+      const MAX_ATTEMPTS = 3;
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
         if (cancelled) return;
-        setCompactTrend(
-          series.points
-            .filter((p) => p.total_emissions_kgco2e !== null)
-            .map((p) => ({
-              date: new Date(p.bucket).toLocaleDateString([], { month: "short", day: "2-digit" }),
-              ts: p.bucket,
-              actualTco2e: p.total_emissions_kgco2e! / 1000,
+        try {
+          let forecast, scope: "NEM" | "NSW1";
+          try {
+            forecast = await fetchDemandForecast("NEM");
+            scope = "NEM";
+          } catch {
+            forecast = await fetchDemandForecast("NSW1");
+            scope = "NSW1";
+          }
+          if (cancelled || forecast.points.length === 0) return;
+          const p50s = forecast.points.map((p) => p.p50);
+          const freshForecastPreview: ForecastPreview = {
+            current: Math.round(p50s[0]),
+            peak: Math.round(Math.max(...p50s)),
+            min: Math.round(Math.min(...p50s)),
+            points: forecast.points.map((p) => ({
+              ts: p.ts,
+              tMs: new Date(p.ts).getTime(),
+              p10: p.p10,
+              p50: p.p50,
+              p90: p.p90,
             })),
-        );
-      })
-      .catch(() => {});
+            horizonLabel: `next ${forecast.horizon}`,
+            scope,
+          };
+          setForecastPreview(freshForecastPreview);
+          setCached(DEMAND_FORECAST_CACHE_KEY, freshForecastPreview);
+          setForecastCachedAgeMs(null);
+          return;
+        } catch (err) {
+          const isNetworkError = err instanceof TypeError;
+          if (!isNetworkError || attempt === MAX_ATTEMPTS) {
+            if (!cancelled) {
+              setForecastError(err instanceof Error ? err.message : "failed to load");
+            }
+            return;
+          }
+          await new Promise((r) => setTimeout(r, attempt * 2000));
+        }
+      }
+    }
+    loadForecastPreview();
 
     // "Emissions by Source" -- real last-24h, NEM-wide per-fuel-type
     // generation mix (`GET /v1/generation-mix`) -- see `emissionsBySource`'s
@@ -1011,43 +993,20 @@ export default function ExecutiveDashboardPage() {
         if (!cancelled) setLiveGridError(err instanceof Error ? err.message : "failed to load");
       });
 
-    // "Recent Alerts" -- real `meta.anomalies`, newest-detected first
-    // (see `alerts`'s own comment above for why this stands in for a
-    // unified alerts feed this platform doesn't have).
-    fetchAnomalies({ limit: 4 })
-      .then((res) => {
-        if (cancelled) return;
-        setAlerts(
-          [...res.data].sort(
-            (a, b) => new Date(b.detected_at).getTime() - new Date(a.detected_at).getTime(),
-          ),
-        );
-      })
-      .catch((err) => {
-        if (!cancelled) setAlertsError(err instanceof Error ? err.message : "failed to load");
-      });
-
     return () => {
       cancelled = true;
     };
   }, []);
 
   // Per-KPI sparkline data, real-fetch-backed only (see `KPI_SPARK_COLOR`'s
-  // own comment for which four KPIs this covers and why the other two
-  // don't get one). `dailySummary`'s two series are omitted entirely
-  // (not zero-filled) if any real day in the window is missing, rather
-  // than drawing a trendline through a fabricated gap-fill value.
-  const kpiSparklines = useMemo(() => {
-    const allPresent = (arr: (number | null)[]): arr is number[] => arr.every((v) => v !== null);
-    const renewableSeries = dailySummary?.map((d) => d.renewablePct) ?? null;
-    const priceSeries = dailySummary?.map((d) => d.priceMwh) ?? null;
-    return {
-      "Total CO₂e (MTD)": compactTrend ? compactTrend.map((d) => Math.round(d.actualTco2e)) : undefined,
-      "Carbon Intensity": emissionsSnapshot?.intensitySparkline,
-      "Renewable Share": renewableSeries && allPresent(renewableSeries) ? renewableSeries : undefined,
-      "Avg Wholesale Price (YTD)": priceSeries && allPresent(priceSeries) ? priceSeries : undefined,
-    } as Record<string, number[] | undefined>;
-  }, [compactTrend, emissionsSnapshot, dailySummary]);
+  // own comment for which KPIs this covers and why the others don't get
+  // one -- "Total CO₂e (MTD)"/"Carbon Intensity" show only their real
+  // number, no sparkline, per request 2026-09-12; `emissionsSnapshot.
+  // intensitySparkline` itself is kept -- still used by the "Emissions
+  // Snapshot"/"Live Grid Status" mini-stats below). Every top-level KPI
+  // card now shows only its real number, no sparkline (per request
+  // 2026-09-12) -- `dailySummary` itself is kept; its "vs yesterday"
+  // delta/trend computation below still needs it.
 
   return (
     <div className="space-y-6">
@@ -1063,15 +1022,13 @@ export default function ExecutiveDashboardPage() {
         <p className="mt-1 text-sm text-white/60">High-level sustainability + financial KPIs for leadership.</p>
       </m.div>
 
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
         {kpis.map((k, i) => (
           <KpiCardWithDelay
             key={k.label}
             k={k}
             delay={i * 0.05}
             live={liveKpiLabels.has(k.label)}
-            sparkline={kpiSparklines[k.label]}
-            openRisks={k.label === "Open Risks" ? openRisks : undefined}
           />
         ))}
       </div>
@@ -1252,14 +1209,12 @@ export default function ExecutiveDashboardPage() {
                   icon={Cloud}
                   label="Total emissions (24h)"
                   value={`${emissionsSnapshot.totalTco2e.toLocaleString()} tCO₂e`}
-                  sparkline={emissionsSnapshot.sparkline}
                   color="#34d399"
                 />
                 <GridMiniStatRow
                   icon={Zap}
                   label="Grid intensity (avg)"
                   value={`${Math.round(emissionsSnapshot.gridIntensity).toLocaleString()} g/kWh`}
-                  sparkline={emissionsSnapshot.intensitySparkline}
                   color="#fbbf24"
                 />
                 <GridMiniStatRow
@@ -1358,6 +1313,31 @@ export default function ExecutiveDashboardPage() {
           ) : (
             <>
               <CompactTrendChart data={periodTrendWithBand ?? periodTrend} />
+              {(forecastLiveInfo || forecastBandGap) && (
+                <p className="mt-2 flex items-start gap-1.5 text-[11px] text-amber-200/80">
+                  <Info className="mt-0.5 h-3 w-3 shrink-0" />
+                  <span>
+                    {forecastLiveInfo && (
+                      <>
+                        {forecastLiveInfo.firstLiveDate === forecastLiveInfo.lastLiveDate
+                          ? `${forecastLiveInfo.firstLiveDate} uses`
+                          : `${forecastLiveInfo.firstLiveDate}–${forecastLiveInfo.lastLiveDate} use`}{" "}
+                        the near-term live forecast (dotted violet — real demand forecast × current
+                        intensity) instead of the walk-forward backtest reconstruction (dashed blue)
+                        used before it, since a day can only be backtest-scored once its own real
+                        outcome has happened.
+                      </>
+                    )}
+                    {forecastLiveInfo && forecastBandGap && " "}
+                    {forecastBandGap && (
+                      <>
+                        Forecast still ends {forecastBandGap.lastBandedDate} — real data doesn&apos;t
+                        yet reach Actual&apos;s latest day ({forecastBandGap.lastActualDate}).
+                      </>
+                    )}
+                  </span>
+                </p>
+              )}
               {periodTrendStats && (
                 <div className="mt-4 grid grid-cols-2 gap-4 border-t border-white/5 pt-4 text-[11px] md:grid-cols-4">
                   <div>
@@ -1404,30 +1384,7 @@ export default function ExecutiveDashboardPage() {
           )}
         </Card>
 
-        {/* Recent Alerts — real anomalies feed (see `alerts`'s own
-            comment above on why this substitutes for a dedicated
-            cross-platform alerting system this app doesn't have). */}
-        <Card>
-          <div className="mb-1 flex items-center justify-between">
-            <h2 className="text-base font-semibold text-white">Recent Alerts</h2>
-          </div>
-          <p className="mb-2 text-xs text-white/50">Data-quality &amp; ingestion anomalies</p>
-          {alerts === null ? (
-            <p className="py-16 text-center text-xs text-white/40">
-              {alertsError ? `Unavailable — ${alertsError}` : "Loading…"}
-            </p>
-          ) : alerts.length === 0 ? (
-            <p className="py-16 text-center text-xs text-white/40">No recent anomalies.</p>
-          ) : (
-            <ul className="divide-y divide-white/5">
-              {alerts.map((a) => (
-                <AlertRow key={a.id} a={a} />
-              ))}
-            </ul>
-          )}
-        </Card>
-
-        <Card>
+        <Card className="lg:col-span-2">
           <h2 className="mb-3 text-base font-semibold text-white">Emissions by Source</h2>
           <p className="mb-3 -mt-2 text-xs text-white/50">
             Last 24 hours, by fuel type (Scope 2 grid electricity — no Scope 1/3 source exists in
@@ -1448,10 +1405,10 @@ export default function ExecutiveDashboardPage() {
 }
 
 function KpiCardWithDelay({
-  k, delay, live, sparkline, openRisks,
-}: { k: ExecutiveKpi; delay: number; live: boolean; sparkline?: number[]; openRisks?: OpenRisk[] | null }) {
+  k, delay, live,
+}: { k: ExecutiveKpi; delay: number; live: boolean }) {
   return (
-    <KpiCard k={k} live={live} sparkline={sparkline} openRisks={openRisks} key={k.label + delay} />
+    <KpiCard k={k} live={live} key={k.label + delay} />
   );
 }
 
@@ -1735,7 +1692,7 @@ function Sparkline({
  * intensity, not fabricated). Ported from the v18x prototype's own
  * simple inline `MiniChart(data)` layout, but real data since the
  * 2026-08-08 cutover -- `data` is real `fetchEmissionsTimeseries` points
- * (`periodTrend`/`compactTrend`), not `getEmissionsTrend()`'s mock
+ * (`periodTrend`), not `getEmissionsTrend()`'s mock
  * (unused anywhere in this file now). Distinct from `RealEmissionsTrend`
  * -- this one is deliberately simpler (no region/horizon selectors),
  * matching the reference screenshot's smaller bottom-left panel.
@@ -1754,27 +1711,42 @@ function CompactTrendChart({ data }: { data: CompactTrendPoint[] }) {
   const areaPath = `${actualPath} L ${x(data.length - 1).toFixed(1)} ${padT + innerH} L ${x(0).toFixed(1)} ${padT + innerH} Z`;
 
   // Real forecast band -- only the (in practice contiguous, most-recent)
-  // days `historicalForecastByDate` actually covers carry these fields;
-  // every other day is plotted as real actual-only, same as before.
-  const bandPoints = data
-    .map((d, i) => ({ i, d }))
-    .filter(
-      (
-        p,
-      ): p is { i: number; d: CompactTrendPoint & { forecastP10Tco2e: number; forecastP50Tco2e: number; forecastP90Tco2e: number } } =>
-        p.d.forecastP10Tco2e !== undefined && p.d.forecastP50Tco2e !== undefined && p.d.forecastP90Tco2e !== undefined,
-    );
-  const bandAreaPath =
-    bandPoints.length > 0
-      ? [
-          ...bandPoints.map(({ i, d }, j) => `${j === 0 ? "M" : "L"} ${x(i).toFixed(1)} ${y(d.forecastP90Tco2e).toFixed(1)}`),
-          ...[...bandPoints].reverse().map(({ i, d }) => `L ${x(i).toFixed(1)} ${y(d.forecastP10Tco2e).toFixed(1)}`),
-          "Z",
-        ].join(" ")
-      : "";
-  const forecastP50Path = bandPoints
-    .map(({ i, d }, j) => `${j === 0 ? "M" : "L"} ${x(i).toFixed(1)} ${y(d.forecastP50Tco2e).toFixed(1)}`)
-    .join(" ");
+  // days either real source actually covers carry these fields; every
+  // other day is plotted as real actual-only, same as before. Split by
+  // `forecastSource` (2026-09-12) so the two real, differently-derived
+  // methodologies (backtest reconstruction vs. near-term live forecast)
+  // render as visually distinct segments rather than one line silently
+  // switching what it means partway through.
+  type BandPoint = { i: number; d: CompactTrendPoint & { forecastP10Tco2e: number; forecastP50Tco2e: number; forecastP90Tco2e: number } };
+  const isBandPoint = (p: { i: number; d: CompactTrendPoint }): p is BandPoint =>
+    p.d.forecastP10Tco2e !== undefined && p.d.forecastP50Tco2e !== undefined && p.d.forecastP90Tco2e !== undefined;
+  const allBandPoints = data.map((d, i) => ({ i, d })).filter(isBandPoint);
+  const backtestPoints = allBandPoints.filter(({ d }) => d.forecastSource !== "live");
+  const livePointsRaw = allBandPoints.filter(({ d }) => d.forecastSource === "live");
+  // Shares the backtest's own last point as the live segment's first
+  // point too (a real, already-computed value, not an interpolated
+  // one) purely so the two segments visually connect at the seam
+  // instead of leaving a gap -- only when both segments are non-empty.
+  const livePoints =
+    backtestPoints.length > 0 && livePointsRaw.length > 0
+      ? [backtestPoints[backtestPoints.length - 1], ...livePointsRaw]
+      : livePointsRaw;
+
+  function bandAreaOf(points: BandPoint[]): string {
+    if (points.length === 0) return "";
+    return [
+      ...points.map(({ i, d }, j) => `${j === 0 ? "M" : "L"} ${x(i).toFixed(1)} ${y(d.forecastP90Tco2e).toFixed(1)}`),
+      ...[...points].reverse().map(({ i, d }) => `L ${x(i).toFixed(1)} ${y(d.forecastP10Tco2e).toFixed(1)}`),
+      "Z",
+    ].join(" ");
+  }
+  function forecastLineOf(points: BandPoint[]): string {
+    return points.map(({ i, d }, j) => `${j === 0 ? "M" : "L"} ${x(i).toFixed(1)} ${y(d.forecastP50Tco2e).toFixed(1)}`).join(" ");
+  }
+  const bandAreaPath = bandAreaOf(backtestPoints);
+  const forecastP50Path = forecastLineOf(backtestPoints);
+  const liveBandAreaPath = bandAreaOf(livePoints);
+  const liveForecastP50Path = forecastLineOf(livePoints);
 
   // Real peak/low day, highlighted with a bigger marker -- ties (more
   // than one day sharing the exact max/min) highlight every matching
@@ -1819,7 +1791,16 @@ function CompactTrendChart({ data }: { data: CompactTrendPoint[] }) {
   // needed (2026-08-11): centering on the cursor pushed the tooltip
   // partly outside this card's `overflow-hidden` bounds near either
   // edge of the chart. Clamped to stay fully on-screen everywhere.
-  const TOOLTIP_WIDTH_PX = 190; // matches this tooltip's own `min-w-[180px]` below, plus margin
+  //
+  // Real fix #2 (2026-09-12, same bug `RealEmissionsTrend`'s own
+  // tooltip had): the previous `min-w-[180px]` was a floor, not a cap,
+  // so the real "Forecast P10-P90" row -- daily *totals* here, so a
+  // real range like "163,702 – 314,534 tCO₂e" -- grew the box well past
+  // what this constant assumed, overflowing past the clamped edge
+  // anyway. Widened to a real fixed `w-[300px]` (not min) below so the
+  // assumed and actual widths match; sized against that same real
+  // widest-observed range, not guessed.
+  const TOOLTIP_WIDTH_PX = 300; // matches this tooltip's own fixed `w-[300px]` below
   const tooltipContainerWidth = wrapRef.current?.clientWidth ?? w;
   const tooltipLeft = hover
     ? Math.min(
@@ -1834,17 +1815,26 @@ function CompactTrendChart({ data }: { data: CompactTrendPoint[] }) {
 
   return (
     <>
-      {bandPoints.length > 0 && (
+      {allBandPoints.length > 0 && (
         <div className="mb-2 flex flex-wrap items-center gap-3 text-[10px] text-white/55">
           <span className="inline-flex items-center gap-1.5">
             <span className="h-1.5 w-3 rounded-full bg-emerald-300" /> Actual
           </span>
-          <span className="inline-flex items-center gap-1.5">
-            <span className="h-0.5 w-3 rounded-full border-t-2 border-dashed border-sky-300" /> Forecast (P50)
-          </span>
-          <span className="inline-flex items-center gap-1.5">
-            <span className="h-2.5 w-3.5 rounded-sm border border-sky-300/40 bg-sky-300/15" /> P10-P90
-          </span>
+          {backtestPoints.length > 0 && (
+            <>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="h-0.5 w-3 rounded-full border-t-2 border-dashed border-sky-300" /> Forecast (P50)
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="h-2.5 w-3.5 rounded-sm border border-sky-300/40 bg-sky-300/15" /> P10-P90
+              </span>
+            </>
+          )}
+          {livePointsRaw.length > 0 && (
+            <span className="inline-flex items-center gap-1.5">
+              <span className="h-0.5 w-3 rounded-full border-t-2 border-dotted border-violet-300" /> Live Forecast (P50)
+            </span>
+          )}
         </div>
       )}
       <div ref={wrapRef} className="relative" data-testid="emissions-trend-compact-chart">
@@ -1882,6 +1872,37 @@ function CompactTrendChart({ data }: { data: CompactTrendPoint[] }) {
             stroke="#7dd3fc"
             strokeWidth={1.75}
             strokeDasharray="6 4"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            initial={reduced ? false : { pathLength: 0 }}
+            animate={{ pathLength: 1 }}
+            transition={{ duration: 0.9, delay: 0.3, ease: "easeInOut" }}
+          />
+        )}
+
+        {/* Live near-term forecast segment (2026-09-12) -- a real, but
+            differently-derived value (current intensity, not each
+            hour's own historical intensity), so it gets its own color
+            rather than silently extending the backtest band's own
+            sky-blue as if it were the same methodology. */}
+        {liveBandAreaPath && (
+          <m.path
+            d={liveBandAreaPath}
+            fill="rgba(196,181,253,0.16)"
+            stroke="none"
+            initial={reduced ? false : { opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.6, delay: 0.2 }}
+            data-testid="emissions-trend-compact-live-forecast-band"
+          />
+        )}
+        {liveForecastP50Path && (
+          <m.path
+            d={liveForecastP50Path}
+            fill="none"
+            stroke="#c4b5fd"
+            strokeWidth={1.75}
+            strokeDasharray="1.5 4"
             strokeLinecap="round"
             strokeLinejoin="round"
             initial={reduced ? false : { pathLength: 0 }}
@@ -1945,38 +1966,68 @@ function CompactTrendChart({ data }: { data: CompactTrendPoint[] }) {
         )}
       </svg>
 
+      {/* Real fix (2026-09-12, same bug `RealEmissionsTrend`'s tooltip
+          had): the positioning transform (`-translate-x-1/2
+          -translate-y-[...]`, what the clamp math above assumes keeps
+          this centered on the cursor) lived on the same element as
+          framer-motion's `animate`. Framer Motion takes over the whole
+          CSS `transform` property once any of `x`/`y`/`scale`/`rotate`
+          is animated, silently dropping the Tailwind transform classes
+          -- leaving the box left-anchored at the clamped `left` instead
+          of centered on it, overflowing past the container by up to
+          half its own width. Static positioning now lives on this
+          plain outer div (real CSS transform, never touched by
+          motion); the inner `m.div` only handles the entrance
+          animation, its own independent transform. */}
       <AnimatePresence>
         {hover && hoverPoint && hoverLabel && (
+          <div
+            className="pointer-events-none absolute z-20 w-[300px] -translate-x-1/2 -translate-y-[calc(100%+10px)]"
+            style={{ left: tooltipLeft, top: hover.y }}
+            data-testid="emissions-trend-compact-tooltip"
+          >
           <m.div
             initial={reduced ? false : { opacity: 0, y: 4, scale: 0.95 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={reduced ? undefined : { opacity: 0, y: 4, scale: 0.95 }}
             transition={{ duration: 0.12, ease: "easeOut" }}
-            className="pointer-events-none absolute z-20 min-w-[180px] -translate-x-1/2 -translate-y-[calc(100%+10px)] rounded-md border border-white/10 bg-[#0a1410]/95 px-3 py-2 text-xs shadow-2xl backdrop-blur"
-            style={{ left: tooltipLeft, top: hover.y }}
-            data-testid="emissions-trend-compact-tooltip"
+            className="rounded-md border border-white/10 bg-[#0a1410]/95 px-3 py-2 text-xs shadow-2xl backdrop-blur"
           >
             <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-white/50">{hoverLabel}</div>
-            <div className="flex items-center gap-2 py-0.5">
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-300" />
-              <span className="text-white/65">Actual</span>
-              <span className="ml-auto font-mono font-medium text-white">
+            {/* `justify-between` + `min-w-0` on each value span (not
+                plain `ml-auto`, 2026-09-12 real fix): a bare `ml-auto`
+                flex item keeps the browser's default `min-width: auto`,
+                which refuses to shrink below its own unwrapped content
+                width -- a real wide "Forecast P10-P90" range value
+                overflowed straight past this tooltip's own fixed width
+                instead of wrapping. `min-w-0` lets it actually shrink
+                and wrap onto a second line when it doesn't fit. */}
+            <div className="flex items-start justify-between gap-2 py-0.5">
+              <span className="flex shrink-0 items-center gap-2">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-300" />
+                <span className="text-white/65">Actual</span>
+              </span>
+              <span className="min-w-0 text-right font-mono font-medium text-white">
                 {hoverPoint.actualTco2e.toLocaleString(undefined, { maximumFractionDigits: 0 })} tCO₂e
               </span>
             </div>
             {hoverPoint.forecastP50Tco2e !== undefined && (
               <>
-                <div className="flex items-center gap-2 py-0.5">
-                  <span className="h-1.5 w-1.5 rounded-full bg-sky-300" />
-                  <span className="text-white/65">Forecast P50</span>
-                  <span className="ml-auto font-mono font-medium text-white">
+                <div className="flex items-start justify-between gap-2 py-0.5">
+                  <span className="flex shrink-0 items-center gap-2">
+                    <span className="h-1.5 w-1.5 rounded-full bg-sky-300" />
+                    <span className="text-white/65">Forecast P50</span>
+                  </span>
+                  <span className="min-w-0 text-right font-mono font-medium text-white">
                     {hoverPoint.forecastP50Tco2e.toLocaleString(undefined, { maximumFractionDigits: 0 })} tCO₂e
                   </span>
                 </div>
-                <div className="flex items-center gap-2 py-0.5">
-                  <span className="h-1.5 w-1.5 rounded-full border border-sky-300/40" />
-                  <span className="text-white/65">Forecast P10-P90</span>
-                  <span className="ml-auto font-mono text-white/80">
+                <div className="flex items-start justify-between gap-2 py-0.5">
+                  <span className="flex shrink-0 items-center gap-2">
+                    <span className="h-1.5 w-1.5 rounded-full border border-sky-300/40" />
+                    <span className="text-white/65">Forecast P10-P90</span>
+                  </span>
+                  <span className="min-w-0 text-right font-mono text-white/80">
                     {hoverPoint.forecastP10Tco2e?.toLocaleString(undefined, { maximumFractionDigits: 0 })} –{" "}
                     {hoverPoint.forecastP90Tco2e?.toLocaleString(undefined, { maximumFractionDigits: 0 })} tCO₂e
                   </span>
@@ -1984,6 +2035,7 @@ function CompactTrendChart({ data }: { data: CompactTrendPoint[] }) {
               </>
             )}
           </m.div>
+          </div>
         )}
       </AnimatePresence>
       </div>
@@ -2310,49 +2362,3 @@ function SnapshotStatBox({
   );
 }
 
-const ALERT_SEVERITY_STYLES: Record<AnomalySeverity, { label: string; className: string }> = {
-  high:   { label: "High",   className: "border-rose-300/40 bg-rose-300/10 text-rose-200" },
-  medium: { label: "Medium", className: "border-amber-300/40 bg-amber-300/10 text-amber-200" },
-  low:    { label: "Low",    className: "border-emerald-200/40 bg-emerald-200/10 text-emerald-100" },
-};
-
-/** "Recent Alerts" row -- real `Anomaly` (see `alerts`'s own comment).
- * Title is derived from `reason`'s own kind prefix (the only structure
- * that field has -- see data-quality page's `REASON_KIND_FILTERS`),
- * falling back to the raw `source` if the prefix isn't one of the 4
- * known kinds. */
-// Icon per real reason-kind prefix (the only 4 that exist in
-// `meta.anomalies`, same vocabulary `data-quality/page.tsx`'s own
-// `REASON_KIND_FILTERS` uses) -- purely presentational variety, not a
-// claim about severity; falls back to `AlertTriangle` for anything else.
-const ALERT_KIND_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
-  missing_value: Database,
-  out_of_range: AlertCircle,
-  statistical_outlier: TrendingUp,
-  ml_outlier: AlertTriangle,
-};
-
-function AlertRow({ a }: { a: Anomaly }) {
-  const sev = ALERT_SEVERITY_STYLES[a.severity];
-  const kindRaw = a.reason.split(":")[0]?.trim();
-  const kind = kindRaw?.replace(/_/g, " ");
-  const title = kind && kind.length < 40 ? kind.replace(/^\w/, (c) => c.toUpperCase()) : a.source;
-  const Icon = (kindRaw ? ALERT_KIND_ICONS[kindRaw] : undefined) ?? AlertTriangle;
-  return (
-    <li className="flex items-start gap-2.5 py-2">
-      <span className="mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-md bg-rose-300/10 text-rose-200">
-        <Icon className="h-3.5 w-3.5" />
-      </span>
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center justify-between gap-2">
-          <p className="truncate text-xs font-medium text-white/90">{title}</p>
-          <span className={cn("shrink-0 rounded-md border px-1.5 py-0.5 text-[10px] font-medium", sev.className)}>
-            {sev.label}
-          </span>
-        </div>
-        <p className="truncate text-[11px] text-white/50">{a.reason}</p>
-        <p className="mt-0.5 text-[10px] text-white/35">{formatRelativeTime(a.detected_at)}</p>
-      </div>
-    </li>
-  );
-}

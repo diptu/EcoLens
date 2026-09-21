@@ -580,7 +580,11 @@ dbt transforms raw data into analytics-ready datasets used by:
 
 # 🧠 ML & Forecasting
 
-The forecasting system is designed as a multi-model architecture.
+Multiple architectures (LSTM, TFT, TimesFM) are trained and evaluated
+against the same walk-forward harness, but exactly one — LSTM today — is
+ever live-served at a time. There is no runtime ensemble/blend across
+them; picking a winner is a deliberate promotion decision made from the
+walk-forward numbers below, not an automatic combination of all three.
 
 ```text
                  Curated Energy Data
@@ -594,7 +598,11 @@ The forecasting system is designed as a multi-model architecture.
           │              │              │
           └──────────────┼──────────────┘
                          ▼
-                 Forecast Ensemble
+              Walk-Forward Evaluation
+              (MAPE / RMSE / coverage)
+                         │
+                         ▼
+         Single Production Model (LSTM today)
                          │
                          ▼
               Probabilistic Output

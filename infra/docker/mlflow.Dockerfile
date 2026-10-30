@@ -38,7 +38,7 @@ ENV PATH="/opt/venv/bin:$PATH"
 # actual resolved `mlflow` version (not its `pyproject.toml` floor)
 # whenever that dependency bumps.
 RUN pip install --no-cache-dir \
-        mlflow==3.15.0 \
+        mlflow==3.17.2 \
         psycopg2-binary==2.9.10 \
         boto3==1.35.99
 

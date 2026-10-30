@@ -18,6 +18,14 @@ class _OkRedis:
     async def ping(self):
         return True
 
+    async def execute_command(self, *args):
+        return [b"master", 0, []]
+
+
+class _ReplicaRedis(_OkRedis):
+    async def execute_command(self, *args):
+        return [b"slave", "203.0.113.7", 6379, b"connected", 0]
+
 
 class _FailingRedis:
     async def ping(self):
@@ -120,3 +128,19 @@ class TestReadyz:
 
         assert response.status_code == 503
         assert response.json()["model"]["ok"] is False
+
+    def test_not_ready_when_redis_is_a_read_only_replica(self, client):
+        app.dependency_overrides[get_db] = lambda: _OkSession()
+        app.dependency_overrides[get_redis_client] = lambda: _ReplicaRedis()
+        app.dependency_overrides[get_model_registry] = lambda: _FakeRegistry(
+            bundle=object()
+        )
+        try:
+            response = client.get("/v1/readyz")
+        finally:
+            app.dependency_overrides.clear()
+
+        assert response.status_code == 503
+        body = response.json()
+        assert body["redis"]["ok"] is False
+        assert "slave" in body["redis"]["detail"]

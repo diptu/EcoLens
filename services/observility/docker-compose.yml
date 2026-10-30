@@ -90,7 +90,7 @@ services:
       - --storage.tsdb.path=/prometheus
       - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}
     ports:
-      - "9091:9090"
+      - "127.0.0.1:9091:9090"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
       interval: 10s
@@ -117,7 +117,7 @@ services:
     image: gcr.io/cadvisor/cadvisor:v0.49.1
     <<: *common-env
     ports:
-      - "8085:8080"
+      - "127.0.0.1:8085:8080"
     volumes:
       - /:/rootfs:ro
       - /var/run:/var/run:ro
@@ -166,7 +166,7 @@ services:
       - --config.file=/config/alertmanager.yml
       - --storage.path=/alertmanager
     ports:
-      - "9094:9093"
+      - "127.0.0.1:9094:9093"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:9093/-/healthy"]
       interval: 10s
@@ -194,7 +194,7 @@ services:
       - -config.file=/etc/loki/loki-config.yml
       - -config.expand-env=true
     ports:
-      - "3101:3100"
+      - "127.0.0.1:3101:3100"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3100/ready"]
       interval: 10s
@@ -237,10 +237,10 @@ services:
     command:
       - --config=/etc/otelcol/config.yml
     ports:
-      - "4317:4317"   # OTLP gRPC -- point a service's OTEL_EXPORTER_OTLP_ENDPOINT here
-      - "4318:4318"   # OTLP HTTP
-      - "8888:8888"   # collector's own metrics (scraped by prometheus.yml)
-      - "13133:13133" # health_check extension -- no container-level healthcheck
+      - "127.0.0.1:4317:4317"   # OTLP gRPC -- point a service's OTEL_EXPORTER_OTLP_ENDPOINT here
+      - "127.0.0.1:4318:4318"   # OTLP HTTP
+      - "127.0.0.1:8888:8888"   # collector's own metrics (scraped by prometheus.yml)
+      - "127.0.0.1:13133:13133" # health_check extension -- no container-level healthcheck
                        # possible (image has no shell), see README.md's own note
     depends_on:
       tempo:
@@ -269,7 +269,7 @@ services:
       - -config.file=/etc/tempo/tempo-config.yml
       - -config.expand-env=true
     ports:
-      - "3200:3200"   # Tempo's own query API (Grafana datasource)
+      - "127.0.0.1:3200:3200"   # Tempo's own query API (Grafana datasource)
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3200/ready"]
       interval: 10s
@@ -293,7 +293,7 @@ services:
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafanadata:/var/lib/grafana
     ports:
-      - "3002:3000"
+      - "127.0.0.1:3002:3000"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
       interval: 10s

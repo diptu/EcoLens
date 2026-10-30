@@ -29,6 +29,9 @@ def test_readyz_is_excluded_even_though_it_starts_with_v1(client):
         async def ping(self):
             return True
 
+        async def execute_command(self, *args):
+            return [b"master", 0, []]
+
     class _FakeRegistry:
         bundle = object()
 

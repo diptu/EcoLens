@@ -39,7 +39,7 @@ x-common-env: &common-env
 # data that needs to match a shared remote source of truth the way the
 # Postgres-backed tables above do.
 x-service-urls: &service-urls
-  REDIS_URL: redis://redis:6379/0
+  REDIS_URL: redis://:${REDIS_PASSWORD:-}@redis:6379/0
   RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
   MLFLOW_TRACKING_URI: http://mlflow:5000
 
@@ -78,7 +78,7 @@ services:
       # this service, with nothing wrong in the repo itself. Container-
       # to-container traffic (e.g. `warehouse` -> `postgres:5432`) is
       # unaffected either way -- only the host-side mapping changes.
-      - "${POSTGRES_HOST_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./infra/docker/postgres/init:/docker-entrypoint-initdb.d:ro
@@ -93,13 +93,13 @@ services:
     image: rabbitmq:3.13-management-alpine
     <<: *common-env
     ports:
-      - "5672:5672"    # AMQP
-      - "15672:15672"  # management UI
+      - "127.0.0.1:5672:5672"    # AMQP
+      - "127.0.0.1:15672:15672"  # management UI
       # `rabbitmq_prometheus` (enabled via the mounted `enabled_plugins`
       # below) -- real queue-depth/DLQ metrics for `services/observility`
       # to scrape (`TODO.md` Observability Phase 5's "Pipeline Health
       # Alarms" DLQ/queue-depth gap: no service exported one before this).
-      - "15692:15692"
+      - "127.0.0.1:15692:15692"
     volumes:
       - rabbitmqdata:/var/lib/rabbitmq
       - ./infra/docker/rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
@@ -122,7 +122,7 @@ services:
         fi
       "
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redisdata:/data
     healthcheck:
@@ -140,8 +140,8 @@ services:
       MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-minioadmin}
     command: server /data --console-address ":9001"
     ports:
-      - "9000:9000"   # S3 API
-      - "9001:9001"   # web console
+      - "127.0.0.1:9000:9000"   # S3 API
+      - "127.0.0.1:9001:9001"   # web console
     volumes:
       - miniodata:/data
     healthcheck:
@@ -221,7 +221,7 @@ services:
         --backend-store-uri postgresql://${POSTGRES_USER:-ecolens}:${POSTGRES_PASSWORD:-ecolens}@postgres:5432/${POSTGRES_DB:-ecolens}
         --default-artifact-root s3://${S3_BUCKET_MODELS:-ecolens}/mlflow
     ports:
-      - "${MLFLOW_HOST_PORT:-5000}:5000"
+      - "127.0.0.1:${MLFLOW_HOST_PORT:-5000}:5000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -253,7 +253,7 @@ services:
     environment:
       <<: *service-urls
     ports:
-      - "8003:8003"
+      - "127.0.0.1:8003:8003"
     volumes:
       - duckdb_staging:/app/services/ingestion/data/staging
     depends_on:
@@ -360,7 +360,7 @@ services:
     environment:
       <<: *service-urls
     ports:
-      - "8004:8004"
+      - "127.0.0.1:8004:8004"
     volumes:
       - duckdb_staging:/app/services/waerehouse/data/staging:ro
     depends_on:
@@ -483,7 +483,7 @@ services:
     environment:
       <<: [*service-urls, *mlflow-s3-env]
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -508,7 +508,7 @@ services:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     depends_on:
       - alertmanager
 
@@ -545,7 +545,7 @@ services:
       alertmanager-config:
         condition: service_completed_successfully
     ports:
-      - "9093:9093"
+      - "127.0.0.1:9093:9093"
 
   grafana:
     image: grafana/grafana:11.2.0
@@ -557,7 +557,7 @@ services:
       - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafana:/var/lib/grafana
     ports:
-      - "3001:3000"
+      - "127.0.0.1:3001:3000"
     depends_on:
       - prometheus
 
@@ -565,7 +565,7 @@ services:
     image: grafana/loki:3.2.1
     command: -config.file=/etc/loki/local-config.yaml
     ports:
-      - "3100:3100"
+      - "127.0.0.1:3100:3100"
 
 # ── Volumes ──────────────────────────────────────────────────────────────────
 volumes:

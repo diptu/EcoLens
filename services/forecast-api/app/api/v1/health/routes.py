@@ -44,7 +44,15 @@ async def readyz(
 
     try:
         await redis.ping()
-        redis_component = ReadyComponent(ok=True)
+        # PING still answers on a read-only replica (e.g. an exposed Redis
+        # hijacked via REPLICAOF), while every cache write 500s.
+        role = (await redis.execute_command("ROLE"))[0]
+        if role in (b"master", "master"):
+            redis_component = ReadyComponent(ok=True)
+        else:
+            redis_component = ReadyComponent(
+                ok=False, detail=f"redis is a read-only {role!r}, not master"
+            )
     except Exception as exc:
         redis_component = ReadyComponent(ok=False, detail=str(exc))
 

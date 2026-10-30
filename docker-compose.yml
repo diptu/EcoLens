@@ -40,7 +40,7 @@ x-common-env: &common-env
 # Postgres-backed tables above do.
 x-service-urls: &service-urls
   REDIS_URL: redis://:${REDIS_PASSWORD:-}@redis:6379/0
-  RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+  RABBITMQ_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASSWORD:-guest}@rabbitmq:5672/
   MLFLOW_TRACKING_URI: http://mlflow:5000
 
 # `api`/`train-worker` only -- the MLflow *server* (below) already has
@@ -92,6 +92,11 @@ services:
   rabbitmq:
     image: rabbitmq:3.13-management-alpine
     <<: *common-env
+    # Only applied when the data volume is first initialised -- rotating
+    # on an existing volume also needs `rabbitmqctl change_password`.
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
     ports:
       - "127.0.0.1:5672:5672"    # AMQP
       - "127.0.0.1:15672:15672"  # management UI
@@ -550,7 +555,7 @@ services:
   grafana:
     image: grafana/grafana:11.2.0
     environment:
-      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
       GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
       - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro

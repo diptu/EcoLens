@@ -167,11 +167,19 @@ def test_train_endpoint_rejects_an_unknown_architecture(client):
     assert response.status_code == 422
 
 
-def test_train_endpoint_requires_no_auth(client):
-    # Deliberately open, same reasoning as data-pipeline's identical
-    # endpoint had -- this asserts the *absence* of a role gate, not a
-    # specific role.
-    response = client.post("/v1/model/train", json={})
+def test_train_endpoint_requires_no_auth(anon_client):
+    # Deliberately open (the dashboard's Train button has no login) --
+    # cooldown-limited instead, see `test_admin_auth.py`. This asserts the
+    # *absence* of an auth gate.
+    class _NxRedis:
+        async def set(self, key, value, ex=None, nx=False):
+            return True
+
+    app.dependency_overrides[get_redis_client] = lambda: _NxRedis()
+    try:
+        response = anon_client.post("/v1/model/train", json={})
+    finally:
+        app.dependency_overrides.clear()
 
     assert response.status_code != 401
     assert response.status_code != 403

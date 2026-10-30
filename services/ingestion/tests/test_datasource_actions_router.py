@@ -161,9 +161,9 @@ def wired(monkeypatch):
 
 
 class TestTriggerRun:
-    def test_no_auth_required(self, client, wired):
+    def test_no_auth_required(self, anon_client, wired):
         """Trigger is deliberately open — no bearer token needed at all."""
-        response = client.post("/v1/data-sources/ds-bom/run")
+        response = anon_client.post("/v1/data-sources/ds-bom/run")
 
         assert response.status_code == 202
 
@@ -233,9 +233,9 @@ class TestTriggerBackfill:
         body.update(overrides)
         return body
 
-    def test_no_auth_required(self, client, wired):
+    def test_no_auth_required(self, anon_client, wired):
         """Trigger is deliberately open — no bearer token needed at all."""
-        response = client.post("/v1/data-sources/ds-bom/backfill", json=self._body())
+        response = anon_client.post("/v1/data-sources/ds-bom/backfill", json=self._body())
 
         assert response.status_code == 202
 

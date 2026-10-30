@@ -62,6 +62,13 @@ class Settings(BaseSettings):
     model_reload_interval_seconds: float = 60.0
 
     forecast_cache_ttl_seconds: int = 60
+
+    # `app/core/security.py`: gates model tune/import/evaluate/promote/
+    # delete. Unset = those routes are disabled (fail closed).
+    admin_api_token: str | None = Field(default=None, validation_alias="ADMIN_API_TOKEN")
+    # Public `POST /v1/model/train` (the dashboard's Train button) may
+    # queue at most one job per this window; an admin token bypasses it.
+    public_train_cooldown_seconds: int = 1800
     # `GET /v1/model/drift` -- `compute_drift` re-scans two chronological
     # slices of real training data per call (confirmed live: 7-8s,
     # uncached, before 2026-08-11). Real feature distributions don't

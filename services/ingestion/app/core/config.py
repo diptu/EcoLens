@@ -72,6 +72,10 @@ class Settings(BaseSettings):
     # Redis — circuit-breaker state (Phase 1) + the backfill lock. Same
     # shared instance data-pipeline uses today.
     redis_url_env: str | None = Field(default=None, validation_alias="REDIS_URL")
+
+    # `app/core/admin.py`: gates write routes the dashboard never calls.
+    # Unset = those routes are disabled (fail closed).
+    admin_api_token: str | None = Field(default=None, validation_alias="ADMIN_API_TOKEN")
     redis_host: str = "localhost"
     redis_port: int = 6379
     redis_db: int = 0

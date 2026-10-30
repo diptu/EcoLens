@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_app_settings, get_log_db, get_model_registry, get_redis_client
 from app.core.errors import ApiError
+from app.core.security import optional_admin, require_admin
 from app.schemas.model import (
     DriftListResponse,
     DriftReportOut,
@@ -89,7 +90,25 @@ router = APIRouter(prefix="/v1", tags=["model"])
 @router.post("/model/train", response_model=TrainTriggerResponse, status_code=202)
 async def trigger_training_endpoint(
     body: TrainRequest = TrainRequest(),
+    redis: Redis = Depends(get_redis_client),
+    settings: Settings = Depends(get_app_settings),
+    admin: bool = Depends(optional_admin),
 ) -> TrainTriggerResponse:
+    # Public (the dashboard's Train button has no login), so cap it at one
+    # queued job per cooldown window -- SET NX makes the check atomic.
+    if not admin:
+        acquired = await redis.set(
+            "model:train:public_cooldown",
+            "1",
+            ex=settings.public_train_cooldown_seconds,
+            nx=True,
+        )
+        if not acquired:
+            raise ApiError(
+                429,
+                "train_cooldown",
+                "A training job was triggered recently -- try again later.",
+            )
     return await trigger_training(
         body.regions,
         body.window_hours,
@@ -123,7 +142,7 @@ async def get_training_runs(
     return response
 
 
-@router.post("/model/tune", response_model=TuneTriggerResponse)
+@router.post("/model/tune", response_model=TuneTriggerResponse, dependencies=[Depends(require_admin)])
 async def trigger_tune_endpoint(
     body: TuneTriggerRequest = TuneTriggerRequest(),
     settings: Settings = Depends(get_app_settings),
@@ -377,7 +396,12 @@ async def get_model_versions(
     )
 
 
-@router.post("/model/versions/import", response_model=ModelImportResponse, status_code=201)
+@router.post(
+    "/model/versions/import",
+    response_model=ModelImportResponse,
+    status_code=201,
+    dependencies=[Depends(require_admin)],
+)
 async def import_model_version(
     file: UploadFile = File(...),
     uploaded_by: str | None = Form(default=None),
@@ -430,7 +454,10 @@ async def import_model_version(
 
 
 @router.post(
-    "/model/versions/import-onnx", response_model=ModelImportResponse, status_code=201
+    "/model/versions/import-onnx",
+    response_model=ModelImportResponse,
+    status_code=201,
+    dependencies=[Depends(require_admin)],
 )
 async def import_onnx_model_version(
     file: UploadFile = File(...),
@@ -528,7 +555,9 @@ async def get_model_version_loss_curve(
 
 
 @router.post(
-    "/model/versions/{version}/evaluate", response_model=EvaluationSummaryOut
+    "/model/versions/{version}/evaluate",
+    response_model=EvaluationSummaryOut,
+    dependencies=[Depends(require_admin)],
 )
 async def evaluate_model_version(
     version: str,
@@ -691,7 +720,9 @@ async def get_model_version_evaluation_history(
     )
 
 
-@router.post("/model/versions/{version}/promote", response_model=ModelVersionOut)
+@router.post(
+    "/model/versions/{version}/promote", response_model=ModelVersionOut, dependencies=[Depends(require_admin)]
+)
 async def promote_model_version(
     version: str,
     body: PromoteModelRequest,
@@ -717,7 +748,7 @@ async def promote_model_version(
     )
 
 
-@router.delete("/model/versions/{version}", status_code=204)
+@router.delete("/model/versions/{version}", status_code=204, dependencies=[Depends(require_admin)])
 async def delete_model_version_route(
     version: str,
     model_name: str | None = None,

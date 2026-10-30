@@ -25,6 +25,7 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_app_settings, get_db, get_redis_client
+from app.core.admin import require_admin
 from app.core.config import Settings
 from app.models.datasources import CATALOG_BY_ID
 from app.schemas.datasources import (
@@ -100,7 +101,7 @@ async def get_data_source_endpoint(
     return await get_data_source(db, redis, settings, id)
 
 
-@router.patch("/{id}", response_model=DataSourceOut)
+@router.patch("/{id}", response_model=DataSourceOut, dependencies=[Depends(require_admin)])
 async def patch_data_source_endpoint(
     id: str,
     body: PatchDataSourceRequest,

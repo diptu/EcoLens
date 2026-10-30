@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_db
+from app.core.admin import require_admin
 from app.core.errors import ApiError
 from app.schemas.anomalies import (
     AnomalyContextResponse,
@@ -117,7 +118,7 @@ async def get_anomaly_context_endpoint(
     return AnomalyContextResponse(**result)
 
 
-@router.patch("/{anomaly_id}", response_model=AnomalyOut)
+@router.patch("/{anomaly_id}", response_model=AnomalyOut, dependencies=[Depends(require_admin)])
 async def update_anomaly_status_endpoint(
     anomaly_id: str,
     body: UpdateAnomalyStatusRequest,

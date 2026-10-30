@@ -49,12 +49,15 @@ node_modules/
 services/dashboard/.next/
 *.tsbuildinfo
 
-# Env files -- never let a real secret ride into an image layer, even
-# as defense in depth beyond "no Dockerfile COPYs .env directly" (none
-# do today -- this doesn't fix a live leak, it forecloses a future one).
-.env
-.env.*
-!*.env.example
+# Env files -- never let a real secret ride into an image layer. `**/`
+# is required: a bare `.env` only matches the context root, and the
+# V2.0.0 images shipped services/*/.env and flow.env through
+# `COPY services/<svc> .` (found 2026-10-30).
+**/.env
+**/.env.*
+**/flow.env
+!**/*.env.example
+!**/.env.example
 
 # Local runtime data artifacts -- real, git-tracked files meant as dev
 # bootstrap/seed data, not something a fresh prod container should ship

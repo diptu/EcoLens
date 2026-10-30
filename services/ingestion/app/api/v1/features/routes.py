@@ -21,6 +21,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.deps import get_app_settings, get_log_db, get_redis_client
+from app.core.admin import require_admin
 from app.core.config import Settings
 from app.core.errors import ApiError
 from app.core.response_cache import cached_response
@@ -34,7 +35,7 @@ from app.service.features.rebuild import FeatureSelectionSourceMissing, rebuild_
 router = APIRouter(prefix="/v1/features", tags=["features"])
 
 
-@router.post("/rebuild", response_model=FeatureRebuildTriggerResponse)
+@router.post("/rebuild", response_model=FeatureRebuildTriggerResponse, dependencies=[Depends(require_admin)])
 async def trigger_feature_rebuild(
     db: AsyncSession = Depends(get_log_db),
     redis: Redis = Depends(get_redis_client),

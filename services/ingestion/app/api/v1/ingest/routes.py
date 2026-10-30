@@ -42,6 +42,7 @@ from redis.asyncio import Redis
 
 from app.api.v1.deps import get_redis_client
 from app.core.errors import ApiError
+from app.core.admin import require_admin
 from app.core.logging import get_logger
 from app.schemas.ingest import (
     BackfillableSourceKey,
@@ -60,7 +61,7 @@ log = get_logger(__name__)
 router = APIRouter(prefix="/v1/ingest", tags=["ingest"])
 
 
-@router.post("/{source}", response_model=IngestResponse)
+@router.post("/{source}", response_model=IngestResponse, dependencies=[Depends(require_admin)])
 async def ingest_source_endpoint(
     source: IngestSourceKey,
     body: IngestRequest = IngestRequest(),
@@ -88,6 +89,7 @@ async def ingest_source_endpoint(
     "/{source}/backfill",
     response_model=IngestBackfillTriggerResponse,
     status_code=202,
+    dependencies=[Depends(require_admin)],
 )
 async def ingest_backfill_endpoint(
     source: BackfillableSourceKey,
